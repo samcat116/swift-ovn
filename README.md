@@ -1,4 +1,4 @@
-# OVNManager
+# SwiftOVN
 
 A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (Open vSwitch) through their JSON-RPC APIs over Unix domain sockets.
 
@@ -14,11 +14,11 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 
 ## Installation
 
-Add OVNManager to your Swift package dependencies:
+Add SwiftOVN to your Swift package dependencies:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/your-username/OVNManager.git", from: "1.0.0")
+    .package(url: "https://github.com/samcat116/SwiftOVN.git", from: "1.0.0")
 ]
 ```
 
@@ -27,18 +27,18 @@ dependencies: [
 ### OVN Management
 
 ```swift
-import OVNManager
+import SwiftOVN
 
 // Connect to OVN Northbound database
-let ovnManager = OVNManager(socketPath: "/var/run/ovn/ovnnb_db.sock")
-try await ovnManager.connect()
+let SwiftOVN = SwiftOVN(socketPath: "/var/run/ovn/ovnnb_db.sock")
+try await SwiftOVN.connect()
 
 // Create a logical switch
 let switch = OVNLogicalSwitch(
     name: "my-switch",
     external_ids: ["description": "My test switch"]
 )
-let switchUUID = try await ovnManager.createLogicalSwitch(switch)
+let switchUUID = try await SwiftOVN.createLogicalSwitch(switch)
 
 // Create a logical switch port
 let port = OVNLogicalSwitchPort(
@@ -46,17 +46,17 @@ let port = OVNLogicalSwitchPort(
     addresses: ["02:ac:10:ff:01:30 10.0.0.10"],
     port_security: ["02:ac:10:ff:01:30 10.0.0.10"]
 )
-let portUUID = try await ovnManager.createLogicalSwitchPort(port)
+let portUUID = try await SwiftOVN.createLogicalSwitchPort(port)
 
 // Get all logical switches
-let switches = try await ovnManager.getLogicalSwitches()
+let switches = try await SwiftOVN.getLogicalSwitches()
 print("Found \\(switches.count) logical switches")
 ```
 
 ### OVS Management
 
 ```swift
-import OVNManager
+import SwiftOVN
 
 // Connect to OVS database
 let ovsManager = OVSManager(socketPath: "/var/run/openvswitch/db.sock")
@@ -86,10 +86,10 @@ print("Bridge statistics: \\(stats)")
 
 ```swift
 // Start monitoring OVN database changes
-let monitorId = try await ovnManager.startMonitoring(tables: ["Logical_Switch", "Logical_Switch_Port"])
+let monitorId = try await SwiftOVN.startMonitoring(tables: ["Logical_Switch", "Logical_Switch_Port"])
 
 // Process updates in real-time
-for try await update in ovnManager.monitorUpdates() {
+for try await update in SwiftOVN.monitorUpdates() {
     if let newRow = update.new {
         print("Row updated: \\(newRow)")
     }
@@ -99,7 +99,7 @@ for try await update in ovnManager.monitorUpdates() {
 }
 
 // Stop monitoring when done
-try await ovnManager.stopMonitoring(monitorId: monitorId)
+try await SwiftOVN.stopMonitoring(monitorId: monitorId)
 ```
 
 ## Architecture
@@ -109,7 +109,7 @@ try await ovnManager.stopMonitoring(monitorId: monitorId)
 - **JSONRPCClient**: Low-level JSON-RPC communication over Unix sockets
 - **UnixSocketConnection**: SwiftNIO-based Unix domain socket handling
 - **OVSDBConnection**: OVSDB protocol implementation with monitoring support
-- **OVNManager**: High-level interface for OVN operations
+- **SwiftOVN**: High-level interface for OVN operations
 - **OVSManager**: High-level interface for OVS operations
 
 ### Models
@@ -147,7 +147,7 @@ let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 2)
 var logger = Logger(label: "my-ovn-app")
 logger.logLevel = .debug
 
-let ovnManager = OVNManager(
+let SwiftOVN = SwiftOVN(
     socketPath: "/custom/path/to/ovnnb_db.sock",
     database: OVNDatabase.northbound,
     eventLoopGroup: eventLoopGroup,
@@ -159,9 +159,9 @@ let ovnManager = OVNManager(
 
 ```swift
 // Find logical switches with specific external IDs
-let switches = try await ovnManager.getLogicalSwitches()
-let productionSwitches = switches.filter { 
-    $0.external_ids?["environment"] == "production" 
+let switches = try await SwiftOVN.getLogicalSwitches()
+let productionSwitches = switches.filter {
+    $0.external_ids?["environment"] == "production"
 }
 
 // Create ACL with specific conditions
@@ -173,7 +173,7 @@ let acl = OVNACL(
     log: true,
     name: "allow-web-traffic"
 )
-try await ovnManager.createACL(acl)
+try await SwiftOVN.createACL(acl)
 ```
 
 ### Flow Management with OVS
@@ -198,13 +198,13 @@ The package provides comprehensive error handling:
 
 ```swift
 do {
-    try await ovnManager.connect()
-    let switches = try await ovnManager.getLogicalSwitches()
-} catch OVNManagerError.connectionFailed(let message) {
+    try await SwiftOVN.connect()
+    let switches = try await SwiftOVN.getLogicalSwitches()
+} catch SwiftOVNError.connectionFailed(let message) {
     print("Connection failed: \\(message)")
-} catch OVNManagerError.timeoutError {
+} catch SwiftOVNError.timeoutError {
     print("Operation timed out")
-} catch OVNManagerError.rpcError(let rpcError) {
+} catch SwiftOVNError.rpcError(let rpcError) {
     print("RPC Error: \\(rpcError.message)")
 } catch {
     print("Unexpected error: \\(error)")
