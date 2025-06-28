@@ -163,20 +163,27 @@ private final class LineDelimitedFrameDecoder: ByteToMessageDecoder {
     typealias InboundOut = String
     
     func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        guard let string = buffer.readString(length: buffer.readableBytes) else {
-            return .needMoreData
-        }
-        
-        // Split by newlines for JSON-RPC over lines
-        let lines = string.components(separatedBy: .newlines)
-        for line in lines {
+        // Look for a newline in the buffer
+        if let newlineIndex = buffer.withUnsafeReadableBytes({ bytes in
+            bytes.firstIndex(of: UInt8(ascii: "\n"))
+        }) {
+            // Read up to and including the newline
+            guard let line = buffer.readString(length: newlineIndex + 1) else {
+                return .needMoreData
+            }
+            
+            // Trim whitespace and newlines, then fire the message
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 context.fireChannelRead(wrapInboundOut(trimmed))
             }
+            
+            // Continue processing if there's more data
+            return .continue
         }
         
-        return .continue
+        // No complete line yet, wait for more data
+        return .needMoreData
     }
 }
 
