@@ -566,40 +566,80 @@ public final class OVSManager: OVSManaging {
     // MARK: - Statistics Operations
     
     public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
-        // This would typically require parsing statistics from the Bridge table
+        // Bridge statistics are available in the status column
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(bridge))
-        let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["statistics"])
+        let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["status", "other_config"])
         
-        guard let firstRow = rows.first,
-              let stats = firstRow["statistics"] else {
+        guard let firstRow = rows.first else {
             return [:]
         }
         
-        return convertJSONValueToObject(stats) as? [String: Any] ?? [:]
+        var result: [String: Any] = [:]
+        
+        // Add status information
+        if let status = firstRow["status"] {
+            result["status"] = convertJSONValueToObject(status)
+        }
+        
+        // Add other_config information  
+        if let otherConfig = firstRow["other_config"] {
+            result["other_config"] = convertJSONValueToObject(otherConfig)
+        }
+        
+        return result
     }
     
     public func getPortStatistics(port: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(port))
-        let rows = try await connection.select(from: OVSTable.port, in: database, where: [condition], columns: ["statistics"])
+        let rows = try await connection.select(from: OVSTable.port, in: database, where: [condition], columns: ["status", "external_ids", "other_config"])
         
-        guard let firstRow = rows.first,
-              let stats = firstRow["statistics"] else {
+        guard let firstRow = rows.first else {
             return [:]
         }
         
-        return convertJSONValueToObject(stats) as? [String: Any] ?? [:]
+        var result: [String: Any] = [:]
+        
+        // Add available information
+        if let status = firstRow["status"] {
+            result["status"] = convertJSONValueToObject(status)
+        }
+        
+        if let externalIds = firstRow["external_ids"] {
+            result["external_ids"] = convertJSONValueToObject(externalIds)
+        }
+        
+        if let otherConfig = firstRow["other_config"] {
+            result["other_config"] = convertJSONValueToObject(otherConfig)
+        }
+        
+        return result
     }
     
     public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(interface))
-        let rows = try await connection.select(from: OVSTable.interface, in: database, where: [condition], columns: ["statistics"])
+        let rows = try await connection.select(from: OVSTable.interface, in: database, where: [condition], columns: ["status", "external_ids", "statistics"])
         
-        guard let firstRow = rows.first,
-              let stats = firstRow["statistics"] else {
+        guard let firstRow = rows.first else {
             return [:]
         }
         
-        return convertJSONValueToObject(stats) as? [String: Any] ?? [:]
+        var result: [String: Any] = [:]
+        
+        // Add available information
+        if let status = firstRow["status"] {
+            result["status"] = convertJSONValueToObject(status)
+        }
+        
+        if let externalIds = firstRow["external_ids"] {
+            result["external_ids"] = convertJSONValueToObject(externalIds)
+        }
+        
+        // Interface table might actually have statistics column
+        if let statistics = firstRow["statistics"] {
+            result["statistics"] = convertJSONValueToObject(statistics)
+        }
+        
+        return result
     }
     
     // MARK: - Monitoring
@@ -666,6 +706,35 @@ private extension OVSManager {
         case .string(let string):
             return string
         case .array(let array):
+            // Check if this is an OVSDB UUID format ["uuid", "uuid-string"]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "uuid",
+               case .string(let uuidString) = array[1] {
+                return uuidString
+            }
+            // Check if this is an OVSDB map format ["map", [[key, value], ...]]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "map",
+               case .array(let pairs) = array[1] {
+                var result: [String: Any] = [:]
+                for pair in pairs {
+                    if case .array(let kvPair) = pair,
+                       kvPair.count == 2,
+                       case .string(let key) = kvPair[0] {
+                        result[key] = convertJSONValueToObject(kvPair[1])
+                    }
+                }
+                return result
+            }
+            // Check if this is an OVSDB set format ["set", [items...]]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "set",
+               case .array(let items) = array[1] {
+                return items.map { convertJSONValueToObject($0) }
+            }
             return array.map { convertJSONValueToObject($0) }
         case .object(let object):
             var result: [String: Any] = [:]
@@ -684,16 +753,25 @@ private extension OVSManager {
         } else if let number = object as? NSNumber {
             return .number(number.doubleValue)
         } else if let string = object as? String {
+            // Check if this is a UUID reference (UUID format: 8-4-4-4-12 hex digits)
+            let uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            if string.range(of: uuidPattern, options: .regularExpression) != nil {
+                // OVSDB expects UUID references as ["uuid", "uuid-string"]
+                return .array([.string("uuid"), .string(string)])
+            }
             return .string(string)
         } else if let array = object as? [Any] {
+            // OVSDB expects arrays in the format ["set", [items...]]
             let jsonArray = try array.map { try convertToJSONValue($0) }
-            return .array(jsonArray)
+            return .array([.string("set"), .array(jsonArray)])
         } else if let dict = object as? [String: Any] {
-            var jsonObject: [String: JSONValue] = [:]
+            // OVSDB expects maps in the format ["map", [["key", "value"], ...]]
+            var mapArray: [JSONValue] = []
             for (key, value) in dict {
-                jsonObject[key] = try convertToJSONValue(value)
+                let pair: [JSONValue] = [.string(key), try convertToJSONValue(value)]
+                mapArray.append(.array(pair))
             }
-            return .object(jsonObject)
+            return .array([.string("map"), .array(mapArray)])
         } else {
             throw OVNManagerError.encodingError(
                 NSError(domain: "OVSManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported type for JSON conversion"])

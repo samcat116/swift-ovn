@@ -19,7 +19,15 @@ public final class OVSDBConnection {
     
     public func connect() async throws {
         try await client.connect()
-        logger.info("Connected to OVSDB")
+        
+        // Send initial echo request to establish OVSDB connection
+        do {
+            _ = try await client.echo()
+            logger.info("Connected to OVSDB")
+        } catch {
+            logger.error("Failed to establish OVSDB connection: \(error)")
+            throw error
+        }
     }
     
     public func disconnect() async throws {
@@ -55,16 +63,25 @@ public final class OVSDBConnection {
         let operation = OVSDBOperation(
             op: "select",
             table: table,
+            whereConditions: [],  // Empty where clause to select all rows
             columns: columns
         )
         
         let results = try await client.transact(database: database, operations: [operation])
         
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let rows = resultObject["rows"],
-              case .array(let rowsArray) = rows else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid select response format")
+        }
+        
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Select operation failed: \(errorMessage)")
+        }
+        
+        guard let rows = resultObject["rows"],
+              case .array(let rowsArray) = rows else {
+            throw OVNManagerError.invalidResponse("Invalid select response format: missing rows field")
         }
         
         return try rowsArray.map { jsonValue in
@@ -91,10 +108,18 @@ public final class OVSDBConnection {
         let results = try await client.transact(database: database, operations: [operation])
         
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let rows = resultObject["rows"],
-              case .array(let rowsArray) = rows else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid select response format")
+        }
+        
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Select operation failed: \(errorMessage)")
+        }
+        
+        guard let rows = resultObject["rows"],
+              case .array(let rowsArray) = rows else {
+            throw OVNManagerError.invalidResponse("Invalid select response format: missing rows field")
         }
         
         return try rowsArray.map { jsonValue in
@@ -137,10 +162,19 @@ public final class OVSDBConnection {
         let results = try await client.transact(database: database, operations: [operation])
         
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let count = resultObject["count"],
-              case .number(let countValue) = count else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+        
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Update operation failed: \(errorMessage)")
+        }
+        
+        // Look for count field
+        guard let count = resultObject["count"],
+              case .number(let countValue) = count else {
+            throw OVNManagerError.invalidResponse("Invalid update response format: missing count field")
         }
         
         return Int(countValue)
@@ -160,10 +194,19 @@ public final class OVSDBConnection {
         let results = try await client.transact(database: database, operations: [operation])
         
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let count = resultObject["count"],
-              case .number(let countValue) = count else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid delete response format")
+        }
+        
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Delete operation failed: \(errorMessage)")
+        }
+        
+        // Look for count field
+        guard let count = resultObject["count"],
+              case .number(let countValue) = count else {
+            throw OVNManagerError.invalidResponse("Invalid delete response format: missing count field")
         }
         
         return Int(countValue)

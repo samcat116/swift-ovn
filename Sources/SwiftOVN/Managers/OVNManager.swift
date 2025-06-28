@@ -640,6 +640,35 @@ private extension OVNManager {
         case .string(let string):
             return string
         case .array(let array):
+            // Check if this is an OVSDB UUID format ["uuid", "uuid-string"]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "uuid",
+               case .string(let uuidString) = array[1] {
+                return uuidString
+            }
+            // Check if this is an OVSDB map format ["map", [[key, value], ...]]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "map",
+               case .array(let pairs) = array[1] {
+                var result: [String: Any] = [:]
+                for pair in pairs {
+                    if case .array(let kvPair) = pair,
+                       kvPair.count == 2,
+                       case .string(let key) = kvPair[0] {
+                        result[key] = convertJSONValueToObject(kvPair[1])
+                    }
+                }
+                return result
+            }
+            // Check if this is an OVSDB set format ["set", [items...]]
+            if array.count == 2,
+               case .string(let typeStr) = array[0],
+               typeStr == "set",
+               case .array(let items) = array[1] {
+                return items.map { convertJSONValueToObject($0) }
+            }
             return array.map { convertJSONValueToObject($0) }
         case .object(let object):
             var result: [String: Any] = [:]
@@ -658,16 +687,25 @@ private extension OVNManager {
         } else if let number = object as? NSNumber {
             return .number(number.doubleValue)
         } else if let string = object as? String {
+            // Check if this is a UUID reference (UUID format: 8-4-4-4-12 hex digits)
+            let uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            if string.range(of: uuidPattern, options: .regularExpression) != nil {
+                // OVSDB expects UUID references as ["uuid", "uuid-string"]
+                return .array([.string("uuid"), .string(string)])
+            }
             return .string(string)
         } else if let array = object as? [Any] {
+            // OVSDB expects arrays in the format ["set", [items...]]
             let jsonArray = try array.map { try convertToJSONValue($0) }
-            return .array(jsonArray)
+            return .array([.string("set"), .array(jsonArray)])
         } else if let dict = object as? [String: Any] {
-            var jsonObject: [String: JSONValue] = [:]
+            // OVSDB expects maps in the format ["map", [["key", "value"], ...]]
+            var mapArray: [JSONValue] = []
             for (key, value) in dict {
-                jsonObject[key] = try convertToJSONValue(value)
+                let pair: [JSONValue] = [.string(key), try convertToJSONValue(value)]
+                mapArray.append(.array(pair))
             }
-            return .object(jsonObject)
+            return .array([.string("map"), .array(mapArray)])
         } else {
             throw OVNManagerError.encodingError(
                 NSError(domain: "OVNManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported type for JSON conversion"])
