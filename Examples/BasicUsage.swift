@@ -7,7 +7,7 @@ struct BasicUsageExample {
     static func main() async throws {
         // Configure logging
         var logger = Logger(label: "ovn-example")
-        logger.logLevel = .info
+        logger.logLevel = .debug
 
         print("🚀 OVNManager Basic Usage Example")
         print("==================================")
@@ -38,9 +38,8 @@ struct BasicUsageExample {
             try await ovnManager.connect()
             print("✅ Connected successfully!")
 
-            // List available databases
-            let databases = try await ovnManager.listDatabases()
-            print("📋 Available databases: \(databases)")
+            // Get database schema info
+            print("📋 Connected to OVN Northbound database")
 
             // Create a logical switch
             print("\nCreating logical switch...")
@@ -160,9 +159,8 @@ struct BasicUsageExample {
             try await ovsManager.connect()
             print("✅ Connected successfully!")
 
-            // List available databases
-            let databases = try await ovsManager.listDatabases()
-            print("📋 Available databases: \(databases)")
+            // Get database info
+            print("📋 Connected to OVS database")
 
             // Create a bridge
             print("\nCreating OVS bridge...")
