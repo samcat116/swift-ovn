@@ -47,4 +47,70 @@ public struct OVSBridge: Codable {
         self.rstp_status = rstp_status
         self.stp_enable = stp_enable
     }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        uuid = try container.decodeIfPresent(String.self, forKey: .uuid)
+        name = try container.decode(String.self, forKey: .name)
+        fail_mode = try container.decodeIfPresent(String.self, forKey: .fail_mode)
+        status = try container.decodeIfPresent([String: String].self, forKey: .status)
+        other_config = try container.decodeIfPresent([String: String].self, forKey: .other_config)
+        external_ids = try container.decodeIfPresent([String: String].self, forKey: .external_ids)
+        flow_tables = try container.decodeIfPresent([String: String].self, forKey: .flow_tables)
+        mcast_snooping_enable = try container.decodeIfPresent(Bool.self, forKey: .mcast_snooping_enable)
+        rstp_enable = try container.decodeIfPresent(Bool.self, forKey: .rstp_enable)
+        rstp_status = try container.decodeIfPresent([String: String].self, forKey: .rstp_status)
+        stp_enable = try container.decodeIfPresent(Bool.self, forKey: .stp_enable)
+        
+        // Handle fields that might be single values or arrays
+        ports = try Self.decodeStringArrayOrSingle(from: container, forKey: .ports)
+        mirrors = try Self.decodeStringArrayOrSingle(from: container, forKey: .mirrors)
+        controller = try Self.decodeStringArrayOrSingle(from: container, forKey: .controller)
+        protocols = try Self.decodeStringArrayOrSingle(from: container, forKey: .protocols)
+        
+        // Handle fields that might be single strings or arrays, but we only need the first value
+        netflow = try Self.decodeFirstStringOrNull(from: container, forKey: .netflow)
+        sflow = try Self.decodeFirstStringOrNull(from: container, forKey: .sflow)
+        ipfix = try Self.decodeFirstStringOrNull(from: container, forKey: .ipfix)
+        
+        // Handle flood_vlans which might be a single int or array of ints
+        if container.contains(.flood_vlans) {
+            if let singleValue = try? container.decode(Int.self, forKey: .flood_vlans) {
+                flood_vlans = [singleValue]
+            } else {
+                flood_vlans = try container.decodeIfPresent([Int].self, forKey: .flood_vlans)
+            }
+        } else {
+            flood_vlans = nil
+        }
+    }
+    
+    private static func decodeStringArrayOrSingle(from container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> [String]? {
+        if !container.contains(key) {
+            return nil
+        }
+        
+        if let singleValue = try? container.decode(String.self, forKey: key) {
+            return [singleValue]
+        } else if let arrayValue = try? container.decode([String].self, forKey: key) {
+            return arrayValue
+        } else {
+            return nil
+        }
+    }
+    
+    private static func decodeFirstStringOrNull(from container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> String? {
+        if !container.contains(key) {
+            return nil
+        }
+        
+        if let singleValue = try? container.decode(String.self, forKey: key) {
+            return singleValue
+        } else if let arrayValue = try? container.decode([String].self, forKey: key) {
+            return arrayValue.first
+        } else {
+            return nil
+        }
+    }
 }

@@ -18,7 +18,9 @@ public final class JSONRPCClient {
     }
     
     public func connect() async throws {
+        logger.info("JSONRPCClient: Starting connection process...")
         try await connection.connect().get()
+        logger.info("JSONRPCClient: Connection established successfully")
     }
     
     public func disconnect() async throws {
@@ -46,13 +48,22 @@ public final class JSONRPCClient {
         let id = JSONRPCIdentifier.number(nextRequestId())
         let request = JSONRPCRequest(method: method, params: params, id: id)
         
-        logger.debug("Sending JSON-RPC request: \(method)")
+        logger.debug("Sending JSON-RPC request: \(method) with ID: \(id)")
+        
+        logger.debug("Connection active before send: \(connection.isConnectionActive)")
+        
+        // Set up the response handler before sending to avoid race conditions
+        let responseFuture = connection.receive(
+            as: JSONRPCResponse<T>.self,
+            requestId: id
+        )
         
         try await connection.send(request).get()
+        logger.debug("Message sent successfully, waiting for response...")
         
-        let response: JSONRPCResponse<T> = try await connection.receive(
-            as: JSONRPCResponse<T>.self
-        ).get()
+        let response: JSONRPCResponse<T> = try await responseFuture.get()
+        
+        logger.debug("Received response for request ID: \(id)")
         
         if let error = response.error {
             logger.error("JSON-RPC error response: \(error.message)")
@@ -76,11 +87,26 @@ public final class JSONRPCClient {
     
     // MARK: - OVSDB Specific Methods
     
+    public func echo() async throws -> [String] {
+        logger.info("Performing echo test...")
+        let params = JSONRPCParams.array([.string("echo")])
+        let result = try await call(
+            method: "echo",
+            params: params,
+            responseType: [String].self
+        )
+        logger.info("Echo test completed successfully")
+        return result
+    }
+    
     public func listDatabases() async throws -> [String] {
-        return try await call(
+        logger.info("Listing databases...")
+        let result = try await call(
             method: "list_dbs",
             responseType: [String].self
         )
+        logger.info("Found \(result.count) databases: \(result)")
+        return result
     }
     
     public func getSchema(database: String) async throws -> JSONValue {
@@ -148,7 +174,7 @@ public final class JSONRPCClient {
             Task {
                 while connection.isConnectionActive {
                     do {
-                        let response: JSONRPCResponse<JSONValue> = try await connection.receive(
+                        let response: JSONRPCResponse<JSONValue> = try await connection.receiveAny(
                             as: JSONRPCResponse<JSONValue>.self,
                             timeout: .seconds(60)
                         ).get()
