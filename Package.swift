@@ -31,6 +31,11 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
+        .executableTarget(
+            name: "BasicUsage",
+            dependencies: ["SwiftOVN"],
+            path: "Examples"
+        ),
         .testTarget(
             name: "SwiftOVNTests",
             dependencies: ["SwiftOVN"]

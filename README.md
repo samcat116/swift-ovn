@@ -50,7 +50,7 @@ let portUUID = try await SwiftOVN.createLogicalSwitchPort(port)
 
 // Get all logical switches
 let switches = try await SwiftOVN.getLogicalSwitches()
-print("Found \\(switches.count) logical switches")
+print("Found \(switches.count) logical switches")
 ```
 
 ### OVS Management
@@ -79,7 +79,7 @@ let portUUID = try await ovsManager.createPort(port)
 
 // Get bridge statistics
 let stats = try await ovsManager.getBridgeStatistics(bridge: "br-int")
-print("Bridge statistics: \\(stats)")
+print("Bridge statistics: \(stats)")
 ```
 
 ### Real-time Monitoring
@@ -91,10 +91,10 @@ let monitorId = try await SwiftOVN.startMonitoring(tables: ["Logical_Switch", "L
 // Process updates in real-time
 for try await update in SwiftOVN.monitorUpdates() {
     if let newRow = update.new {
-        print("Row updated: \\(newRow)")
+        print("Row updated: \(newRow)")
     }
     if let oldRow = update.old {
-        print("Previous row: \\(oldRow)")
+        print("Previous row: \(oldRow)")
     }
 }
 
@@ -201,13 +201,13 @@ do {
     try await SwiftOVN.connect()
     let switches = try await SwiftOVN.getLogicalSwitches()
 } catch SwiftOVNError.connectionFailed(let message) {
-    print("Connection failed: \\(message)")
+    print("Connection failed: \(message)")
 } catch SwiftOVNError.timeoutError {
     print("Operation timed out")
 } catch SwiftOVNError.rpcError(let rpcError) {
-    print("RPC Error: \\(rpcError.message)")
+    print("RPC Error: \(rpcError.message)")
 } catch {
-    print("Unexpected error: \\(error)")
+    print("Unexpected error: \(error)")
 }
 ```
 
