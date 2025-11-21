@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNDHCPOptions: Codable {
+public struct OVNDHCPOptions: Codable, Sendable {
     public let uuid: String?
     public let cidr: String
     public let options: [String: String]

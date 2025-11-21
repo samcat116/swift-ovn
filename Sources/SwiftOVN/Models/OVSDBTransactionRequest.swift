@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBTransactionRequest: Codable {
+public struct OVSDBTransactionRequest: Codable, Sendable {
     public let database: String
     public let operations: [OVSDBOperation]
     

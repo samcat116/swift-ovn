@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import Logging
 
-public final class OVSManager: OVSManaging {
+public actor OVSManager: OVSManaging {
     private let connection: OVSDBConnection
     private let logger: Logger
     private let database: String
@@ -30,7 +30,9 @@ public final class OVSManager: OVSManaging {
     }
     
     public var isConnected: Bool {
-        return connection.isConnected
+        get async {
+            return await connection.isConnected
+        }
     }
     
     // MARK: - Database Operations

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum JSONRPCIdentifier: Codable, Hashable {
+public enum JSONRPCIdentifier: Codable, Hashable, Sendable {
     case string(String)
     case number(Int)
     case null

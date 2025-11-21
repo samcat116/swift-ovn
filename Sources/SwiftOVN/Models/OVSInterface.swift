@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSInterface: Codable {
+public struct OVSInterface: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let interfaceType: String?

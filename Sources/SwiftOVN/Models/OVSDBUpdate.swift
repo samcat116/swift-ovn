@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBUpdate: Codable {
+public struct OVSDBUpdate: Codable, Sendable {
     public let old: OVSDBRow?
     public let new: OVSDBRow?
     

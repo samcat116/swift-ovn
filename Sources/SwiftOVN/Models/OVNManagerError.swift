@@ -1,6 +1,6 @@
 import Foundation
 
-public enum OVNManagerError: Error {
+public enum OVNManagerError: Error, Sendable {
     case connectionFailed(String)
     case invalidResponse(String)
     case timeoutError

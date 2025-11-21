@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNACL: Codable {
+public struct OVNACL: Codable, Sendable {
     public let uuid: String?
     public let priority: Int
     public let direction: String

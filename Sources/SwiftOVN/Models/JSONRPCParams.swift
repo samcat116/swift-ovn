@@ -1,6 +1,6 @@
 import Foundation
 
-public enum JSONRPCParams: Codable {
+public enum JSONRPCParams: Codable, Sendable {
     case array([JSONValue])
     case object([String: JSONValue])
     

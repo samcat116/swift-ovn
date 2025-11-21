@@ -7,7 +7,7 @@ public protocol OVSManaging {
     // Connection Management
     func connect() async throws
     func disconnect() async throws
-    var isConnected: Bool { get }
+    var isConnected: Bool { get async }
     
     // Database Operations
     func listDatabases() async throws -> [String]

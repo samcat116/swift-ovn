@@ -3,13 +3,14 @@ import NIO
 import NIOPosix
 import Logging
 
-public final class UnixSocketConnection {
+public final class UnixSocketConnection: @unchecked Sendable {
     private let eventLoopGroup: EventLoopGroup
     private let logger: Logger
     private var channel: Channel?
     private let socketPath: String
     private var isConnected: Bool = false
     private var responseRouter: JSONRPCResponseRouter?
+    private let connectionLock = NSLock()
     
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.socketPath = socketPath
@@ -19,7 +20,11 @@ public final class UnixSocketConnection {
     
     
     public func connect() -> EventLoopFuture<Void> {
-        guard !isConnected else {
+        connectionLock.lock()
+        let alreadyConnected = isConnected
+        connectionLock.unlock()
+
+        guard !alreadyConnected else {
             logger.debug("Already connected to Unix socket")
             return eventLoopGroup.next().makeSucceededFuture(())
         }
@@ -58,8 +63,10 @@ public final class UnixSocketConnection {
         return bootstrap.connect(unixDomainSocketPath: socketPath)
             .map { channel in
                 self.logger.debug("Raw connection established, setting up channel...")
+                self.connectionLock.lock()
                 self.channel = channel
                 self.isConnected = true
+                self.connectionLock.unlock()
                 self.logger.info("Successfully connected to Unix socket")
                 self.logger.debug("Channel active: \(channel.isActive), writable: \(channel.isWritable)")
             }
@@ -74,26 +81,34 @@ public final class UnixSocketConnection {
     }
     
     public func disconnect() -> EventLoopFuture<Void> {
+        connectionLock.lock()
         guard let channel = channel, isConnected else {
+            connectionLock.unlock()
             return eventLoopGroup.next().makeSucceededFuture(())
         }
-        
+
         logger.info("Disconnecting from Unix socket")
         self.isConnected = false
         self.responseRouter = nil
-        
+        connectionLock.unlock()
+
         return channel.close().map {
+            self.connectionLock.lock()
             self.channel = nil
+            self.connectionLock.unlock()
             self.logger.info("Successfully disconnected from Unix socket")
         }
     }
     
     public func send<T: Codable>(_ message: T) -> EventLoopFuture<Void> {
+        connectionLock.lock()
         guard let channel = channel, isConnected else {
+            connectionLock.unlock()
             return eventLoopGroup.next().makeFailedFuture(
                 OVNManagerError.connectionFailed("Not connected to socket")
             )
         }
+        connectionLock.unlock()
         
         do {
             let encoder = Foundation.JSONEncoder()
@@ -113,36 +128,44 @@ public final class UnixSocketConnection {
     }
     
     public func receive<T: Codable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount = .seconds(30)) -> EventLoopFuture<T> {
+        connectionLock.lock()
         guard let responseRouter = responseRouter, isConnected else {
+            connectionLock.unlock()
             return eventLoopGroup.next().makeFailedFuture(
                 OVNManagerError.connectionFailed("Not connected to socket")
             )
         }
-        
+        connectionLock.unlock()
+
         return responseRouter.waitForResponse(requestId: requestId, type: T.self, timeout: timeout)
     }
     
     // For monitoring - receives any message without filtering by request ID
     public func receiveAny<T: Codable>(as type: T.Type, timeout: TimeAmount = .seconds(30)) -> EventLoopFuture<T> {
+        connectionLock.lock()
         guard let responseRouter = responseRouter, isConnected else {
+            connectionLock.unlock()
             return eventLoopGroup.next().makeFailedFuture(
                 OVNManagerError.connectionFailed("Not connected to socket")
             )
         }
-        
+        connectionLock.unlock()
+
         return responseRouter.waitForAnyResponse(type: T.self, timeout: timeout)
     }
     
     public var isConnectionActive: Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         return isConnected && channel?.isActive == true
     }
 }
 
 // MARK: - JSON-RPC Response Router
 
-private final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandler {
+private final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = String
-    
+
     private let logger: Logger
     private let decoder = Foundation.JSONDecoder()
     private var pendingRequests: [JSONRPCIdentifier: Any] = [:]
@@ -359,7 +382,7 @@ private struct AnyResponseWaiterWrapper<T: Codable>: AnyResponseWaiterProtocol {
 
 // MARK: - Frame Handling
 
-private final class LineDelimitedFrameDecoder: ByteToMessageDecoder {
+private final class LineDelimitedFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
     typealias InboundOut = String
     
     func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
@@ -398,7 +421,7 @@ private final class LineDelimitedFrameDecoder: ByteToMessageDecoder {
     }
 }
 
-private final class StringToByteEncoder: MessageToByteEncoder {
+private final class StringToByteEncoder: MessageToByteEncoder, @unchecked Sendable {
     typealias OutboundIn = String
     
     func encode(data: String, out: inout ByteBuffer) throws {

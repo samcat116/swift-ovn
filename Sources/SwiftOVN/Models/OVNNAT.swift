@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNNAT: Codable {
+public struct OVNNAT: Codable, Sendable {
     public let uuid: String?
     public let natType: String
     public let external_ip: String

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBMutation: Codable {
+public struct OVSDBMutation: Codable, Sendable {
     public let column: String
     public let mutator: String
     public let value: JSONValue

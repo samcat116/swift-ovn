@@ -2,11 +2,10 @@ import Foundation
 import NIO
 import Logging
 
-public final class JSONRPCClient {
+public actor JSONRPCClient {
     private let connection: UnixSocketConnection
     private let logger: Logger
     private var requestId: Int = 0
-    private let requestIdLock = NSLock()
     
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.connection = UnixSocketConnection(
@@ -27,13 +26,11 @@ public final class JSONRPCClient {
         try await connection.disconnect().get()
     }
     
-    public var isConnected: Bool {
+    nonisolated public var isConnected: Bool {
         return connection.isConnectionActive
     }
     
     private func nextRequestId() -> Int {
-        requestIdLock.lock()
-        defer { requestIdLock.unlock() }
         requestId += 1
         return requestId
     }

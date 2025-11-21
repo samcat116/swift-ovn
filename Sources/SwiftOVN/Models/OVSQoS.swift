@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSQoS: Codable {
+public struct OVSQoS: Codable, Sendable {
     public let uuid: String?
     public let qosType: String
     public let queues: [Int: String]?

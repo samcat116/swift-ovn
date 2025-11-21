@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNLogicalSwitch: Codable {
+public struct OVNLogicalSwitch: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let ports: [String]?

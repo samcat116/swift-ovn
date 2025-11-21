@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSController: Codable {
+public struct OVSController: Codable, Sendable {
     public let uuid: String?
     public let target: String
     public let max_backoff: Int?

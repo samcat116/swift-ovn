@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNLoadBalancer: Codable {
+public struct OVNLoadBalancer: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let vips: [String: String]

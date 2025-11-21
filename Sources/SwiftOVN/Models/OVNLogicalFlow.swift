@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNLogicalFlow: Codable {
+public struct OVNLogicalFlow: Codable, Sendable {
     public let uuid: String?
     public let logical_datapath: String?
     public let logical_dp_group: String?

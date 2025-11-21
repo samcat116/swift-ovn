@@ -2,11 +2,10 @@ import Foundation
 import NIO
 import Logging
 
-public final class OVSDBConnection {
+public actor OVSDBConnection {
     private let client: JSONRPCClient
     private let logger: Logger
     private var activeMonitors: Set<String> = []
-    private let monitorLock = NSLock()
     
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.client = JSONRPCClient(
@@ -32,17 +31,20 @@ public final class OVSDBConnection {
     
     public func disconnect() async throws {
         // Cancel all active monitors
-        for monitorId in activeMonitors {
+        let monitors = activeMonitors
+        for monitorId in monitors {
             try? await client.cancelMonitor(monitorId: monitorId)
         }
         activeMonitors.removeAll()
-        
+
         try await client.disconnect()
         logger.info("Disconnected from OVSDB")
     }
     
     public var isConnected: Bool {
-        return client.isConnected
+        get async {
+            return await client.isConnected
+        }
     }
     
     // MARK: - Database Operations
@@ -251,23 +253,19 @@ public final class OVSDBConnection {
             monitorId: id,
             requests: tables
         )
-        
-        monitorLock.lock()
+
         activeMonitors.insert(id)
-        monitorLock.unlock()
-        
+
         logger.info("Started monitoring database \(database) with ID: \(id)")
-        
+
         return id
     }
     
     public func stopMonitoring(monitorId: String) async throws {
         try await client.cancelMonitor(monitorId: monitorId)
-        
-        monitorLock.lock()
+
         activeMonitors.remove(monitorId)
-        monitorLock.unlock()
-        
+
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
     
