@@ -166,7 +166,7 @@ public actor JSONRPCClient {
     
     // MARK: - Monitoring Stream
     
-    public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
         AsyncThrowingStream { continuation in
             Task {
                 while connection.isConnectionActive {

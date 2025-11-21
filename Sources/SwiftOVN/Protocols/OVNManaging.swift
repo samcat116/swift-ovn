@@ -3,6 +3,7 @@ import NIO
 
 // MARK: - OVN Management Protocol
 
+@preconcurrency
 public protocol OVNManaging {
     // Connection Management
     func connect() async throws
@@ -74,7 +75,7 @@ public protocol OVNManaging {
     // Monitoring
     func startMonitoring(tables: [String]) async throws -> String
     func stopMonitoring(monitorId: String) async throws
-    func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
+    nonisolated func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
     
     // Southbound Operations
     func getChassis() async throws -> [OVNChassis]

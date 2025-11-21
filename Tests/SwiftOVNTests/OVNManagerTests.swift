@@ -1,6 +1,6 @@
 import XCTest
 import NIO
-@testable import OVNManager
+@testable import SwiftOVN
 
 final class OVNManagerTests: XCTestCase {
     

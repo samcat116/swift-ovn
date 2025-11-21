@@ -43,7 +43,7 @@ public actor OVSDBConnection {
     
     public var isConnected: Bool {
         get async {
-            return await client.isConnected
+            return client.isConnected
         }
     }
     
@@ -247,8 +247,8 @@ public actor OVSDBConnection {
         monitorId: String? = nil
     ) async throws -> String {
         let id = monitorId ?? UUID().uuidString
-        
-        let initialState = try await client.monitor(
+
+        _ = try await client.monitor(
             database: database,
             monitorId: id,
             requests: tables
@@ -269,18 +269,17 @@ public actor OVSDBConnection {
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
     
-    public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        let clientStream = client.monitorUpdates()
-        
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
         return AsyncThrowingStream { continuation in
             Task {
+                let clientStream = client.monitorUpdates()
                 do {
-                    for try await (monitorId, updateValue) in clientStream {
+                    for try await (_, updateValue) in clientStream {
                         // Parse the update value into OVSDBUpdate format
                         if case .object(let updateObject) = updateValue {
-                            for (tableName, tableUpdate) in updateObject {
+                            for (_, tableUpdate) in updateObject {
                                 if case .object(let tableUpdateObject) = tableUpdate {
-                                    for (rowId, rowUpdate) in tableUpdateObject {
+                                    for (_, rowUpdate) in tableUpdateObject {
                                         if case .object(let rowUpdateObject) = rowUpdate {
                                             let old = rowUpdateObject["old"].flatMap { value in
                                                 if case .object(let obj) = value { return obj }

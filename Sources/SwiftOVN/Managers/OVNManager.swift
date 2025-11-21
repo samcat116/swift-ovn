@@ -548,8 +548,20 @@ public actor OVNManager: OVNManaging {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
     
-    public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        return connection.monitorUpdates()
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                let updates = connection.monitorUpdates()
+                do {
+                    for try await update in updates {
+                        continuation.yield(update)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
     }
     
     // MARK: - Southbound Operations

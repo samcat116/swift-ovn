@@ -3,7 +3,11 @@ import NIO
 
 // MARK: - OVS Management Protocol
 
-public protocol OVSManaging {
+// Typealias for statistics dictionaries that may contain non-Sendable values
+public typealias StatisticsDictionary = [String: Any]
+
+@preconcurrency
+public protocol OVSManaging: Sendable {
     // Connection Management
     func connect() async throws
     func disconnect() async throws
@@ -79,14 +83,14 @@ public protocol OVSManaging {
     func deleteQueue(uuid: String) async throws
     
     // Statistics Operations
-    func getBridgeStatistics(bridge: String) async throws -> [String: Any]
-    func getPortStatistics(port: String) async throws -> [String: Any]
-    func getInterfaceStatistics(interface: String) async throws -> [String: Any]
+    nonisolated func getBridgeStatistics(bridge: String) async throws -> [String: Any]
+    nonisolated func getPortStatistics(port: String) async throws -> [String: Any]
+    nonisolated func getInterfaceStatistics(interface: String) async throws -> [String: Any]
     
     // Monitoring
     func startMonitoring(tables: [String]) async throws -> String
     func stopMonitoring(monitorId: String) async throws
-    func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
+    nonisolated func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
 }
 
 // MARK: - OVS Database Constants
