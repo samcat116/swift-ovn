@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBMonitorSelect: Codable {
+public struct OVSDBMonitorSelect: Codable, Sendable {
     public let initial: Bool?
     public let insert: Bool?
     public let delete: Bool?

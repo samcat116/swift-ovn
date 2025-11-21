@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNEncap: Codable {
+public struct OVNEncap: Codable, Sendable {
     public let uuid: String?
     public let encapType: String
     public let ip: String

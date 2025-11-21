@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSFlow: Codable {
+public struct OVSFlow: Codable, Sendable {
     public let table: Int?
     public let priority: Int?
     public let match: String?

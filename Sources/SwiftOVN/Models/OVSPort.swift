@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSPort: Codable {
+public struct OVSPort: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let interfaces: [String]

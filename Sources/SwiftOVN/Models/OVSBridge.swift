@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSBridge: Codable {
+public struct OVSBridge: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let ports: [String]?

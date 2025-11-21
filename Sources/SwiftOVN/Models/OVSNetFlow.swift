@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSNetFlow: Codable {
+public struct OVSNetFlow: Codable, Sendable {
     public let uuid: String?
     public let targets: [String]
     public let engine_type: Int?

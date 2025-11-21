@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBCondition: Codable {
+public struct OVSDBCondition: Codable, Sendable {
     public let column: String
     public let function: String
     public let value: JSONValue

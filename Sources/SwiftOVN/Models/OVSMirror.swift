@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSMirror: Codable {
+public struct OVSMirror: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let select_all: Bool?

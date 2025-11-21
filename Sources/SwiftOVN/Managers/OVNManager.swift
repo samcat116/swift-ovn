@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import Logging
 
-public final class OVNManager: OVNManaging {
+public actor OVNManager: OVNManaging {
     private let connection: OVSDBConnection
     private let logger: Logger
     private let database: String
@@ -30,7 +30,9 @@ public final class OVNManager: OVNManaging {
     }
     
     public var isConnected: Bool {
-        return connection.isConnected
+        get async {
+            return await connection.isConnected
+        }
     }
     
     // MARK: - Database Operations
@@ -546,8 +548,20 @@ public final class OVNManager: OVNManaging {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
     
-    public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        return connection.monitorUpdates()
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                let updates = connection.monitorUpdates()
+                do {
+                    for try await update in updates {
+                        continuation.yield(update)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
     }
     
     // MARK: - Southbound Operations

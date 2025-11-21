@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNLogicalRouter: Codable {
+public struct OVNLogicalRouter: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let ports: [String]?

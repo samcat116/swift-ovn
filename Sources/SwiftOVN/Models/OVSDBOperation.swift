@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSDBOperation: Codable {
+public struct OVSDBOperation: Codable, Sendable {
     public let op: String
     public let table: String
     public let whereConditions: [OVSDBCondition]?

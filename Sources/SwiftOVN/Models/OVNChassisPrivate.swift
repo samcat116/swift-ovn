@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVNChassisPrivate: Codable {
+public struct OVNChassisPrivate: Codable, Sendable {
     public let uuid: String?
     public let name: String
     public let chassis: String?

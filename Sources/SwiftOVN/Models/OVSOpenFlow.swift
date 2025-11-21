@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSOpenFlow: Codable {
+public struct OVSOpenFlow: Codable, Sendable {
     public let uuid: String?
     public let bridge: String
     public let version: [String]

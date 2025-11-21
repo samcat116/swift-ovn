@@ -1,6 +1,6 @@
 import Foundation
 
-public struct OVSQueue: Codable {
+public struct OVSQueue: Codable, Sendable {
     public let uuid: String?
     public let other_config: [String: String]?
     public let external_ids: [String: String]?

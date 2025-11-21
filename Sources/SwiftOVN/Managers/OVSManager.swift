@@ -2,7 +2,7 @@ import Foundation
 import NIO
 import Logging
 
-public final class OVSManager: OVSManaging {
+public actor OVSManager: OVSManaging {
     private let connection: OVSDBConnection
     private let logger: Logger
     private let database: String
@@ -30,7 +30,9 @@ public final class OVSManager: OVSManaging {
     }
     
     public var isConnected: Bool {
-        return connection.isConnected
+        get async {
+            return await connection.isConnected
+        }
     }
     
     // MARK: - Database Operations
@@ -564,8 +566,8 @@ public final class OVSManager: OVSManaging {
     }
     
     // MARK: - Statistics Operations
-    
-    public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
+
+    nonisolated public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
         // Bridge statistics are available in the status column
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(bridge))
         let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["status", "other_config"])
@@ -588,8 +590,8 @@ public final class OVSManager: OVSManaging {
         
         return result
     }
-    
-    public func getPortStatistics(port: String) async throws -> [String: Any] {
+
+    nonisolated public func getPortStatistics(port: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(port))
         let rows = try await connection.select(from: OVSTable.port, in: database, where: [condition], columns: ["status", "external_ids", "other_config"])
         
@@ -614,8 +616,8 @@ public final class OVSManager: OVSManaging {
         
         return result
     }
-    
-    public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
+
+    nonisolated public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(interface))
         let rows = try await connection.select(from: OVSTable.interface, in: database, where: [condition], columns: ["status", "external_ids", "statistics"])
         
@@ -658,8 +660,20 @@ public final class OVSManager: OVSManaging {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
     
-    public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        return connection.monitorUpdates()
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                let updates = connection.monitorUpdates()
+                do {
+                    for try await update in updates {
+                        continuation.yield(update)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
     }
 }
 
@@ -695,7 +709,7 @@ private extension OVSManager {
         return result
     }
     
-    func convertJSONValueToObject(_ value: JSONValue) -> Any {
+    nonisolated func convertJSONValueToObject(_ value: JSONValue) -> Any {
         switch value {
         case .null:
             return NSNull()

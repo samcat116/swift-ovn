@@ -2,11 +2,10 @@ import Foundation
 import NIO
 import Logging
 
-public final class OVSDBConnection {
+public actor OVSDBConnection {
     private let client: JSONRPCClient
     private let logger: Logger
     private var activeMonitors: Set<String> = []
-    private let monitorLock = NSLock()
     
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.client = JSONRPCClient(
@@ -32,17 +31,20 @@ public final class OVSDBConnection {
     
     public func disconnect() async throws {
         // Cancel all active monitors
-        for monitorId in activeMonitors {
+        let monitors = activeMonitors
+        for monitorId in monitors {
             try? await client.cancelMonitor(monitorId: monitorId)
         }
         activeMonitors.removeAll()
-        
+
         try await client.disconnect()
         logger.info("Disconnected from OVSDB")
     }
     
     public var isConnected: Bool {
-        return client.isConnected
+        get async {
+            return client.isConnected
+        }
     }
     
     // MARK: - Database Operations
@@ -245,44 +247,39 @@ public final class OVSDBConnection {
         monitorId: String? = nil
     ) async throws -> String {
         let id = monitorId ?? UUID().uuidString
-        
-        let initialState = try await client.monitor(
+
+        _ = try await client.monitor(
             database: database,
             monitorId: id,
             requests: tables
         )
-        
-        monitorLock.lock()
+
         activeMonitors.insert(id)
-        monitorLock.unlock()
-        
+
         logger.info("Started monitoring database \(database) with ID: \(id)")
-        
+
         return id
     }
     
     public func stopMonitoring(monitorId: String) async throws {
         try await client.cancelMonitor(monitorId: monitorId)
-        
-        monitorLock.lock()
+
         activeMonitors.remove(monitorId)
-        monitorLock.unlock()
-        
+
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
     
-    public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        let clientStream = client.monitorUpdates()
-        
+    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
         return AsyncThrowingStream { continuation in
             Task {
+                let clientStream = client.monitorUpdates()
                 do {
-                    for try await (monitorId, updateValue) in clientStream {
+                    for try await (_, updateValue) in clientStream {
                         // Parse the update value into OVSDBUpdate format
                         if case .object(let updateObject) = updateValue {
-                            for (tableName, tableUpdate) in updateObject {
+                            for (_, tableUpdate) in updateObject {
                                 if case .object(let tableUpdateObject) = tableUpdate {
-                                    for (rowId, rowUpdate) in tableUpdateObject {
+                                    for (_, rowUpdate) in tableUpdateObject {
                                         if case .object(let rowUpdateObject) = rowUpdate {
                                             let old = rowUpdateObject["old"].flatMap { value in
                                                 if case .object(let obj) = value { return obj }
