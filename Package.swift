@@ -31,7 +31,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
             ],
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
+                .swiftLanguageMode(.v6)
             ]
         ),
         .executableTarget(
@@ -39,14 +39,14 @@ let package = Package(
             dependencies: ["SwiftOVN"],
             path: "Examples",
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
+                .swiftLanguageMode(.v6)
             ]
         ),
         .testTarget(
             name: "SwiftOVNTests",
             dependencies: ["SwiftOVN"],
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
+                .swiftLanguageMode(.v6)
             ]
         ),
     ]

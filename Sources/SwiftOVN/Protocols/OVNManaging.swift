@@ -4,7 +4,7 @@ import NIO
 // MARK: - OVN Management Protocol
 
 @preconcurrency
-public protocol OVNManaging {
+public protocol OVNManaging: Sendable {
     // Connection Management
     func connect() async throws
     func disconnect() async throws

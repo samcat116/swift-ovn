@@ -83,9 +83,9 @@ public protocol OVSManaging: Sendable {
     func deleteQueue(uuid: String) async throws
     
     // Statistics Operations
-    nonisolated func getBridgeStatistics(bridge: String) async throws -> [String: Any]
-    nonisolated func getPortStatistics(port: String) async throws -> [String: Any]
-    nonisolated func getInterfaceStatistics(interface: String) async throws -> [String: Any]
+    func getBridgeStatistics(bridge: String) async throws -> [String: Any]
+    func getPortStatistics(port: String) async throws -> [String: Any]
+    func getInterfaceStatistics(interface: String) async throws -> [String: Any]
     
     // Monitoring
     func startMonitoring(tables: [String]) async throws -> String

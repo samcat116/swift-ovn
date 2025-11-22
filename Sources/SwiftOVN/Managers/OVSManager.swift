@@ -567,7 +567,7 @@ public actor OVSManager: OVSManaging {
     
     // MARK: - Statistics Operations
 
-    nonisolated public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
+    public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
         // Bridge statistics are available in the status column
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(bridge))
         let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["status", "other_config"])
@@ -591,7 +591,7 @@ public actor OVSManager: OVSManaging {
         return result
     }
 
-    nonisolated public func getPortStatistics(port: String) async throws -> [String: Any] {
+    public func getPortStatistics(port: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(port))
         let rows = try await connection.select(from: OVSTable.port, in: database, where: [condition], columns: ["status", "external_ids", "other_config"])
         
@@ -617,7 +617,7 @@ public actor OVSManager: OVSManaging {
         return result
     }
 
-    nonisolated public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
+    public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(interface))
         let rows = try await connection.select(from: OVSTable.interface, in: database, where: [condition], columns: ["status", "external_ids", "statistics"])
         
@@ -709,7 +709,7 @@ private extension OVSManager {
         return result
     }
     
-    nonisolated func convertJSONValueToObject(_ value: JSONValue) -> Any {
+    func convertJSONValueToObject(_ value: JSONValue) -> Any {
         switch value {
         case .null:
             return NSNull()
