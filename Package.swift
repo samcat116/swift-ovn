@@ -29,25 +29,16 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "Logging", package: "swift-log"),
-            ],
-            swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .executableTarget(
             name: "BasicUsage",
             dependencies: ["SwiftOVN"],
-            path: "Examples",
-            swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
-            ]
+            path: "Examples"
         ),
         .testTarget(
             name: "SwiftOVNTests",
-            dependencies: ["SwiftOVN"],
-            swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency")
-            ]
+            dependencies: ["SwiftOVN"]
         ),
     ]
 )
