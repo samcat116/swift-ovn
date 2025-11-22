@@ -119,7 +119,7 @@ public enum OVSTable {
 
 // MARK: - OVS Command Builders
 
-public struct OVSFlowBuilder {
+public struct OVSFlowBuilder: Sendable {
     private var table: Int?
     private var priority: Int?
     private var match: String?
@@ -127,7 +127,7 @@ public struct OVSFlowBuilder {
     private var idle_timeout: Int?
     private var hard_timeout: Int?
     private var cookie: String?
-    
+
     public init() {}
     
     public func table(_ table: Int) -> OVSFlowBuilder {
