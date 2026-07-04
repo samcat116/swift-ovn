@@ -1,0 +1,25 @@
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_ccf7e366742f43::t_4e0db08c1fbcc0 260-329
+Sources/SwiftOVN/Core/UnixSocketConnection.swift
+  s_ccf7e366742f43::t_44a18024362421 385-391,394,396-446,448-449,451-452
+  s_ccf7e366742f43::t_18b4fbb1ce8ec9 392
+  s_ccf7e366742f43::t_39591c789b6f9d 50
+.entire/.gitignore
+  s_ccf7e366742f43::t_8b94e5510e7641 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "74f45c129a8b587e7eef20fea90dfc260967f63a",
+  "prompts": {},
+  "sessions": {
+    "s_ccf7e366742f43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38ef304f-f5b3-41c3-b113-170414c04fd5",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
