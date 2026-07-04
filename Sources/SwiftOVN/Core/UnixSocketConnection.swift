@@ -47,7 +47,7 @@ public final class UnixSocketConnection: @unchecked Sendable {
                 let router = JSONRPCResponseRouter(logger: self.logger, eventLoopGroup: self.eventLoopGroup)
                 self.responseRouter = router
                 return channel.pipeline.addHandlers([
-                    ByteToMessageHandler(LineDelimitedFrameDecoder()),
+                    ByteToMessageHandler(OVSDBJSONFrameDecoder()),
                     MessageToByteHandler(StringToByteEncoder()),
                     router
                 ]).map { _ in
@@ -382,41 +382,74 @@ private struct AnyResponseWaiterWrapper<T: Codable>: AnyResponseWaiterProtocol {
 
 // MARK: - Frame Handling
 
-private final class LineDelimitedFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
+/// Frames a byte stream into individual JSON-RPC objects.
+///
+/// OVSDB (RFC 7047) streams JSON-RPC objects with no delimiters — the server may
+/// concatenate several objects in a single read, or split one object across reads.
+/// A newline-based framer therefore mis-frames these messages. This decoder instead
+/// tracks `{`/`}` nesting depth to emit exactly one complete top-level object per
+/// message, ignoring braces that appear inside JSON strings and honoring `\` escapes.
+final class OVSDBJSONFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
     typealias InboundOut = String
-    
+
     func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        // Look for a newline in the buffer
-        if let newlineIndex = buffer.withUnsafeReadableBytes({ bytes in
-            bytes.firstIndex(of: UInt8(ascii: "\n"))
-        }) {
-            // Read up to and including the newline
-            guard let line = buffer.readString(length: newlineIndex + 1) else {
-                return .needMoreData
+        let view = buffer.readableBytesView
+
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var objectStart: Int?
+
+        var index = view.startIndex
+        while index < view.endIndex {
+            let byte = view[index]
+
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escaped = true
+                } else if byte == UInt8(ascii: "\"") {
+                    inString = false
+                }
+            } else {
+                switch byte {
+                case UInt8(ascii: "\""):
+                    inString = true
+                case UInt8(ascii: "{"):
+                    if depth == 0 {
+                        objectStart = index
+                    }
+                    depth += 1
+                case UInt8(ascii: "}"):
+                    if depth > 0 {
+                        depth -= 1
+                        if depth == 0, let start = objectStart {
+                            // A complete top-level object spans start...index inclusive.
+                            let leading = view.distance(from: view.startIndex, to: start)
+                            let length = view.distance(from: start, to: index) + 1
+
+                            // Discard any leading whitespace/delimiters before the object,
+                            // then read the object itself and fire it downstream.
+                            buffer.moveReaderIndex(forwardBy: leading)
+                            guard let objectString = buffer.readString(length: length) else {
+                                return .needMoreData
+                            }
+                            context.fireChannelRead(wrapInboundOut(objectString))
+
+                            // Keep any trailing bytes buffered for the next object.
+                            return .continue
+                        }
+                    }
+                default:
+                    break
+                }
             }
-            
-            // Trim whitespace and newlines, then fire the message
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                context.fireChannelRead(wrapInboundOut(trimmed))
-            }
-            
-            // Continue processing if there's more data
-            return .continue
+
+            index = view.index(after: index)
         }
-        
-        // No newline found, but if we have JSON-like content, try to process it
-        if buffer.readableBytes > 0 {
-            if let content = buffer.getString(at: 0, length: buffer.readableBytes),
-               content.hasPrefix("{") && content.hasSuffix("}") {
-                // This looks like complete JSON, process it
-                buffer.moveReaderIndex(to: buffer.writerIndex) // consume all bytes
-                context.fireChannelRead(wrapInboundOut(content))
-                return .continue
-            }
-        }
-        
-        // No complete line yet, wait for more data
+
+        // No complete object yet — wait for more data.
         return .needMoreData
     }
 }

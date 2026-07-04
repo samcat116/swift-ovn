@@ -258,3 +258,73 @@ final class JSONRPCClientMockTests: XCTestCase {
         XCTAssertEqual(decodedRequest.select?.initial, monitorRequest.select?.initial)
     }
 }
+
+// MARK: - Frame Decoder Tests
+
+final class OVSDBJSONFrameDecoderTests: XCTestCase {
+
+    /// Feeds the given byte chunks through the decoder in order and returns every
+    /// framed message the decoder produced.
+    private func frames(feeding chunks: [String]) throws -> [String] {
+        let channel = EmbeddedChannel(handler: ByteToMessageHandler(OVSDBJSONFrameDecoder()))
+        defer { _ = try? channel.finish() }
+
+        for chunk in chunks {
+            var buffer = channel.allocator.buffer(capacity: chunk.utf8.count)
+            buffer.writeString(chunk)
+            try channel.writeInbound(buffer)
+        }
+
+        var results: [String] = []
+        while let framed = try channel.readInbound(as: String.self) {
+            results.append(framed)
+        }
+        return results
+    }
+
+    func testSingleObject() throws {
+        let framed = try frames(feeding: [#"{"id":1,"result":[]}"#])
+        XCTAssertEqual(framed, [#"{"id":1,"result":[]}"#])
+    }
+
+    func testNewlineDelimitedObject() throws {
+        // The client appends a trailing newline; leading/trailing whitespace is dropped.
+        let framed = try frames(feeding: ["\n" + #"{"id":1}"# + "\n"])
+        XCTAssertEqual(framed, [#"{"id":1}"#])
+    }
+
+    func testConcatenatedObjects() throws {
+        // Two objects with no delimiter arriving in a single read must be split.
+        let framed = try frames(feeding: [#"{"id":1}{"id":2}"#])
+        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"id":2}"#])
+    }
+
+    func testNestedObject() throws {
+        let message = #"{"id":1,"result":{"rows":[{"name":"ls0"}]}}"#
+        let framed = try frames(feeding: [message])
+        XCTAssertEqual(framed, [message])
+    }
+
+    func testBracesInsideStringsAreIgnored() throws {
+        let message = #"{"error":"unexpected } or { char","id":1}"#
+        let framed = try frames(feeding: [message])
+        XCTAssertEqual(framed, [message])
+    }
+
+    func testEscapedQuotesInsideStrings() throws {
+        let message = #"{"match":"name==\"a}b{c\"","id":1}"#
+        let framed = try frames(feeding: [message])
+        XCTAssertEqual(framed, [message])
+    }
+
+    func testPartialObjectSplitAcrossReads() throws {
+        let framed = try frames(feeding: [#"{"id":1,"resu"#, #"lt":[]}"#])
+        XCTAssertEqual(framed, [#"{"id":1,"result":[]}"#])
+    }
+
+    func testTrailingBytesBufferedForNextObject() throws {
+        // First read carries a full object plus the start of the next one.
+        let framed = try frames(feeding: [#"{"id":1}{"id":"#, #"2}"#])
+        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"id":2}"#])
+    }
+}
