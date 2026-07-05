@@ -779,11 +779,20 @@ private extension OVSManager {
             let jsonArray = try array.map { try convertToJSONValue($0) }
             return .array([.string("set"), .array(jsonArray)])
         } else if let dict = object as? [String: Any] {
-            // OVSDB expects maps in the format ["map", [["key", "value"], ...]]
+            // OVSDB expects maps in the format ["map", [["key", "value"], ...]].
+            // These maps (e.g. external_ids) are map<string,string>, so their
+            // values must stay strings. Do NOT run UUID-atom detection on them,
+            // or a UUID-shaped value becomes ["uuid",...] and ovsdb-server
+            // rejects it ("expected string").
             var mapArray: [JSONValue] = []
             for (key, value) in dict {
-                let pair: [JSONValue] = [.string(key), try convertToJSONValue(value)]
-                mapArray.append(.array(pair))
+                let valueJSON: JSONValue
+                if let stringValue = value as? String {
+                    valueJSON = .string(stringValue)
+                } else {
+                    valueJSON = try convertToJSONValue(value)
+                }
+                mapArray.append(.array([.string(key), valueJSON]))
             }
             return .array([.string("map"), .array(mapArray)])
         } else {
