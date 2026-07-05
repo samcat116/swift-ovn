@@ -692,10 +692,21 @@ private extension OVSManager {
         let data = try encoder.encode(object)
         let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         
+        // Columns whose map values are UUID references (map<_,uuid>) rather than
+        // strings, so their values must be emitted as ["uuid", ...] atoms.
+        // These are the reference-valued map columns in the Open_vSwitch schema:
+        // QoS.queues (map<integer,Queue>) and Bridge.flow_tables
+        // (map<integer,Flow_Table>). All other maps here (external_ids,
+        // other_config, options, status, rstp_status, ...) are map<string,string>.
+        let uuidValuedMapColumns: Set<String> = ["queues", "flow_tables"]
+
         var row: OVSDBRow = [:]
         for (key, value) in jsonObject {
             if key != "_uuid" { // Skip UUID for inserts
-                row[key] = try convertToJSONValue(value)
+                row[key] = try convertToJSONValue(
+                    value,
+                    mapValuesAreUUIDRefs: uuidValuedMapColumns.contains(key)
+                )
             }
         }
         return row
@@ -759,7 +770,11 @@ private extension OVSManager {
         }
     }
     
-    func convertToJSONValue(_ object: Any) throws -> JSONValue {
+    /// - Parameter mapValuesAreUUIDRefs: when the object is a map, whether its
+    ///   values are UUID references (e.g. `QoS.queues`, a `map<integer,uuid>`)
+    ///   and must be emitted as `["uuid", ...]` atoms, versus a plain
+    ///   `map<string,string>` (e.g. `external_ids`) whose values stay strings.
+    func convertToJSONValue(_ object: Any, mapValuesAreUUIDRefs: Bool = false) throws -> JSONValue {
         if object is NSNull {
             return .null
         } else if let bool = object as? Bool {
@@ -779,11 +794,23 @@ private extension OVSManager {
             let jsonArray = try array.map { try convertToJSONValue($0) }
             return .array([.string("set"), .array(jsonArray)])
         } else if let dict = object as? [String: Any] {
-            // OVSDB expects maps in the format ["map", [["key", "value"], ...]]
+            // OVSDB expects maps in the format ["map", [["key", "value"], ...]].
+            // For string-string maps (external_ids, other_config, options, ...)
+            // values must stay strings — running UUID-atom detection on them
+            // turns a UUID-shaped value into ["uuid",...], which ovsdb-server
+            // rejects ("expected string"). For UUID-valued maps (queues), keep
+            // the reference atoms by recursing so the UUID detection applies.
             var mapArray: [JSONValue] = []
             for (key, value) in dict {
-                let pair: [JSONValue] = [.string(key), try convertToJSONValue(value)]
-                mapArray.append(.array(pair))
+                let valueJSON: JSONValue
+                if mapValuesAreUUIDRefs {
+                    valueJSON = try convertToJSONValue(value)
+                } else if let stringValue = value as? String {
+                    valueJSON = .string(stringValue)
+                } else {
+                    valueJSON = try convertToJSONValue(value)
+                }
+                mapArray.append(.array([.string(key), valueJSON]))
             }
             return .array([.string("map"), .array(mapArray)])
         } else {

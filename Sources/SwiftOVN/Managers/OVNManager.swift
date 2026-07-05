@@ -693,7 +693,12 @@ private extension OVNManager {
         }
     }
     
-    func convertToJSONValue(_ object: Any) throws -> JSONValue {
+    /// - Parameter mapValuesAreUUIDRefs: when the object is a map, whether its
+    ///   values are UUID references and must be emitted as `["uuid", ...]`
+    ///   atoms, versus a plain `map<string,string>` (e.g. `external_ids`) whose
+    ///   values stay strings. (No OVN map column is UUID-valued today, but the
+    ///   parameter keeps the string/uuid distinction explicit here too.)
+    func convertToJSONValue(_ object: Any, mapValuesAreUUIDRefs: Bool = false) throws -> JSONValue {
         if object is NSNull {
             return .null
         } else if let bool = object as? Bool {
@@ -713,11 +718,23 @@ private extension OVNManager {
             let jsonArray = try array.map { try convertToJSONValue($0) }
             return .array([.string("set"), .array(jsonArray)])
         } else if let dict = object as? [String: Any] {
-            // OVSDB expects maps in the format ["map", [["key", "value"], ...]]
+            // OVSDB expects maps in the format ["map", [["key", "value"], ...]].
+            // For string-string maps (external_ids, other_config, options, ...)
+            // values must stay strings — running UUID-atom detection on them
+            // turns a UUID-shaped value (e.g. a vm-id in external_ids) into
+            // ["uuid",...], which ovsdb-server rejects ("expected string"). For
+            // UUID-valued maps, keep the reference atoms by recursing.
             var mapArray: [JSONValue] = []
             for (key, value) in dict {
-                let pair: [JSONValue] = [.string(key), try convertToJSONValue(value)]
-                mapArray.append(.array(pair))
+                let valueJSON: JSONValue
+                if mapValuesAreUUIDRefs {
+                    valueJSON = try convertToJSONValue(value)
+                } else if let stringValue = value as? String {
+                    valueJSON = .string(stringValue)
+                } else {
+                    valueJSON = try convertToJSONValue(value)
+                }
+                mapArray.append(.array([.string(key), valueJSON]))
             }
             return .array([.string("map"), .array(mapArray)])
         } else {
