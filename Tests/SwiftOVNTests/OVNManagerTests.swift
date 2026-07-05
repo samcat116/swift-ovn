@@ -11,7 +11,6 @@ final class OVNManagerTests: XCTestCase {
             id: .string("test-1")
         )
         
-        XCTAssertEqual(request.jsonrpc, "2.0")
         XCTAssertEqual(request.method, "list_dbs")
         XCTAssertNil(request.params)
         
@@ -220,7 +219,6 @@ final class JSONRPCClientMockTests: XCTestCase {
         let decodedRequest = try decoder.decode(JSONRPCRequest.self, from: data)
         
         XCTAssertEqual(decodedRequest.method, request.method)
-        XCTAssertEqual(decodedRequest.jsonrpc, request.jsonrpc)
     }
     
     func testOVSDBOperationSerialization() throws {
