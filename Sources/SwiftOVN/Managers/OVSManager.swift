@@ -694,7 +694,11 @@ private extension OVSManager {
         
         // Columns whose map values are UUID references (map<_,uuid>) rather than
         // strings, so their values must be emitted as ["uuid", ...] atoms.
-        let uuidValuedMapColumns: Set<String> = ["queues"]
+        // These are the reference-valued map columns in the Open_vSwitch schema:
+        // QoS.queues (map<integer,Queue>) and Bridge.flow_tables
+        // (map<integer,Flow_Table>). All other maps here (external_ids,
+        // other_config, options, status, rstp_status, ...) are map<string,string>.
+        let uuidValuedMapColumns: Set<String> = ["queues", "flow_tables"]
 
         var row: OVSDBRow = [:]
         for (key, value) in jsonObject {
