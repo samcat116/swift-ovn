@@ -728,9 +728,8 @@ public actor OVNManager: OVNManaging {
 // MARK: - Helper Methods
 
 private extension OVNManager {
-    /// Looks up a row's _uuid via a narrow select, avoiding full-row model
-    /// decoding (which currently chokes on OVSDB's bare-atom/empty-set
-    /// representations for some columns). Returns nil when no row matches.
+    /// Looks up a row's _uuid via a narrow select so existence checks don't
+    /// fetch and decode entire rows. Returns nil when no row matches.
     func rowUUID(in table: String, where condition: OVSDBCondition) async throws -> String? {
         let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
 
