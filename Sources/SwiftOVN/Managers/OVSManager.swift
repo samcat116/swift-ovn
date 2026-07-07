@@ -784,12 +784,12 @@ public actor OVSManager: OVSManaging {
         
         // Add status information
         if let status = firstRow["status"] {
-            result["status"] = convertJSONValueToObject(status)
+            result["status"] = OVSDBRowDecoder.plainObject(from: status)
         }
         
         // Add other_config information  
         if let otherConfig = firstRow["other_config"] {
-            result["other_config"] = convertJSONValueToObject(otherConfig)
+            result["other_config"] = OVSDBRowDecoder.plainObject(from: otherConfig)
         }
         
         return result
@@ -807,15 +807,15 @@ public actor OVSManager: OVSManaging {
         
         // Add available information
         if let status = firstRow["status"] {
-            result["status"] = convertJSONValueToObject(status)
+            result["status"] = OVSDBRowDecoder.plainObject(from: status)
         }
         
         if let externalIds = firstRow["external_ids"] {
-            result["external_ids"] = convertJSONValueToObject(externalIds)
+            result["external_ids"] = OVSDBRowDecoder.plainObject(from: externalIds)
         }
         
         if let otherConfig = firstRow["other_config"] {
-            result["other_config"] = convertJSONValueToObject(otherConfig)
+            result["other_config"] = OVSDBRowDecoder.plainObject(from: otherConfig)
         }
         
         return result
@@ -833,16 +833,16 @@ public actor OVSManager: OVSManaging {
         
         // Add available information
         if let status = firstRow["status"] {
-            result["status"] = convertJSONValueToObject(status)
+            result["status"] = OVSDBRowDecoder.plainObject(from: status)
         }
         
         if let externalIds = firstRow["external_ids"] {
-            result["external_ids"] = convertJSONValueToObject(externalIds)
+            result["external_ids"] = OVSDBRowDecoder.plainObject(from: externalIds)
         }
         
         // Interface table might actually have statistics column
         if let statistics = firstRow["statistics"] {
-            result["statistics"] = convertJSONValueToObject(statistics)
+            result["statistics"] = OVSDBRowDecoder.plainObject(from: statistics)
         }
         
         return result
@@ -857,7 +857,7 @@ public actor OVSManager: OVSManaging {
             monitorRequests[table] = OVSDBMonitorRequest()
         }
         
-        return try await connection.startMonitoring(database: database, tables: monitorRequests)
+        return try await connection.startMonitoring(database: database, tables: monitorRequests).monitorId
     }
     
     public func stopMonitoring(monitorId: String) async throws {
@@ -900,142 +900,10 @@ private extension OVSManager {
     }
 
     func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws -> T {
-        let jsonObject = convertRowToJSONObject(row)
-        let data = try JSONSerialization.data(withJSONObject: jsonObject)
-        let decoder = JSONDecoder()
-        return try decoder.decode(type, from: data)
+        return try OVSDBRowDecoder.decode(type, from: row)
     }
-    
-    func createRow<T: Codable>(from object: T) throws -> OVSDBRow {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(object)
-        let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        
-        // Columns whose map values are UUID references (map<_,uuid>) rather than
-        // strings, so their values must be emitted as ["uuid", ...] atoms.
-        // These are the reference-valued map columns in the Open_vSwitch schema:
-        // QoS.queues (map<integer,Queue>) and Bridge.flow_tables
-        // (map<integer,Flow_Table>). All other maps here (external_ids,
-        // other_config, options, status, rstp_status, ...) are map<string,string>.
-        let uuidValuedMapColumns: Set<String> = ["queues", "flow_tables"]
 
-        var row: OVSDBRow = [:]
-        for (key, value) in jsonObject {
-            if key != "_uuid" { // Skip UUID for inserts
-                row[key] = try convertToJSONValue(
-                    value,
-                    mapValuesAreUUIDRefs: uuidValuedMapColumns.contains(key)
-                )
-            }
-        }
-        return row
-    }
-    
-    func convertRowToJSONObject(_ row: OVSDBRow) -> [String: Any] {
-        var result: [String: Any] = [:]
-        for (key, value) in row {
-            result[key] = convertJSONValueToObject(value)
-        }
-        return result
-    }
-    
-    nonisolated func convertJSONValueToObject(_ value: JSONValue) -> Any {
-        switch value {
-        case .null:
-            return NSNull()
-        case .boolean(let bool):
-            return bool
-        case .number(let number):
-            return number
-        case .string(let string):
-            return string
-        case .array(let array):
-            // Check if this is an OVSDB UUID format ["uuid", "uuid-string"]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "uuid",
-               case .string(let uuidString) = array[1] {
-                return uuidString
-            }
-            // Check if this is an OVSDB map format ["map", [[key, value], ...]]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "map",
-               case .array(let pairs) = array[1] {
-                var result: [String: Any] = [:]
-                for pair in pairs {
-                    if case .array(let kvPair) = pair,
-                       kvPair.count == 2,
-                       case .string(let key) = kvPair[0] {
-                        result[key] = convertJSONValueToObject(kvPair[1])
-                    }
-                }
-                return result
-            }
-            // Check if this is an OVSDB set format ["set", [items...]]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "set",
-               case .array(let items) = array[1] {
-                return items.map { convertJSONValueToObject($0) }
-            }
-            return array.map { convertJSONValueToObject($0) }
-        case .object(let object):
-            var result: [String: Any] = [:]
-            for (key, val) in object {
-                result[key] = convertJSONValueToObject(val)
-            }
-            return result
-        }
-    }
-    
-    /// - Parameter mapValuesAreUUIDRefs: when the object is a map, whether its
-    ///   values are UUID references (e.g. `QoS.queues`, a `map<integer,uuid>`)
-    ///   and must be emitted as `["uuid", ...]` atoms, versus a plain
-    ///   `map<string,string>` (e.g. `external_ids`) whose values stay strings.
-    func convertToJSONValue(_ object: Any, mapValuesAreUUIDRefs: Bool = false) throws -> JSONValue {
-        if object is NSNull {
-            return .null
-        } else if let bool = object as? Bool {
-            return .boolean(bool)
-        } else if let number = object as? NSNumber {
-            return .number(number.doubleValue)
-        } else if let string = object as? String {
-            // Check if this is a UUID reference (UUID format: 8-4-4-4-12 hex digits)
-            let uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-            if string.range(of: uuidPattern, options: .regularExpression) != nil {
-                // OVSDB expects UUID references as ["uuid", "uuid-string"]
-                return .array([.string("uuid"), .string(string)])
-            }
-            return .string(string)
-        } else if let array = object as? [Any] {
-            // OVSDB expects arrays in the format ["set", [items...]]
-            let jsonArray = try array.map { try convertToJSONValue($0) }
-            return .array([.string("set"), .array(jsonArray)])
-        } else if let dict = object as? [String: Any] {
-            // OVSDB expects maps in the format ["map", [["key", "value"], ...]].
-            // For string-string maps (external_ids, other_config, options, ...)
-            // values must stay strings — running UUID-atom detection on them
-            // turns a UUID-shaped value into ["uuid",...], which ovsdb-server
-            // rejects ("expected string"). For UUID-valued maps (queues), keep
-            // the reference atoms by recursing so the UUID detection applies.
-            var mapArray: [JSONValue] = []
-            for (key, value) in dict {
-                let valueJSON: JSONValue
-                if mapValuesAreUUIDRefs {
-                    valueJSON = try convertToJSONValue(value)
-                } else if let stringValue = value as? String {
-                    valueJSON = .string(stringValue)
-                } else {
-                    valueJSON = try convertToJSONValue(value)
-                }
-                mapArray.append(.array([.string(key), valueJSON]))
-            }
-            return .array([.string("map"), .array(mapArray)])
-        } else {
-            throw OVNManagerError.encodingError(
-                NSError(domain: "OVSManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported type for JSON conversion"])
-            )
-        }
+    func createRow<T: Codable>(from object: T) throws -> OVSDBRow {
+        return try OVSDBRowEncoder.makeRow(from: object, hints: .ovs)
     }
 }

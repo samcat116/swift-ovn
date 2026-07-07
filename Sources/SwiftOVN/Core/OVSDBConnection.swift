@@ -351,14 +351,20 @@ public actor OVSDBConnection {
     
     // MARK: - Monitoring
     
+    /// Starts a monitor and returns its ID together with the initial database
+    /// contents (the monitor reply carries one insert-style update per
+    /// existing row when `select.initial` is requested).
+    ///
+    /// To observe subsequent changes without missing any, create the
+    /// `monitorUpdates()` stream *before* calling this method.
     public func startMonitoring(
         database: String,
         tables: [String: OVSDBMonitorRequest],
         monitorId: String? = nil
-    ) async throws -> String {
+    ) async throws -> (monitorId: String, initialUpdates: [OVSDBUpdate]) {
         let id = monitorId ?? UUID().uuidString
 
-        _ = try await client.monitor(
+        let initialState = try await client.monitor(
             database: database,
             monitorId: id,
             requests: tables
@@ -366,9 +372,11 @@ public actor OVSDBConnection {
 
         activeMonitors.insert(id)
 
-        logger.info("Started monitoring database \(database) with ID: \(id)")
+        let initialUpdates = Self.parseTableUpdates(initialState)
 
-        return id
+        logger.info("Started monitoring database \(database) with ID: \(id) (\(initialUpdates.count) initial rows)")
+
+        return (monitorId: id, initialUpdates: initialUpdates)
     }
     
     public func stopMonitoring(monitorId: String) async throws {
@@ -379,39 +387,59 @@ public actor OVSDBConnection {
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
     
-    nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
+    /// Streams row changes from all monitors on this connection, optionally
+    /// filtered to a single monitor ID.
+    ///
+    /// Create the stream *before* calling `startMonitoring` so no update is
+    /// missed; updates are buffered while the consumer is between iterations.
+    /// The stream lives until the connection closes or the consumer cancels.
+    nonisolated public func monitorUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBUpdate, Error> {
+        let clientStream = client.monitorUpdates()
         return AsyncThrowingStream { continuation in
-            Task {
-                let clientStream = client.monitorUpdates()
+            let task = Task {
                 do {
-                    for try await (_, updateValue) in clientStream {
-                        // Parse the update value into OVSDBUpdate format
-                        if case .object(let updateObject) = updateValue {
-                            for (_, tableUpdate) in updateObject {
-                                if case .object(let tableUpdateObject) = tableUpdate {
-                                    for (_, rowUpdate) in tableUpdateObject {
-                                        if case .object(let rowUpdateObject) = rowUpdate {
-                                            let old = rowUpdateObject["old"].flatMap { value in
-                                                if case .object(let obj) = value { return obj }
-                                                return nil
-                                            }
-                                            let new = rowUpdateObject["new"].flatMap { value in
-                                                if case .object(let obj) = value { return obj }
-                                                return nil
-                                            }
-                                            
-                                            let update = OVSDBUpdate(old: old, new: new)
-                                            continuation.yield(update)
-                                        }
-                                    }
-                                }
-                            }
+                    for try await (id, tableUpdates) in clientStream {
+                        if let monitorId, monitorId != id {
+                            continue
+                        }
+                        for update in Self.parseTableUpdates(tableUpdates) {
+                            continuation.yield(update)
                         }
                     }
+                    continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
         }
+    }
+
+    /// Parses an RFC 7047 table-updates object
+    /// (`{table: {row-uuid: {"old": ..., "new": ...}}}`) into row updates.
+    static func parseTableUpdates(_ value: JSONValue) -> [OVSDBUpdate] {
+        guard case .object(let tables) = value else {
+            return []
+        }
+
+        var updates: [OVSDBUpdate] = []
+        for (tableName, tableValue) in tables {
+            guard case .object(let rows) = tableValue else { continue }
+            for (rowUUID, rowValue) in rows {
+                guard case .object(let rowUpdate) = rowValue else { continue }
+                let old = rowUpdate["old"].flatMap { value -> OVSDBRow? in
+                    if case .object(let obj) = value { return obj }
+                    return nil
+                }
+                let new = rowUpdate["new"].flatMap { value -> OVSDBRow? in
+                    if case .object(let obj) = value { return obj }
+                    return nil
+                }
+                updates.append(OVSDBUpdate(table: tableName, uuid: rowUUID, old: old, new: new))
+            }
+        }
+        return updates
     }
 }
