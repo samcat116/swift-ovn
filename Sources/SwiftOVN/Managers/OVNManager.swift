@@ -187,50 +187,15 @@ public actor OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
         }
 
-        let row = try createRow(from: port)
-        let portUUIDName = "new_lsp"
-
-        let operations = [
-            // Guard: abort the whole transaction if the switch vanished
-            // between the check above and this transaction, so the insert
-            // below can never commit as an orphan.
-            OVSDBOperation(
-                op: "wait",
-                table: OVNTable.logicalSwitch,
-                whereConditions: [switchCondition],
-                columns: ["name"],
-                rows: [["name": .string(switchName)]],
-                until: "==",
-                timeout: 0
-            ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVNTable.logicalSwitchPort,
-                row: row,
-                uuidName: portUUIDName
-            ),
-            OVSDBOperation(
-                op: "mutate",
-                table: OVNTable.logicalSwitch,
-                whereConditions: [switchCondition],
-                mutations: [OVSDBMutation(
-                    column: "ports",
-                    mutator: "insert",
-                    value: .array([.string("named-uuid"), .string(portUUIDName)])
-                )]
-            )
-        ]
-
-        let results = try await connection.transact(in: database, operations: operations)
-
-        guard results.count >= 2,
-              case .object(let insertResult) = results[1],
-              let uuid = insertResult["uuid"],
-              case .array(let uuidArray) = uuid,
-              uuidArray.count == 2,
-              case .string(let uuidValue) = uuidArray[1] else {
-            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
-        }
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.logicalSwitchPort,
+            in: database,
+            row: try createRow(from: port),
+            uuidName: "new_lsp",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "ports",
+            parentCondition: switchCondition
+        )
 
         logger.info("Created logical switch port: \(port.name) on switch: \(switchName)")
         return uuidValue
@@ -250,34 +215,14 @@ public actor OVNManager: OVNManaging {
     }
     
     public func deleteLogicalSwitchPort(uuid: String) async throws {
-        let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.logicalSwitchPort,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalSwitch, column: "ports")]
+        )
 
-        let operations = [
-            // Detach the port from any switch referencing it, in the same
-            // transaction as the row delete, so no dangling UUID is left in
-            // Logical_Switch.ports. Matching zero switches is fine (orphan).
-            OVSDBOperation(
-                op: "mutate",
-                table: OVNTable.logicalSwitch,
-                whereConditions: [OVSDBCondition(column: "ports", function: "includes", value: uuidAtom)],
-                mutations: [OVSDBMutation(column: "ports", mutator: "delete", value: uuidAtom)]
-            ),
-            OVSDBOperation(
-                op: "delete",
-                table: OVNTable.logicalSwitchPort,
-                whereConditions: [OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)]
-            )
-        ]
-
-        let results = try await connection.transact(in: database, operations: operations)
-
-        guard results.count >= 2,
-              case .object(let deleteResult) = results[1],
-              case .number(let count)? = deleteResult["count"] else {
-            throw OVNManagerError.invalidResponse("Invalid delete response format")
-        }
-
-        if Int(count) == 0 {
+        if count == 0 {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(uuid)")
         }
 
@@ -380,10 +325,11 @@ public actor OVNManager: OVNManaging {
         return try parseRow(firstRow, as: OVNLogicalRouterPort.self)
     }
     
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createLogicalRouterPort(_:onRouter:) so the port is attached to its router.")
     public func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws -> String {
         let row = try createRow(from: port)
         let result = try await connection.insert(into: OVNTable.logicalRouterPort, in: database, row: row)
-        
+
         guard case .object(let resultObject) = result,
               let uuid = resultObject["uuid"],
               case .array(let uuidArray) = uuid,
@@ -391,11 +337,36 @@ public actor OVNManager: OVNManaging {
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
         }
-        
+
         logger.info("Created logical router port: \(port.name)")
         return uuidValue
     }
-    
+
+    /// Creates a logical router port and attaches it to the named logical
+    /// router in a single OVSDB transaction, mirroring `ovn-nbctl lrp-add`.
+    /// Logical_Router_Port is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits.
+    public func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws -> String {
+        let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
+
+        guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.logicalRouterPort,
+            in: database,
+            row: try createRow(from: port),
+            uuidName: "new_lrp",
+            parentTable: OVNTable.logicalRouter,
+            parentColumn: "ports",
+            parentCondition: routerCondition
+        )
+
+        logger.info("Created logical router port: \(port.name) on router: \(routerName)")
+        return uuidValue
+    }
+
     public func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: port)
@@ -410,24 +381,28 @@ public actor OVNManager: OVNManaging {
     }
     
     public func deleteLogicalRouterPort(uuid: String) async throws {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVNTable.logicalRouterPort, in: database, where: [condition])
-        
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.logicalRouterPort,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalRouter, column: "ports")]
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("Logical router port not found: \(uuid)")
         }
-        
+
         logger.info("Deleted logical router port: \(uuid)")
     }
-    
+
     public func deleteLogicalRouterPort(named name: String) async throws {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let count = try await connection.delete(from: OVNTable.logicalRouterPort, in: database, where: [condition])
-        
-        if count == 0 {
+        guard let uuid = try await rowUUID(in: OVNTable.logicalRouterPort, where: condition) else {
             throw OVNManagerError.operationFailed("Logical router port not found: \(name)")
         }
-        
+
+        try await deleteLogicalRouterPort(uuid: uuid)
+
         logger.info("Deleted logical router port: \(name)")
     }
     
@@ -440,10 +415,11 @@ public actor OVNManager: OVNManaging {
         }
     }
     
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
     public func createACL(_ acl: OVNACL) async throws -> String {
         let row = try createRow(from: acl)
         let result = try await connection.insert(into: OVNTable.acl, in: database, row: row)
-        
+
         guard case .object(let resultObject) = result,
               let uuid = resultObject["uuid"],
               case .array(let uuidArray) = uuid,
@@ -451,8 +427,57 @@ public actor OVNManager: OVNManaging {
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
         }
-        
+
         logger.info("Created ACL")
+        return uuidValue
+    }
+
+    /// Creates an ACL and attaches it to the named logical switch
+    /// (Logical_Switch.acls) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl acl-add`. ACL is not a root table, so an unreferenced row
+    /// is garbage-collected when the transaction commits.
+    public func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws -> String {
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.acl,
+            in: database,
+            row: try createRow(from: acl),
+            uuidName: "new_acl",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "acls",
+            parentCondition: switchCondition
+        )
+
+        logger.info("Created ACL on switch: \(switchName)")
+        return uuidValue
+    }
+
+    /// Creates an ACL and attaches it to the named port group
+    /// (Port_Group.acls) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl acl-add ... pg`.
+    public func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws -> String {
+        let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(portGroupName))
+
+        guard try await rowUUID(in: OVNTable.portGroup, where: groupCondition) != nil else {
+            throw OVNManagerError.operationFailed("Port group not found: \(portGroupName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.acl,
+            in: database,
+            row: try createRow(from: acl),
+            uuidName: "new_acl",
+            parentTable: OVNTable.portGroup,
+            parentColumn: "acls",
+            parentCondition: groupCondition
+        )
+
+        logger.info("Created ACL on port group: \(portGroupName)")
         return uuidValue
     }
     
@@ -470,13 +495,23 @@ public actor OVNManager: OVNManaging {
     }
     
     public func deleteACL(uuid: String) async throws {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVNTable.acl, in: database, where: [condition])
-        
+        // ACLs are strongly referenced from Logical_Switch.acls and
+        // Port_Group.acls; ovsdb-server rejects the delete while either
+        // reference remains, so detach from both in the same transaction.
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.acl,
+            in: database,
+            uuid: uuid,
+            parentReferences: [
+                OVSDBParentReference(table: OVNTable.logicalSwitch, column: "acls"),
+                OVSDBParentReference(table: OVNTable.portGroup, column: "acls")
+            ]
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("ACL not found: \(uuid)")
         }
-        
+
         logger.info("Deleted ACL: \(uuid)")
     }
     
@@ -547,7 +582,37 @@ public actor OVNManager: OVNManaging {
         
         logger.info("Deleted load balancer: \(name)")
     }
-    
+
+    /// Attaches an existing load balancer to the named logical switch
+    /// (Logical_Switch.load_balancer), mirroring `ovn-nbctl ls-lb-add`.
+    /// Load_Balancer is a root table, so rows survive unattached — but a
+    /// load balancer has no effect until a switch or router references it.
+    public func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws {
+        try await attachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        logger.info("Attached load balancer \(uuid) to switch: \(switchName)")
+    }
+
+    /// Attaches an existing load balancer to the named logical router
+    /// (Logical_Router.load_balancer), mirroring `ovn-nbctl lr-lb-add`.
+    public func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws {
+        try await attachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        logger.info("Attached load balancer \(uuid) to router: \(routerName)")
+    }
+
+    /// Detaches a load balancer from the named logical switch, mirroring
+    /// `ovn-nbctl ls-lb-del`. The load balancer row itself is kept.
+    public func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws {
+        try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        logger.info("Detached load balancer \(uuid) from switch: \(switchName)")
+    }
+
+    /// Detaches a load balancer from the named logical router, mirroring
+    /// `ovn-nbctl lr-lb-del`. The load balancer row itself is kept.
+    public func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws {
+        try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        logger.info("Detached load balancer \(uuid) from router: \(routerName)")
+    }
+
     // MARK: - NAT Operations
     
     public func getNATRules() async throws -> [OVNNAT] {
@@ -557,10 +622,11 @@ public actor OVNManager: OVNManaging {
         }
     }
     
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNATRule(_:onRouter:) so the rule is attached to its router.")
     public func createNATRule(_ nat: OVNNAT) async throws -> String {
         let row = try createRow(from: nat)
         let result = try await connection.insert(into: OVNTable.nat, in: database, row: row)
-        
+
         guard case .object(let resultObject) = result,
               let uuid = resultObject["uuid"],
               case .array(let uuidArray) = uuid,
@@ -568,8 +634,33 @@ public actor OVNManager: OVNManaging {
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
         }
-        
+
         logger.info("Created NAT rule")
+        return uuidValue
+    }
+
+    /// Creates a NAT rule and attaches it to the named logical router
+    /// (Logical_Router.nat) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl lr-nat-add`. NAT is not a root table, so an unreferenced
+    /// row is garbage-collected when the transaction commits.
+    public func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws -> String {
+        let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
+
+        guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.nat,
+            in: database,
+            row: try createRow(from: nat),
+            uuidName: "new_nat",
+            parentTable: OVNTable.logicalRouter,
+            parentColumn: "nat",
+            parentCondition: routerCondition
+        )
+
+        logger.info("Created NAT rule on router: \(routerName)")
         return uuidValue
     }
     
@@ -587,13 +678,17 @@ public actor OVNManager: OVNManaging {
     }
     
     public func deleteNATRule(uuid: String) async throws {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVNTable.nat, in: database, where: [condition])
-        
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.nat,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalRouter, column: "nat")]
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("NAT rule not found: \(uuid)")
         }
-        
+
         logger.info("Deleted NAT rule: \(uuid)")
     }
     
@@ -741,6 +836,64 @@ private extension OVNManager {
             throw OVNManagerError.invalidResponse("Invalid _uuid in select response")
         }
         return uuidValue
+    }
+
+    /// The load_balancer columns are weak references: mutating in a UUID
+    /// whose row no longer exists at commit is silently dropped rather than
+    /// rejected, so the load balancer's existence is re-checked with a wait
+    /// op inside the same transaction.
+    func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws {
+        let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
+        let lbCondition = OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)
+
+        guard try await rowUUID(in: OVNTable.loadBalancer, where: lbCondition) != nil else {
+            throw OVNManagerError.operationFailed("Load balancer not found: \(uuid)")
+        }
+
+        let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
+        let operations = [
+            OVSDBOperation(
+                op: "wait",
+                table: OVNTable.loadBalancer,
+                whereConditions: [lbCondition],
+                columns: ["name"],
+                rows: [],
+                until: "!=",
+                timeout: 0
+            ),
+            OVSDBOperation(
+                op: "mutate",
+                table: parentTable,
+                whereConditions: [parentCondition],
+                mutations: [OVSDBMutation(column: "load_balancer", mutator: "insert", value: uuidAtom)]
+            )
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard case .object(let mutateResult)? = results.last,
+              case .number(let count)? = mutateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format")
+        }
+        if Int(count) == 0 {
+            throw OVNManagerError.operationFailed("\(parentDescription) not found: \(parentName)")
+        }
+    }
+
+    func detachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws {
+        let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
+        let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
+
+        let count = try await connection.mutate(
+            table: parentTable,
+            in: database,
+            where: [parentCondition],
+            mutations: [OVSDBMutation(column: "load_balancer", mutator: "delete", value: uuidAtom)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("\(parentDescription) not found: \(parentName)")
+        }
     }
 
     func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws -> T {

@@ -84,7 +84,75 @@ public actor OVSDBConnection {
 
         return results
     }
-    
+
+    /// Inserts a row and adds its UUID to a parent row's reference column in
+    /// the same transaction (see `OVSDBReferenceTransactions`), so the new
+    /// row is never garbage-collected as an orphan. Returns the new row's
+    /// UUID.
+    public func insertAttached(
+        into table: String,
+        in database: String,
+        row: OVSDBRow,
+        uuidName: String,
+        parentTable: String,
+        parentColumn: String,
+        parentCondition: OVSDBCondition?
+    ) async throws -> String {
+        let operations = OVSDBReferenceTransactions.insertAttached(
+            row: row,
+            into: table,
+            uuidName: uuidName,
+            parentTable: parentTable,
+            parentColumn: parentColumn,
+            parentCondition: parentCondition
+        )
+
+        let results = try await transact(in: database, operations: operations)
+
+        // The insert result follows the wait op, if there is one.
+        let insertIndex = parentCondition == nil ? 0 : 1
+        return try Self.uuid(fromInsertResults: results, at: insertIndex)
+    }
+
+    /// Removes the row's UUID from each referencing parent column and deletes
+    /// the row in one transaction (see `OVSDBReferenceTransactions`), so
+    /// neither a dangling reference nor a rejected delete of a
+    /// strongly-referenced row is possible. Returns the number of rows
+    /// deleted.
+    public func deleteDetaching(
+        from table: String,
+        in database: String,
+        uuid: String,
+        parentReferences: [OVSDBParentReference]
+    ) async throws -> Int {
+        let operations = OVSDBReferenceTransactions.deleteDetaching(
+            uuid: uuid,
+            from: table,
+            parentReferences: parentReferences
+        )
+
+        let results = try await transact(in: database, operations: operations)
+
+        guard case .object(let deleteResult)? = results.last,
+              case .number(let count)? = deleteResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid delete response format")
+        }
+        return Int(count)
+    }
+
+    /// Extracts the new row's UUID from the result of an insert operation at
+    /// the given index within a transaction's results.
+    static func uuid(fromInsertResults results: [JSONValue], at index: Int) throws -> String {
+        guard results.count > index,
+              case .object(let insertResult) = results[index],
+              case .array(let uuidArray)? = insertResult["uuid"],
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+        return uuidValue
+    }
+
     public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws -> [OVSDBRow] {
         let operation = OVSDBOperation(
             op: "select",

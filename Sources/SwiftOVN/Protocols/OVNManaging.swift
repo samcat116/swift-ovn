@@ -43,17 +43,22 @@ public protocol OVNManaging {
     // Logical Router Port Operations
     func getLogicalRouterPorts() async throws -> [OVNLogicalRouterPort]
     func getLogicalRouterPort(named name: String) async throws -> OVNLogicalRouterPort?
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createLogicalRouterPort(_:onRouter:) so the port is attached to its router.")
     func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws -> String
+    func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws -> String
     func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws
     func deleteLogicalRouterPort(uuid: String) async throws
     func deleteLogicalRouterPort(named name: String) async throws
-    
+
     // ACL Operations
     func getACLs() async throws -> [OVNACL]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
     func createACL(_ acl: OVNACL) async throws -> String
+    func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws -> String
+    func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws -> String
     func updateACL(uuid: String, _ acl: OVNACL) async throws
     func deleteACL(uuid: String) async throws
-    
+
     // Load Balancer Operations
     func getLoadBalancers() async throws -> [OVNLoadBalancer]
     func getLoadBalancer(named name: String) async throws -> OVNLoadBalancer?
@@ -61,10 +66,16 @@ public protocol OVNManaging {
     func updateLoadBalancer(uuid: String, _ loadBalancer: OVNLoadBalancer) async throws
     func deleteLoadBalancer(uuid: String) async throws
     func deleteLoadBalancer(named name: String) async throws
-    
+    func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws
+    func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws
+    func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws
+    func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws
+
     // NAT Operations
     func getNATRules() async throws -> [OVNNAT]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNATRule(_:onRouter:) so the rule is attached to its router.")
     func createNATRule(_ nat: OVNNAT) async throws -> String
+    func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws -> String
     func updateNATRule(uuid: String, _ nat: OVNNAT) async throws
     func deleteNATRule(uuid: String) async throws
     
@@ -100,6 +111,7 @@ public enum OVNTable {
     public static let logicalRouter = "Logical_Router"
     public static let logicalRouterPort = "Logical_Router_Port"
     public static let acl = "ACL"
+    public static let portGroup = "Port_Group"
     public static let loadBalancer = "Load_Balancer"
     public static let nat = "NAT"
     public static let dhcpOptions = "DHCP_Options"
