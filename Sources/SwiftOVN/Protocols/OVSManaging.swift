@@ -28,23 +28,29 @@ public protocol OVSManaging: Sendable {
     // Port Operations
     func getPorts() async throws -> [OVSPort]
     func getPort(named name: String) async throws -> OVSPort?
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createPort(_:withInterface:onBridge:) so the port is attached to its bridge.")
     func createPort(_ port: OVSPort) async throws -> String
+    func createPort(_ port: OVSPort, withInterface interface: OVSInterface, onBridge bridgeName: String) async throws -> String
     func updatePort(uuid: String, _ port: OVSPort) async throws
     func deletePort(uuid: String) async throws
     func deletePort(named name: String) async throws
-    
+
     // Interface Operations
     func getInterfaces() async throws -> [OVSInterface]
     func getInterface(named name: String) async throws -> OVSInterface?
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createInterface(_:onPort:) to add an interface to an existing port, or createPort(_:withInterface:onBridge:) to create a port with its first interface.")
     func createInterface(_ interface: OVSInterface) async throws -> String
+    func createInterface(_ interface: OVSInterface, onPort portName: String) async throws -> String
     func updateInterface(uuid: String, _ interface: OVSInterface) async throws
     func deleteInterface(uuid: String) async throws
     func deleteInterface(named name: String) async throws
-    
+
     // Controller Operations
     func getControllers() async throws -> [OVSController]
     func getController(target: String) async throws -> OVSController?
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createController(_:onBridge:) so the controller is attached to its bridge.")
     func createController(_ controller: OVSController) async throws -> String
+    func createController(_ controller: OVSController, onBridge bridgeName: String) async throws -> String
     func updateController(uuid: String, _ controller: OVSController) async throws
     func deleteController(uuid: String) async throws
     func deleteController(target: String) async throws
@@ -59,14 +65,18 @@ public protocol OVSManaging: Sendable {
     // Mirror Operations
     func getMirrors() async throws -> [OVSMirror]
     func getMirror(named name: String) async throws -> OVSMirror?
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createMirror(_:onBridge:) so the mirror is attached to its bridge.")
     func createMirror(_ mirror: OVSMirror) async throws -> String
+    func createMirror(_ mirror: OVSMirror, onBridge bridgeName: String) async throws -> String
     func updateMirror(uuid: String, _ mirror: OVSMirror) async throws
     func deleteMirror(uuid: String) async throws
     func deleteMirror(named name: String) async throws
-    
+
     // NetFlow Operations
     func getNetFlows() async throws -> [OVSNetFlow]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNetFlow(_:onBridge:) so the NetFlow config is attached to its bridge.")
     func createNetFlow(_ netflow: OVSNetFlow) async throws -> String
+    func createNetFlow(_ netflow: OVSNetFlow, onBridge bridgeName: String) async throws -> String
     func updateNetFlow(uuid: String, _ netflow: OVSNetFlow) async throws
     func deleteNetFlow(uuid: String) async throws
     

@@ -88,7 +88,7 @@ struct BasicUsageExample {
                 external_ids: ["policy": "internal-communication"]
             )
 
-            let aclUUID = try await ovnManager.createACL(acl)
+            let aclUUID = try await ovnManager.createACL(acl, onSwitch: "example-switch")
             print("✅ Created ACL with UUID: \(aclUUID)")
 
             // List all logical switches
@@ -123,7 +123,7 @@ struct BasicUsageExample {
                 external_ids: ["role": "gateway"]
             )
 
-            let routerPortUUID = try await ovnManager.createLogicalRouterPort(routerPort)
+            let routerPortUUID = try await ovnManager.createLogicalRouterPort(routerPort, onRouter: "example-router")
             print("✅ Created router port with UUID: \(routerPortUUID)")
 
             // Clean up (optional - comment out to keep resources)
@@ -177,26 +177,22 @@ struct BasicUsageExample {
             let bridgeUUID = try await ovsManager.createBridge(bridge)
             print("✅ Created bridge with UUID: \(bridgeUUID)")
 
-            // Create an interface
-            print("\nCreating interface...")
+            // Create a port with its interface, attached to the bridge in a
+            // single transaction (like `ovs-vsctl add-port`)
+            print("\nCreating port with interface...")
             let interface = OVSInterface(
-                name: "example-if",
+                name: "example-port",
                 interfaceType: "internal",
                 external_ids: ["purpose": "example"]
             )
 
-            let interfaceUUID = try await ovsManager.createInterface(interface)
-            print("✅ Created interface with UUID: \(interfaceUUID)")
-
-            // Create a port
-            print("\nCreating port...")
             let port = OVSPort(
                 name: "example-port",
-                interfaces: [interfaceUUID],
+                interfaces: [],
                 external_ids: ["bridge": "br-example"]
             )
 
-            let portUUID = try await ovsManager.createPort(port)
+            let portUUID = try await ovsManager.createPort(port, withInterface: interface, onBridge: "br-example")
             print("✅ Created port with UUID: \(portUUID)")
 
             // List all bridges
@@ -221,7 +217,7 @@ struct BasicUsageExample {
                 external_ids: ["purpose": "monitoring"]
             )
 
-            let mirrorUUID = try await ovsManager.createMirror(mirror)
+            let mirrorUUID = try await ovsManager.createMirror(mirror, onBridge: "br-example")
             print("✅ Created mirror with UUID: \(mirrorUUID)")
 
             // Get bridge statistics (if available)
@@ -236,8 +232,8 @@ struct BasicUsageExample {
             // Clean up (optional)
             print("\nCleaning up resources...")
             try await ovsManager.deleteMirror(uuid: mirrorUUID)
+            // Deleting the port garbage-collects its interface too
             try await ovsManager.deletePort(uuid: portUUID)
-            try await ovsManager.deleteInterface(uuid: interfaceUUID)
             try await ovsManager.deleteBridge(uuid: bridgeUUID)
             print("✅ Cleanup completed")
 

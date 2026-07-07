@@ -304,6 +304,143 @@ final class JSONRPCClientMockTests: XCTestCase {
         XCTAssertEqual((waitJSON?["where"] as? [[Any]])?.count, 1)
     }
 
+    private func encodeOperations(_ operations: [OVSDBOperation]) throws -> [[String: Any]] {
+        let data = try JSONEncoder().encode(operations)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            XCTFail("Operations did not encode as an array of objects")
+            return []
+        }
+        return json
+    }
+
+    func testInsertAttachedTransactionWireFormat() throws {
+        let operations = OVSDBReferenceTransactions.insertAttached(
+            row: ["priority": .number(1000), "direction": .string("to-lport")],
+            into: "ACL",
+            uuidName: "new_acl",
+            parentTable: "Logical_Switch",
+            parentColumn: "acls",
+            parentCondition: OVSDBCondition(column: "name", function: "==", value: .string("ls0"))
+        )
+
+        let json = try encodeOperations(operations)
+        XCTAssertEqual(json.count, 3)
+
+        // Op 0: wait guarding the parent's existence, aborting on mismatch
+        XCTAssertEqual(json[0]["op"] as? String, "wait")
+        XCTAssertEqual(json[0]["table"] as? String, "Logical_Switch")
+        XCTAssertEqual(json[0]["until"] as? String, "==")
+        XCTAssertEqual(json[0]["timeout"] as? Int, 0)
+        XCTAssertEqual(json[0]["columns"] as? [String], ["name"])
+        XCTAssertEqual((json[0]["rows"] as? [[String: Any]])?.first?["name"] as? String, "ls0")
+
+        // Op 1: insert carrying the uuid-name for the mutate to reference
+        XCTAssertEqual(json[1]["op"] as? String, "insert")
+        XCTAssertEqual(json[1]["table"] as? String, "ACL")
+        XCTAssertEqual(json[1]["uuid-name"] as? String, "new_acl")
+        XCTAssertNil(json[1]["where"], "insert must not carry a where clause")
+
+        // Op 2: mutate adding the named-uuid to the parent's reference set
+        XCTAssertEqual(json[2]["op"] as? String, "mutate")
+        XCTAssertEqual(json[2]["table"] as? String, "Logical_Switch")
+        guard let mutation = (json[2]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
+            return XCTFail("Expected one [column, mutator, value] mutation")
+        }
+        XCTAssertEqual(mutation[0] as? String, "acls")
+        XCTAssertEqual(mutation[1] as? String, "insert")
+        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_acl"])
+    }
+
+    func testInsertAttachedToRootParentSkipsWaitAndMatchesAllRows() throws {
+        // The Open_vSwitch root table holds a single row that always exists:
+        // no wait op, and the mutate's empty where matches that one row.
+        let operations = OVSDBReferenceTransactions.insertAttached(
+            row: ["name": .string("br0")],
+            into: "Bridge",
+            uuidName: "new_bridge",
+            parentTable: "Open_vSwitch",
+            parentColumn: "bridges",
+            parentCondition: nil
+        )
+
+        let json = try encodeOperations(operations)
+        XCTAssertEqual(json.count, 2)
+
+        XCTAssertEqual(json[0]["op"] as? String, "insert")
+        XCTAssertEqual(json[0]["uuid-name"] as? String, "new_bridge")
+
+        XCTAssertEqual(json[1]["op"] as? String, "mutate")
+        XCTAssertEqual(json[1]["table"] as? String, "Open_vSwitch")
+        XCTAssertEqual((json[1]["where"] as? [Any])?.count, 0)
+        guard let mutation = (json[1]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
+            return XCTFail("Expected one [column, mutator, value] mutation")
+        }
+        XCTAssertEqual(mutation[0] as? String, "bridges")
+        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_bridge"])
+    }
+
+    func testDeleteDetachingTransactionWireFormat() throws {
+        let uuid = "5e9b0a79-6f38-4e5f-b112-3f0a35b4d2a1"
+        let operations = OVSDBReferenceTransactions.deleteDetaching(
+            uuid: uuid,
+            from: "ACL",
+            parentReferences: [
+                OVSDBParentReference(table: "Logical_Switch", column: "acls"),
+                OVSDBParentReference(table: "Port_Group", column: "acls")
+            ]
+        )
+
+        let json = try encodeOperations(operations)
+        XCTAssertEqual(json.count, 3)
+
+        // Ops 0-1: one detach mutate per parent, selecting rows whose
+        // reference set includes the uuid atom and removing it.
+        for (index, expectedTable) in ["Logical_Switch", "Port_Group"].enumerated() {
+            XCTAssertEqual(json[index]["op"] as? String, "mutate")
+            XCTAssertEqual(json[index]["table"] as? String, expectedTable)
+
+            guard let condition = (json[index]["where"] as? [[Any]])?.first, condition.count == 3 else {
+                return XCTFail("Expected one [column, function, value] condition")
+            }
+            XCTAssertEqual(condition[0] as? String, "acls")
+            XCTAssertEqual(condition[1] as? String, "includes")
+            XCTAssertEqual(condition[2] as? [String], ["uuid", uuid])
+
+            guard let mutation = (json[index]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
+                return XCTFail("Expected one [column, mutator, value] mutation")
+            }
+            XCTAssertEqual(mutation[0] as? String, "acls")
+            XCTAssertEqual(mutation[1] as? String, "delete")
+            XCTAssertEqual(mutation[2] as? [String], ["uuid", uuid])
+        }
+
+        // Op 2: the row delete itself, in the same transaction
+        XCTAssertEqual(json[2]["op"] as? String, "delete")
+        XCTAssertEqual(json[2]["table"] as? String, "ACL")
+        guard let deleteCondition = (json[2]["where"] as? [[Any]])?.first, deleteCondition.count == 3 else {
+            return XCTFail("Expected one [column, function, value] condition")
+        }
+        XCTAssertEqual(deleteCondition[0] as? String, "_uuid")
+        XCTAssertEqual(deleteCondition[1] as? String, "==")
+        XCTAssertEqual(deleteCondition[2] as? [String], ["uuid", uuid])
+    }
+
+    func testInsertResultUUIDExtraction() throws {
+        let results: [JSONValue] = [
+            .object([:]),  // wait result
+            .object(["uuid": .array([.string("uuid"), .string("11111111-2222-3333-4444-555555555555")])]),
+            .object(["count": .number(1)])
+        ]
+
+        XCTAssertEqual(
+            try OVSDBConnection.uuid(fromInsertResults: results, at: 1),
+            "11111111-2222-3333-4444-555555555555"
+        )
+
+        XCTAssertThrowsError(try OVSDBConnection.uuid(fromInsertResults: results, at: 0))
+        XCTAssertThrowsError(try OVSDBConnection.uuid(fromInsertResults: results, at: 3))
+    }
+
     func testMonitorRequestSerialization() throws {
         let monitorRequest = OVSDBMonitorRequest(
             columns: ["name", "ports"],
