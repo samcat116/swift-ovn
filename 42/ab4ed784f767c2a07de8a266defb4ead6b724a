@@ -1,0 +1,33 @@
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_93c3ed38e010e8::t_86a86c77b5d4e6 133,137,145,149-205
+  s_93c3ed38e010e8::t_6df90d3acfb08d 223-250,253,256,258,261-263
+  s_93c3ed38e010e8::t_38f3d834b53dab 206-207
+Examples/BasicUsage.swift
+  s_93c3ed38e010e8::t_1ccd2af5d47c46 74-75
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_93c3ed38e010e8::t_64b7f1830e552a 243-306
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_93c3ed38e010e8::t_81e1cfc110eda1 28,30
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_93c3ed38e010e8::t_d2868109ffeec6 63-86
+Sources/SwiftOVN/Models/OVSDBMutation.swift
+  s_93c3ed38e010e8::t_6585e5d25d8bcd 13-27
+Sources/SwiftOVN/Models/OVSDBOperation.swift
+  s_93c3ed38e010e8::t_85c0499b25d94c 11-14,16,18,20-21,29-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "42ab4ed784f767c2a07de8a266defb4ead6b724a",
+  "prompts": {},
+  "sessions": {
+    "s_93c3ed38e010e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fcfbb1cb-b6e7-4266-bfa0-6ac5a82b77cb",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
