@@ -1,0 +1,60 @@
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_9afaad6c1c2e8c::t_c1884bc64b793e 1-105
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_9afaad6c1c2e8c::t_586a4492067286 307-443
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_9afaad6c1c2e8c::t_68f0a51e0825e9 87-155
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_9afaad6c1c2e8c::t_8ca53778ecfad6 237-245,249,252,255,258-260
+  s_9afaad6c1c2e8c::t_8b5dd37549e89d 144,148,156,160-219
+  s_9afaad6c1c2e8c::t_44683e52988642 220-221,320-321,422-423,552-553,643-644,887-901
+  s_9afaad6c1c2e8c::t_14242199bfc605 98-108,112,115,118,121-123
+  s_9afaad6c1c2e8c::t_61859d2c917e49 514,518,526,530-551
+  s_9afaad6c1c2e8c::t_bcf54eee37e3aa 569-575,579,582,585,588-590
+  s_9afaad6c1c2e8c::t_1d0f29b8d6af4b 603,607,615,619-642
+  s_9afaad6c1c2e8c::t_b54f5490b05a98 660-666,670
+  s_9afaad6c1c2e8c::t_1451779188ccce 439-445,449,452,455,458-460
+  s_9afaad6c1c2e8c::t_11a980ad1a924a 281,285,293,297-319
+  s_9afaad6c1c2e8c::t_308209c480b407 65-68,70-79
+  s_9afaad6c1c2e8c::t_eacbb47ab270a9 336-339,341-347,351,354,357,360-362
+  s_9afaad6c1c2e8c::t_6742d61dc79fa9 383,387,395,399-421
+Sources/SwiftOVN/Protocols/OVSManaging.swift
+  s_9afaad6c1c2e8c::t_8c7c11cc55bf28 31,33,37,41,43,47,51,53
+  s_9afaad6c1c2e8c::t_c539445030361d 68,70,74,77,79
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_9afaad6c1c2e8c::t_993c09cbfed8d3 46,48,52,55,57-58,61,69-73,76,78
+  s_9afaad6c1c2e8c::t_ecb3984670c639 114
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_9afaad6c1c2e8c::t_6a191765b73d0f 625,629,637,641-663
+  s_9afaad6c1c2e8c::t_5623275c932583 482,665,841-898
+  s_9afaad6c1c2e8c::t_64c1e917af7a85 218-223,225
+  s_9afaad6c1c2e8c::t_e5a63e4e946529 328,332,340,344-369
+  s_9afaad6c1c2e8c::t_5ad524b1e49a24 384-390,394,397,400,403-405
+  s_9afaad6c1c2e8c::t_c0e7366b235ab9 585-615
+  s_9afaad6c1c2e8c::t_0c13ff0003eb78 190-198
+  s_9afaad6c1c2e8c::t_9c40ee6c808944 418,422,430,434-481,664
+  s_9afaad6c1c2e8c::t_70804d06d7d0e0 681-687,691
+  s_9afaad6c1c2e8c::t_976546074bd180 498-510,514
+Examples/BasicUsage.swift
+  s_9afaad6c1c2e8c::t_95959989d6b1c8 126
+  s_9afaad6c1c2e8c::t_839279a02db5e9 180-182,184,191,195
+  s_9afaad6c1c2e8c::t_4fac64834da1b7 91
+  s_9afaad6c1c2e8c::t_affc748bbe2cb1 220
+  s_9afaad6c1c2e8c::t_eb12dca10fda05 235
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f9011319e8b6150c97cdd608d7fb58a5822d5fca",
+  "prompts": {},
+  "sessions": {
+    "s_9afaad6c1c2e8c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4fb0fdca-1d23-427f-ae0e-1a876a457856",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
