@@ -164,11 +164,21 @@ public actor OVSDBConnection {
         )
         
         let results = try await client.transact(database: database, operations: [operation])
-        
+
         guard let firstResult = results.first else {
             throw OVNManagerError.invalidResponse("No result from insert operation")
         }
-        
+
+        // Check if there's an error in the response
+        if case .object(let resultObject) = firstResult,
+           let error = resultObject["error"], case .string(let errorMessage) = error {
+            var message = "Insert operation failed: \(errorMessage)"
+            if case .string(let details)? = resultObject["details"] {
+                message += " (\(details))"
+            }
+            throw OVNManagerError.operationFailed(message)
+        }
+
         return firstResult
     }
     
@@ -252,14 +262,22 @@ public actor OVSDBConnection {
         )
         
         let results = try await client.transact(database: database, operations: [operation])
-        
+
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let count = resultObject["count"],
-              case .number(let countValue) = count else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid mutate response format")
         }
-        
+
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Mutate operation failed: \(errorMessage)")
+        }
+
+        guard let count = resultObject["count"],
+              case .number(let countValue) = count else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format: missing count field")
+        }
+
         return Int(countValue)
     }
     

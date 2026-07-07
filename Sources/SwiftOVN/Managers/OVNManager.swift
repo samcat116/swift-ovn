@@ -63,12 +63,13 @@ public actor OVNManager: OVNManaging {
     }
     
     public func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws -> String {
-        guard try await getLogicalSwitch(named: logicalSwitch.name) == nil else {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(logicalSwitch.name))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: nameCondition) == nil else {
             throw OVNManagerError.operationFailed("Logical switch already exists: \(logicalSwitch.name)")
         }
 
         let row = try createRow(from: logicalSwitch)
-        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(logicalSwitch.name))
 
         // The NB schema doesn't enforce unique switch names, so guard against
         // a duplicate racing in between the check above and the insert: abort
@@ -180,12 +181,13 @@ public actor OVNManager: OVNManaging {
     /// A port whose UUID is not referenced by `Logical_Switch.ports` is an
     /// orphan that ovn-northd ignores, so the two steps must never diverge.
     public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws -> String {
-        guard try await getLogicalSwitch(named: switchName) != nil else {
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
             throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
         }
 
         let row = try createRow(from: port)
-        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
         let portUUIDName = "new_lsp"
 
         let operations = [
@@ -283,7 +285,8 @@ public actor OVNManager: OVNManaging {
     }
 
     public func deleteLogicalSwitchPort(named name: String) async throws {
-        guard let port = try await getLogicalSwitchPort(named: name), let uuid = port.uuid else {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        guard let uuid = try await rowUUID(in: OVNTable.logicalSwitchPort, where: condition) else {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(name)")
         }
 
@@ -725,6 +728,21 @@ public actor OVNManager: OVNManaging {
 // MARK: - Helper Methods
 
 private extension OVNManager {
+    /// Looks up a row's _uuid via a narrow select, avoiding full-row model
+    /// decoding (which currently chokes on OVSDB's bare-atom/empty-set
+    /// representations for some columns). Returns nil when no row matches.
+    func rowUUID(in table: String, where condition: OVSDBCondition) async throws -> String? {
+        let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
+
+        guard let row = rows.first else { return nil }
+        guard case .array(let uuidArray)? = row["_uuid"],
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid _uuid in select response")
+        }
+        return uuidValue
+    }
+
     func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws -> T {
         let jsonObject = convertRowToJSONObject(row)
         let data = try JSONSerialization.data(withJSONObject: jsonObject)
