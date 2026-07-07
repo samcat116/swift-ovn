@@ -63,17 +63,45 @@ public actor OVNManager: OVNManaging {
     }
     
     public func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws -> String {
+        guard try await getLogicalSwitch(named: logicalSwitch.name) == nil else {
+            throw OVNManagerError.operationFailed("Logical switch already exists: \(logicalSwitch.name)")
+        }
+
         let row = try createRow(from: logicalSwitch)
-        let result = try await connection.insert(into: OVNTable.logicalSwitch, in: database, row: row)
-        
-        guard case .object(let resultObject) = result,
-              let uuid = resultObject["uuid"],
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(logicalSwitch.name))
+
+        // The NB schema doesn't enforce unique switch names, so guard against
+        // a duplicate racing in between the check above and the insert: abort
+        // the transaction unless no row with this name exists (the same
+        // technique ovn-nbctl ls-add uses to refuse duplicates).
+        let operations = [
+            OVSDBOperation(
+                op: "wait",
+                table: OVNTable.logicalSwitch,
+                whereConditions: [nameCondition],
+                columns: ["name"],
+                rows: [],
+                until: "==",
+                timeout: 0
+            ),
+            OVSDBOperation(
+                op: "insert",
+                table: OVNTable.logicalSwitch,
+                row: row
+            )
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let insertResult) = results[1],
+              let uuid = insertResult["uuid"],
               case .array(let uuidArray) = uuid,
               uuidArray.count == 2,
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
         }
-        
+
         logger.info("Created logical switch: \(logicalSwitch.name)")
         return uuidValue
     }
