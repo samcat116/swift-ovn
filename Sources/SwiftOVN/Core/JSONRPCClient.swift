@@ -160,43 +160,41 @@ public actor JSONRPCClient {
     
     public func cancelMonitor(monitorId: String) async throws {
         let params = JSONRPCParams.array([.string(monitorId)])
-        
-        try await notify(method: "monitor_cancel", params: params)
+
+        // RFC 7047 §4.1.7: monitor_cancel is a request; the server replies
+        // with an empty result once the monitor is torn down.
+        _ = try await call(
+            method: "monitor_cancel",
+            params: params,
+            responseType: JSONValue.self
+        )
     }
-    
+
     // MARK: - Monitoring Stream
-    
+
+    /// Streams `update` notifications as `(monitorId, tableUpdates)` pairs.
+    ///
+    /// Subscribe *before* calling `monitor(...)` so no update is missed; the
+    /// underlying stream buffers notifications between iterations. The stream
+    /// has no idle timeout — it lives until the connection closes or the
+    /// consumer cancels.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
-        AsyncThrowingStream { continuation in
-            Task {
-                while connection.isConnectionActive {
-                    do {
-                        let response: JSONRPCResponse<JSONValue> = try await connection.receiveAny(
-                            as: JSONRPCResponse<JSONValue>.self,
-                            timeout: .seconds(60)
-                        ).get()
-                        
-                        if let result = response.result, 
-                           case .object(let updateObject) = result,
-                           let method = updateObject["method"],
-                           case .string(let methodName) = method,
-                           methodName == "update" {
-                            
-                            if let params = updateObject["params"],
-                               case .array(let paramsArray) = params,
-                               paramsArray.count >= 2,
-                               case .string(let monitorId) = paramsArray[0] {
-                                continuation.yield((monitorId, paramsArray[1]))
-                            }
-                        }
-                    } catch {
-                        if connection.isConnectionActive {
-                            continuation.finish(throwing: error)
-                        }
-                        break
+        let notifications = connection.notifications()
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                for await notification in notifications {
+                    guard notification.method == "update",
+                          case .array(let paramsArray)? = notification.params,
+                          paramsArray.count >= 2,
+                          case .string(let monitorId) = paramsArray[0] else {
+                        continue
                     }
+                    continuation.yield((monitorId, paramsArray[1]))
                 }
                 continuation.finish()
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }
