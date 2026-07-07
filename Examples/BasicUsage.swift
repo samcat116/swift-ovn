@@ -71,8 +71,8 @@ struct BasicUsageExample {
                 external_ids: ["vm": "vm2", "tenant": "demo"]
             )
 
-            let port1UUID = try await ovnManager.createLogicalSwitchPort(port1)
-            let port2UUID = try await ovnManager.createLogicalSwitchPort(port2)
+            let port1UUID = try await ovnManager.createLogicalSwitchPort(port1, onSwitch: "example-switch")
+            let port2UUID = try await ovnManager.createLogicalSwitchPort(port2, onSwitch: "example-switch")
 
             print("✅ Created ports: \(port1UUID), \(port2UUID)")
 

@@ -25,7 +25,9 @@ public protocol OVNManaging {
     // Logical Switch Port Operations
     func getLogicalSwitchPorts() async throws -> [OVNLogicalSwitchPort]
     func getLogicalSwitchPort(named name: String) async throws -> OVNLogicalSwitchPort?
+    @available(*, deprecated, message: "Creates an orphan row that ovn-northd ignores (no Port_Binding, no dataplane). Use createLogicalSwitchPort(_:onSwitch:) so the port is attached to its switch.")
     func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws -> String
+    func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws -> String
     func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws
     func deleteLogicalSwitchPort(uuid: String) async throws
     func deleteLogicalSwitchPort(named name: String) async throws

@@ -60,6 +60,30 @@ public actor OVSDBConnection {
     }
     
     // MARK: - Table Operations
+
+    /// Executes multiple operations in a single OVSDB transaction and returns
+    /// the per-operation results. Throws if any operation reports an error —
+    /// ovsdb-server returns operation errors inside a successful JSON-RPC
+    /// response (RFC 7047 §4.1.3), so callers cannot rely on the RPC layer
+    /// alone to detect a failed/aborted transaction.
+    public func transact(in database: String, operations: [OVSDBOperation]) async throws -> [JSONValue] {
+        let results = try await client.transact(database: database, operations: operations)
+
+        for (index, result) in results.enumerated() {
+            guard case .object(let resultObject) = result,
+                  let error = resultObject["error"],
+                  case .string(let errorName) = error else {
+                continue
+            }
+            var message = "Transaction operation \(index) failed: \(errorName)"
+            if case .string(let details)? = resultObject["details"] {
+                message += " (\(details))"
+            }
+            throw OVNManagerError.operationFailed(message)
+        }
+
+        return results
+    }
     
     public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws -> [OVSDBRow] {
         let operation = OVSDBOperation(
@@ -140,11 +164,21 @@ public actor OVSDBConnection {
         )
         
         let results = try await client.transact(database: database, operations: [operation])
-        
+
         guard let firstResult = results.first else {
             throw OVNManagerError.invalidResponse("No result from insert operation")
         }
-        
+
+        // Check if there's an error in the response
+        if case .object(let resultObject) = firstResult,
+           let error = resultObject["error"], case .string(let errorMessage) = error {
+            var message = "Insert operation failed: \(errorMessage)"
+            if case .string(let details)? = resultObject["details"] {
+                message += " (\(details))"
+            }
+            throw OVNManagerError.operationFailed(message)
+        }
+
         return firstResult
     }
     
@@ -228,14 +262,22 @@ public actor OVSDBConnection {
         )
         
         let results = try await client.transact(database: database, operations: [operation])
-        
+
         guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult,
-              let count = resultObject["count"],
-              case .number(let countValue) = count else {
+              case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid mutate response format")
         }
-        
+
+        // Check if there's an error in the response
+        if let error = resultObject["error"], case .string(let errorMessage) = error {
+            throw OVNManagerError.operationFailed("Mutate operation failed: \(errorMessage)")
+        }
+
+        guard let count = resultObject["count"],
+              case .number(let countValue) = count else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format: missing count field")
+        }
+
         return Int(countValue)
     }
     

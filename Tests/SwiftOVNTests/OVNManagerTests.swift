@@ -240,6 +240,70 @@ final class JSONRPCClientMockTests: XCTestCase {
         XCTAssertEqual(decodedOperation.columns, operation.columns)
     }
     
+    func testOVSDBConditionEncodesAsArray() throws {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string("ls0"))
+
+        let data = try JSONEncoder().encode(condition)
+        let json = try JSONSerialization.jsonObject(with: data)
+
+        XCTAssertEqual(json as? [String], ["name", "==", "ls0"])
+    }
+
+    func testOVSDBMutationEncodesAsArray() throws {
+        // RFC 7047 requires mutations on the wire as [column, mutator, value],
+        // not a keyed object — ovsdb-server rejects the object form.
+        let mutation = OVSDBMutation(
+            column: "ports",
+            mutator: "insert",
+            value: .array([.string("named-uuid"), .string("new_lsp")])
+        )
+
+        let data = try JSONEncoder().encode(mutation)
+        let json = try JSONSerialization.jsonObject(with: data)
+
+        guard let array = json as? [Any], array.count == 3 else {
+            return XCTFail("Expected 3-element array, got \(json)")
+        }
+        XCTAssertEqual(array[0] as? String, "ports")
+        XCTAssertEqual(array[1] as? String, "insert")
+        XCTAssertEqual(array[2] as? [String], ["named-uuid", "new_lsp"])
+
+        let decoded = try JSONDecoder().decode(OVSDBMutation.self, from: data)
+        XCTAssertEqual(decoded.column, mutation.column)
+        XCTAssertEqual(decoded.mutator, mutation.mutator)
+        XCTAssertEqual(decoded.value, mutation.value)
+    }
+
+    func testOVSDBOperationEncodesUUIDNameAndWaitFields() throws {
+        let insert = OVSDBOperation(
+            op: "insert",
+            table: "Logical_Switch_Port",
+            row: ["name": .string("vm1-port")],
+            uuidName: "new_lsp"
+        )
+
+        let insertJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(insert)) as? [String: Any]
+        XCTAssertEqual(insertJSON?["uuid-name"] as? String, "new_lsp")
+        XCTAssertNil(insertJSON?["uuidName"])
+        XCTAssertNil(insertJSON?["where"], "insert must not carry a where clause")
+
+        let wait = OVSDBOperation(
+            op: "wait",
+            table: "Logical_Switch",
+            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("ls0"))],
+            columns: ["name"],
+            rows: [["name": .string("ls0")]],
+            until: "==",
+            timeout: 0
+        )
+
+        let waitJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(wait)) as? [String: Any]
+        XCTAssertEqual(waitJSON?["until"] as? String, "==")
+        XCTAssertEqual(waitJSON?["timeout"] as? Int, 0)
+        XCTAssertEqual((waitJSON?["rows"] as? [[String: Any]])?.first?["name"] as? String, "ls0")
+        XCTAssertEqual((waitJSON?["where"] as? [[Any]])?.count, 1)
+    }
+
     func testMonitorRequestSerialization() throws {
         let monitorRequest = OVSDBMonitorRequest(
             columns: ["name", "ports"],
