@@ -130,10 +130,11 @@ public actor OVNManager: OVNManaging {
         return try parseRow(firstRow, as: OVNLogicalSwitchPort.self)
     }
     
+    @available(*, deprecated, message: "Creates an orphan row that ovn-northd ignores (no Port_Binding, no dataplane). Use createLogicalSwitchPort(_:onSwitch:) so the port is attached to its switch.")
     public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws -> String {
         let row = try createRow(from: port)
         let result = try await connection.insert(into: OVNTable.logicalSwitchPort, in: database, row: row)
-        
+
         guard case .object(let resultObject) = result,
               let uuid = resultObject["uuid"],
               case .array(let uuidArray) = uuid,
@@ -141,8 +142,67 @@ public actor OVNManager: OVNManaging {
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
         }
-        
+
         logger.info("Created logical switch port: \(port.name)")
+        return uuidValue
+    }
+
+    /// Creates a logical switch port and attaches it to the named logical
+    /// switch in a single OVSDB transaction, mirroring `ovn-nbctl lsp-add`.
+    /// A port whose UUID is not referenced by `Logical_Switch.ports` is an
+    /// orphan that ovn-northd ignores, so the two steps must never diverge.
+    public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws -> String {
+        guard try await getLogicalSwitch(named: switchName) != nil else {
+            throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
+        }
+
+        let row = try createRow(from: port)
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+        let portUUIDName = "new_lsp"
+
+        let operations = [
+            // Guard: abort the whole transaction if the switch vanished
+            // between the check above and this transaction, so the insert
+            // below can never commit as an orphan.
+            OVSDBOperation(
+                op: "wait",
+                table: OVNTable.logicalSwitch,
+                whereConditions: [switchCondition],
+                columns: ["name"],
+                rows: [["name": .string(switchName)]],
+                until: "==",
+                timeout: 0
+            ),
+            OVSDBOperation(
+                op: "insert",
+                table: OVNTable.logicalSwitchPort,
+                row: row,
+                uuidName: portUUIDName
+            ),
+            OVSDBOperation(
+                op: "mutate",
+                table: OVNTable.logicalSwitch,
+                whereConditions: [switchCondition],
+                mutations: [OVSDBMutation(
+                    column: "ports",
+                    mutator: "insert",
+                    value: .array([.string("named-uuid"), .string(portUUIDName)])
+                )]
+            )
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let insertResult) = results[1],
+              let uuid = insertResult["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created logical switch port: \(port.name) on switch: \(switchName)")
         return uuidValue
     }
     
@@ -160,24 +220,47 @@ public actor OVNManager: OVNManaging {
     }
     
     public func deleteLogicalSwitchPort(uuid: String) async throws {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVNTable.logicalSwitchPort, in: database, where: [condition])
-        
-        if count == 0 {
+        let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
+
+        let operations = [
+            // Detach the port from any switch referencing it, in the same
+            // transaction as the row delete, so no dangling UUID is left in
+            // Logical_Switch.ports. Matching zero switches is fine (orphan).
+            OVSDBOperation(
+                op: "mutate",
+                table: OVNTable.logicalSwitch,
+                whereConditions: [OVSDBCondition(column: "ports", function: "includes", value: uuidAtom)],
+                mutations: [OVSDBMutation(column: "ports", mutator: "delete", value: uuidAtom)]
+            ),
+            OVSDBOperation(
+                op: "delete",
+                table: OVNTable.logicalSwitchPort,
+                whereConditions: [OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)]
+            )
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let deleteResult) = results[1],
+              case .number(let count)? = deleteResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid delete response format")
+        }
+
+        if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(uuid)")
         }
-        
+
         logger.info("Deleted logical switch port: \(uuid)")
     }
-    
+
     public func deleteLogicalSwitchPort(named name: String) async throws {
-        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let count = try await connection.delete(from: OVNTable.logicalSwitchPort, in: database, where: [condition])
-        
-        if count == 0 {
+        guard let port = try await getLogicalSwitchPort(named: name), let uuid = port.uuid else {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(name)")
         }
-        
+
+        try await deleteLogicalSwitchPort(uuid: uuid)
+
         logger.info("Deleted logical switch port: \(name)")
     }
     

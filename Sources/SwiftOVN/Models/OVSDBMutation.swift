@@ -10,4 +10,19 @@ public struct OVSDBMutation: Codable, Sendable {
         self.mutator = mutator
         self.value = value
     }
+
+    // OVSDB mutations must be encoded as arrays: [column, mutator, value]
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.unkeyedContainer()
+        try container.encode(column)
+        try container.encode(mutator)
+        try container.encode(value)
+    }
+
+    public init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        column = try container.decode(String.self)
+        mutator = try container.decode(String.self)
+        value = try container.decode(JSONValue.self)
+    }
 }

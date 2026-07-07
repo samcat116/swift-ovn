@@ -60,6 +60,30 @@ public actor OVSDBConnection {
     }
     
     // MARK: - Table Operations
+
+    /// Executes multiple operations in a single OVSDB transaction and returns
+    /// the per-operation results. Throws if any operation reports an error —
+    /// ovsdb-server returns operation errors inside a successful JSON-RPC
+    /// response (RFC 7047 §4.1.3), so callers cannot rely on the RPC layer
+    /// alone to detect a failed/aborted transaction.
+    public func transact(in database: String, operations: [OVSDBOperation]) async throws -> [JSONValue] {
+        let results = try await client.transact(database: database, operations: operations)
+
+        for (index, result) in results.enumerated() {
+            guard case .object(let resultObject) = result,
+                  let error = resultObject["error"],
+                  case .string(let errorName) = error else {
+                continue
+            }
+            var message = "Transaction operation \(index) failed: \(errorName)"
+            if case .string(let details)? = resultObject["details"] {
+                message += " (\(details))"
+            }
+            throw OVNManagerError.operationFailed(message)
+        }
+
+        return results
+    }
     
     public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws -> [OVSDBRow] {
         let operation = OVSDBOperation(
