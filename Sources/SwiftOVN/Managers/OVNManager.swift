@@ -728,9 +728,8 @@ public actor OVNManager: OVNManaging {
 // MARK: - Helper Methods
 
 private extension OVNManager {
-    /// Looks up a row's _uuid via a narrow select, avoiding full-row model
-    /// decoding (which currently chokes on OVSDB's bare-atom/empty-set
-    /// representations for some columns). Returns nil when no row matches.
+    /// Looks up a row's _uuid via a narrow select so existence checks don't
+    /// fetch and decode entire rows. Returns nil when no row matches.
     func rowUUID(in table: String, where condition: OVSDBCondition) async throws -> String? {
         let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
 
@@ -744,132 +743,10 @@ private extension OVNManager {
     }
 
     func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws -> T {
-        let jsonObject = convertRowToJSONObject(row)
-        let data = try JSONSerialization.data(withJSONObject: jsonObject)
-        let decoder = JSONDecoder()
-        return try decoder.decode(type, from: data)
+        return try OVSDBRowDecoder.decode(type, from: row)
     }
-    
+
     func createRow<T: Codable>(from object: T) throws -> OVSDBRow {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(object)
-        let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        
-        var row: OVSDBRow = [:]
-        for (key, value) in jsonObject {
-            if key != "_uuid" { // Skip UUID for inserts
-                row[key] = try convertToJSONValue(value)
-            }
-        }
-        return row
-    }
-    
-    func convertRowToJSONObject(_ row: OVSDBRow) -> [String: Any] {
-        var result: [String: Any] = [:]
-        for (key, value) in row {
-            result[key] = convertJSONValueToObject(value)
-        }
-        return result
-    }
-    
-    func convertJSONValueToObject(_ value: JSONValue) -> Any {
-        switch value {
-        case .null:
-            return NSNull()
-        case .boolean(let bool):
-            return bool
-        case .number(let number):
-            return number
-        case .string(let string):
-            return string
-        case .array(let array):
-            // Check if this is an OVSDB UUID format ["uuid", "uuid-string"]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "uuid",
-               case .string(let uuidString) = array[1] {
-                return uuidString
-            }
-            // Check if this is an OVSDB map format ["map", [[key, value], ...]]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "map",
-               case .array(let pairs) = array[1] {
-                var result: [String: Any] = [:]
-                for pair in pairs {
-                    if case .array(let kvPair) = pair,
-                       kvPair.count == 2,
-                       case .string(let key) = kvPair[0] {
-                        result[key] = convertJSONValueToObject(kvPair[1])
-                    }
-                }
-                return result
-            }
-            // Check if this is an OVSDB set format ["set", [items...]]
-            if array.count == 2,
-               case .string(let typeStr) = array[0],
-               typeStr == "set",
-               case .array(let items) = array[1] {
-                return items.map { convertJSONValueToObject($0) }
-            }
-            return array.map { convertJSONValueToObject($0) }
-        case .object(let object):
-            var result: [String: Any] = [:]
-            for (key, val) in object {
-                result[key] = convertJSONValueToObject(val)
-            }
-            return result
-        }
-    }
-    
-    /// - Parameter mapValuesAreUUIDRefs: when the object is a map, whether its
-    ///   values are UUID references and must be emitted as `["uuid", ...]`
-    ///   atoms, versus a plain `map<string,string>` (e.g. `external_ids`) whose
-    ///   values stay strings. (No OVN map column is UUID-valued today, but the
-    ///   parameter keeps the string/uuid distinction explicit here too.)
-    func convertToJSONValue(_ object: Any, mapValuesAreUUIDRefs: Bool = false) throws -> JSONValue {
-        if object is NSNull {
-            return .null
-        } else if let bool = object as? Bool {
-            return .boolean(bool)
-        } else if let number = object as? NSNumber {
-            return .number(number.doubleValue)
-        } else if let string = object as? String {
-            // Check if this is a UUID reference (UUID format: 8-4-4-4-12 hex digits)
-            let uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-            if string.range(of: uuidPattern, options: .regularExpression) != nil {
-                // OVSDB expects UUID references as ["uuid", "uuid-string"]
-                return .array([.string("uuid"), .string(string)])
-            }
-            return .string(string)
-        } else if let array = object as? [Any] {
-            // OVSDB expects arrays in the format ["set", [items...]]
-            let jsonArray = try array.map { try convertToJSONValue($0) }
-            return .array([.string("set"), .array(jsonArray)])
-        } else if let dict = object as? [String: Any] {
-            // OVSDB expects maps in the format ["map", [["key", "value"], ...]].
-            // For string-string maps (external_ids, other_config, options, ...)
-            // values must stay strings — running UUID-atom detection on them
-            // turns a UUID-shaped value (e.g. a vm-id in external_ids) into
-            // ["uuid",...], which ovsdb-server rejects ("expected string"). For
-            // UUID-valued maps, keep the reference atoms by recursing.
-            var mapArray: [JSONValue] = []
-            for (key, value) in dict {
-                let valueJSON: JSONValue
-                if mapValuesAreUUIDRefs {
-                    valueJSON = try convertToJSONValue(value)
-                } else if let stringValue = value as? String {
-                    valueJSON = .string(stringValue)
-                } else {
-                    valueJSON = try convertToJSONValue(value)
-                }
-                mapArray.append(.array([.string(key), valueJSON]))
-            }
-            return .array([.string("map"), .array(mapArray)])
-        } else {
-            throw OVNManagerError.encodingError(
-                NSError(domain: "OVNManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported type for JSON conversion"])
-            )
-        }
+        return try OVSDBRowEncoder.makeRow(from: object, hints: .ovn)
     }
 }
