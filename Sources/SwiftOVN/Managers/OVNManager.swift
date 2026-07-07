@@ -541,7 +541,7 @@ public actor OVNManager: OVNManaging {
             monitorRequests[table] = OVSDBMonitorRequest()
         }
         
-        return try await connection.startMonitoring(database: database, tables: monitorRequests)
+        return try await connection.startMonitoring(database: database, tables: monitorRequests).monitorId
     }
     
     public func stopMonitoring(monitorId: String) async throws {
