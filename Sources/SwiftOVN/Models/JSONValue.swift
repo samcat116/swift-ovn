@@ -37,7 +37,13 @@ public enum JSONValue: Codable, Hashable, Sendable {
         case .string(let value):
             try container.encode(value)
         case .number(let value):
-            try container.encode(value)
+            // OVSDB integer columns and map keys must serialize as JSON
+            // integers; "1.0" is rejected where an integer is expected.
+            if let integer = Int64(exactly: value) {
+                try container.encode(integer)
+            } else {
+                try container.encode(value)
+            }
         case .boolean(let value):
             try container.encode(value)
         case .null:
