@@ -1,0 +1,21 @@
+Package.resolved
+  s_f8c145b36c1b45::t_b2bca8eeaaacac 2,45-46
+Package.swift
+  s_f8c145b36c1b45::t_92ed4f4ec75dc2 22-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f3280395ec1dc966011f7aa6be5d9e2c0ee5ea24",
+  "prompts": {},
+  "sessions": {
+    "s_f8c145b36c1b45": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9f64c7f-10af-4d3e-b798-e7531635d570",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
