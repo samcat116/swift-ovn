@@ -1,11 +1,12 @@
 # SwiftOVN
 
-A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (Open vSwitch) through their JSON-RPC APIs over Unix domain sockets.
+A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (Open vSwitch) through their JSON-RPC APIs over Unix domain sockets, TCP, or TLS.
 
 ## Features
 
 - 🚀 **Type-Safe Swift Models**: Strongly typed, Codable structs for all OVN and OVS database schemas
-- ⚡ **High Performance**: SwiftNIO-based asynchronous Unix socket communication
+- ⚡ **High Performance**: SwiftNIO-based asynchronous socket communication
+- 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL)
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
 - 🌍 **Cross-Platform**: Works on Linux, macOS, and other platforms supported by Swift
@@ -106,8 +107,9 @@ try await SwiftOVN.stopMonitoring(monitorId: monitorId)
 
 ### Core Components
 
-- **JSONRPCClient**: Low-level JSON-RPC communication over Unix sockets
-- **UnixSocketConnection**: SwiftNIO-based Unix domain socket handling
+- **JSONRPCClient**: Low-level JSON-RPC communication over any OVSDB transport
+- **OVSDBSocketConnection**: SwiftNIO-based Unix socket, TCP, and TLS transport (`UnixSocketConnection` remains as an alias)
+- **OVSDBEndpoint**: Endpoint description (`.unix`/`.tcp`/`.ssl`) with OVN-style string parsing
 - **OVSDBConnection**: OVSDB protocol implementation with monitoring support
 - **SwiftOVN**: High-level interface for OVN operations
 - **OVSManager**: High-level interface for OVS operations
@@ -136,6 +138,34 @@ The package includes comprehensive Swift models for:
 - `OVSQoS` - Quality of service policies
 
 ## Advanced Usage
+
+### Remote Databases (TCP/SSL)
+
+A central OVN deployment usually exposes its northbound database on port 6641
+and southbound on 6642. Connect to a remote database with an `OVSDBEndpoint`:
+
+```swift
+// Cleartext TCP
+let manager = OVNManager(endpoint: .tcp(host: "ovn-central.example.com", port: 6641))
+try await manager.connect()
+
+// TLS with an ovn-pki-style private CA and client certificate
+let tls = OVSDBTLSConfiguration(
+    caCertificatePath: "/etc/ovn/cacert.pem",
+    clientCertificatePath: "/etc/ovn/client-cert.pem",
+    clientPrivateKeyPath: "/etc/ovn/client-privkey.pem"
+)
+let secureManager = OVNManager(
+    endpoint: .ssl(host: "ovn-central.example.com", port: 6641, tls: tls),
+    database: OVNDatabase.northbound
+)
+
+// OVN-style connection strings are also supported
+let endpoint = try OVSDBEndpoint(parsing: "tcp:ovn-central.example.com:6641")
+```
+
+The existing `socketPath:` initializers are unchanged and equivalent to
+`.unix(path:)`.
 
 ### Custom Connection Configuration
 
