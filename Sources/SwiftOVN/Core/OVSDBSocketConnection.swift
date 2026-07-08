@@ -60,8 +60,12 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                 logger.error("Failed to build TLS context: \(error)")
                 return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)"))
             }
-            // SNI/hostname verification only applies to DNS names; NIOSSL
-            // rejects IP literals as SNI hostnames.
+            // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
+            // nil for them. This does not weaken verification: under
+            // .fullVerification NIOSSL still validates identity with a nil
+            // hostname by matching the connection's remote address against
+            // the certificate's IP SANs (NIOSSLHandler.validateHostname →
+            // validIdentityForService), and fails the handshake on no match.
             let hostname = tls.serverHostname ?? host
             sslServerHostname = Self.isIPAddressLiteral(hostname) ? nil : hostname
         }

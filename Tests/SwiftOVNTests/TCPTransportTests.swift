@@ -34,8 +34,8 @@ final class TCPTransportTests: XCTestCase {
     }
 
     func testJSONRPCClientOverTCP() async throws {
+        // No explicit server cleanup: tearDown's group shutdown closes it.
         let server = try await startServer()
-        defer { try? server.close().wait() }
         let port = try XCTUnwrap(server.localAddress?.port)
 
         let client = JSONRPCClient(
@@ -59,7 +59,6 @@ final class TCPTransportTests: XCTestCase {
         // OVSDBConnection.connect() performs the initial echo handshake, so a
         // successful connect proves the full request/response path over TCP.
         let server = try await startServer()
-        defer { try? server.close().wait() }
         let port = try XCTUnwrap(server.localAddress?.port)
 
         let connection = OVSDBConnection(
