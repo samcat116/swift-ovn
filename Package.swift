@@ -19,7 +19,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.26.0"),
+        // 2.37.0 requires Swift tools 6.1; stay below it while this package
+        // and CI build with Swift 6.0.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", "2.26.0"..<"2.37.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
     ],
     targets: [
