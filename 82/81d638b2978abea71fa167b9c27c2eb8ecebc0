@@ -1,0 +1,21 @@
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_f8c145b36c1b45::t_cc9053fc1bf042 63-68
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_f8c145b36c1b45::t_34be6fddc6529f 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "8281d638b2978abea71fa167b9c27c2eb8ecebc0",
+  "prompts": {},
+  "sessions": {
+    "s_f8c145b36c1b45": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9f64c7f-10af-4d3e-b798-e7531635d570",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
