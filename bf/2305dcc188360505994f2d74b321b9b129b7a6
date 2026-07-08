@@ -1,0 +1,29 @@
+Tests/SwiftOVNTests/TLSTransportTests.swift
+  s_f8c145b36c1b45::t_b09f08d4437b3a 1-170
+Package.swift
+  s_f8c145b36c1b45::t_68e33f5ed3aa28 46-49
+  s_f8c145b36c1b45::t_5a7853e82475e7 34
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_f8c145b36c1b45::t_fa32d5404391d6 93
+  s_f8c145b36c1b45::t_612998da691b6c 5
+  s_f8c145b36c1b45::t_43d6439b6ae613 257-324
+  s_f8c145b36c1b45::t_8157191d92f548 117-130
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_f8c145b36c1b45::t_ffe3114bd17780 98-100
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "bf2305dcc188360505994f2d74b321b9b129b7a6",
+  "prompts": {},
+  "sessions": {
+    "s_f8c145b36c1b45": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9f64c7f-10af-4d3e-b798-e7531635d570",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
