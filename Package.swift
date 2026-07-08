@@ -31,6 +31,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOTLS", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "Logging", package: "swift-log"),
             ]
@@ -42,7 +43,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftOVNTests",
-            dependencies: ["SwiftOVN"]
+            dependencies: [
+                "SwiftOVN",
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
         ),
     ]
 )

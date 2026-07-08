@@ -95,8 +95,9 @@ final class TCPTransportTests: XCTestCase {
 
 /// Answers `echo` and `list_dbs` requests the way ovsdb-server would.
 /// Assumes each inbound read contains exactly one JSON-RPC object, which
-/// holds for the sequential requests these tests issue.
-private final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable {
+/// holds for the sequential requests these tests issue. Shared with
+/// `TLSTransportTests`.
+final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 

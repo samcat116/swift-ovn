@@ -2,6 +2,7 @@ import Foundation
 import NIO
 import NIOPosix
 import NIOSSL
+import NIOTLS
 import Logging
 
 /// Preserved name from when the connection was Unix-socket only.
@@ -89,6 +90,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                         self.logger.error("Failed to create TLS handler: \(error)")
                         return channel.eventLoop.makeFailedFuture(error)
                     }
+                    handlers.append(TLSHandshakeWaitHandler())
                 }
                 handlers.append(contentsOf: [
                     ByteToMessageHandler(OVSDBJSONFrameDecoder()),
@@ -112,6 +114,20 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         }
 
         return connectFuture
+            .flatMap { channel -> EventLoopFuture<Channel> in
+                // For ssl: endpoints the TCP connect completing is not enough;
+                // certificate verification happens during the TLS handshake,
+                // so hold the connect future until the handshake finishes and
+                // fail it if verification fails.
+                guard sslContext != nil else {
+                    return channel.eventLoop.makeSucceededFuture(channel)
+                }
+                return channel.pipeline.handler(type: TLSHandshakeWaitHandler.self)
+                    .flatMap { handler in
+                        handler.handshakeFuture ?? channel.eventLoop.makeSucceededFuture(())
+                    }
+                    .map { channel }
+            }
             .map { channel in
                 self.logger.debug("Raw connection established, setting up channel...")
                 self.connectionLock.lock()
@@ -235,6 +251,74 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         connectionLock.lock()
         defer { connectionLock.unlock() }
         return isConnected && channel?.isActive == true
+    }
+}
+
+// MARK: - TLS Handshake Wait
+
+/// Surfaces TLS handshake completion as a future, so `connect()` on an `ssl:`
+/// endpoint succeeds only after certificate verification instead of at TCP
+/// establishment. All members are accessed on the channel's event loop.
+final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Any
+
+    private let timeout: TimeAmount
+    private var promise: EventLoopPromise<Void>?
+    private var timeoutTask: Scheduled<Void>?
+    private var isComplete = false
+
+    init(timeout: TimeAmount = .seconds(30)) {
+        self.timeout = timeout
+    }
+
+    /// nil only before the handler is added to a pipeline.
+    var handshakeFuture: EventLoopFuture<Void>? {
+        return promise?.futureResult
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        promise = context.eventLoop.makePromise(of: Void.self)
+        // A server that accepts TCP but never answers the ClientHello (e.g. an
+        // ssl: endpoint pointed at a cleartext port) would otherwise hang the
+        // connect forever.
+        let channel = context.channel
+        timeoutTask = context.eventLoop.scheduleTask(in: timeout) {
+            self.complete(.failure(OVNManagerError.connectionFailed("TLS handshake timed out")))
+            channel.close(promise: nil)
+        }
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let tlsEvent = event as? TLSUserEvent, case .handshakeCompleted = tlsEvent {
+            complete(.success(()))
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        complete(.failure(error))
+        context.fireErrorCaught(error)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        complete(.failure(OVNManagerError.connectionFailed("Connection closed during TLS handshake")))
+        context.fireChannelInactive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        complete(.failure(OVNManagerError.connectionFailed("Connection closed before TLS handshake completed")))
+    }
+
+    private func complete(_ result: Result<Void, Error>) {
+        guard !isComplete else { return }
+        isComplete = true
+        timeoutTask?.cancel()
+        switch result {
+        case .success:
+            promise?.succeed(())
+        case .failure(let error):
+            promise?.fail(error)
+        }
     }
 }
 
