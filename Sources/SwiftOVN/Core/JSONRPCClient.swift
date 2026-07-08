@@ -3,16 +3,26 @@ import NIO
 import Logging
 
 public actor JSONRPCClient {
-    private let connection: UnixSocketConnection
+    private let connection: any OVSDBTransport
     private let logger: Logger
     private var requestId: Int = 0
-    
-    public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
-        self.connection = UnixSocketConnection(
-            socketPath: socketPath, 
+
+    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.connection = OVSDBSocketConnection(
+            endpoint: endpoint,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
+        self.logger = logger ?? Logger(label: "ovn-manager.jsonrpc-client")
+    }
+
+    public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
+    }
+
+    /// Runs the client over a caller-supplied transport (e.g. a mock in tests).
+    public init(transport: any OVSDBTransport, logger: Logger? = nil) {
+        self.connection = transport
         self.logger = logger ?? Logger(label: "ovn-manager.jsonrpc-client")
     }
     

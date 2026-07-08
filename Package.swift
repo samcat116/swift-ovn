@@ -19,6 +19,9 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        // 2.37.0 requires Swift tools 6.1; stay below it while this package
+        // and CI build with Swift 6.0.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", "2.26.0"..<"2.37.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
     ],
     targets: [
@@ -28,6 +31,8 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
@@ -38,7 +43,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftOVNTests",
-            dependencies: ["SwiftOVN"]
+            dependencies: [
+                "SwiftOVN",
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
         ),
     ]
 )

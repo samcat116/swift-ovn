@@ -7,13 +7,17 @@ public actor OVSDBConnection {
     private let logger: Logger
     private var activeMonitors: Set<String> = []
     
-    public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.client = JSONRPCClient(
-            socketPath: socketPath,
+            endpoint: endpoint,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.logger = logger ?? Logger(label: "ovn-manager.ovsdb-connection")
+    }
+
+    public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
     }
     
     public func connect() async throws {

@@ -7,14 +7,18 @@ public actor OVNManager: OVNManaging {
     private let logger: Logger
     private let database: String
     
-    public init(socketPath: String, database: String = OVNDatabase.northbound, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    public init(endpoint: OVSDBEndpoint, database: String = OVNDatabase.northbound, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.connection = OVSDBConnection(
-            socketPath: socketPath,
+            endpoint: endpoint,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.database = database
         self.logger = logger ?? Logger(label: "ovn-manager.ovn")
+    }
+
+    public init(socketPath: String, database: String = OVNDatabase.northbound, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.init(endpoint: .unix(path: socketPath), database: database, eventLoopGroup: eventLoopGroup, logger: logger)
     }
     
     // MARK: - Connection Management

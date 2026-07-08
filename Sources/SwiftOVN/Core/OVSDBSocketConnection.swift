@@ -1,24 +1,32 @@
 import Foundation
 import NIO
 import NIOPosix
+import NIOSSL
+import NIOTLS
 import Logging
 
-public final class UnixSocketConnection: @unchecked Sendable {
+/// Preserved name from when the connection was Unix-socket only.
+public typealias UnixSocketConnection = OVSDBSocketConnection
+
+public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     private let eventLoopGroup: EventLoopGroup
     private let logger: Logger
     private var channel: Channel?
-    private let socketPath: String
+    private let endpoint: OVSDBEndpoint
     private var isConnected: Bool = false
     private var responseRouter: JSONRPCResponseRouter?
     private let connectionLock = NSLock()
     private let notificationHub = JSONRPCNotificationHub()
 
-    public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
-        self.socketPath = socketPath
+    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.endpoint = endpoint
         self.eventLoopGroup = eventLoopGroup ?? MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        self.logger = logger ?? Logger(label: "ovn-manager.unix-socket")
+        self.logger = logger ?? Logger(label: "ovn-manager.socket")
     }
 
+    public convenience init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+        self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
+    }
 
     public func connect() -> EventLoopFuture<Void> {
         connectionLock.lock()
@@ -26,20 +34,42 @@ public final class UnixSocketConnection: @unchecked Sendable {
         connectionLock.unlock()
 
         guard !alreadyConnected else {
-            logger.debug("Already connected to Unix socket")
+            logger.debug("Already connected to \(endpoint)")
             return eventLoopGroup.next().makeSucceededFuture(())
         }
 
-        logger.info("Connecting to Unix socket at: \(socketPath)")
-        logger.debug("Checking if socket file exists...")
+        logger.info("Connecting to OVSDB endpoint: \(endpoint)")
 
-        // Check if socket file exists
-        if !FileManager.default.fileExists(atPath: socketPath) {
-            logger.error("Socket file does not exist at path: \(socketPath)")
-            return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(socketPath)"))
+        // TLS state that must exist before the pipeline is built.
+        let sslContext: NIOSSLContext?
+        let sslServerHostname: String?
+        switch endpoint {
+        case .unix(let path):
+            if !FileManager.default.fileExists(atPath: path) {
+                logger.error("Socket file does not exist at path: \(path)")
+                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(path)"))
+            }
+            sslContext = nil
+            sslServerHostname = nil
+        case .tcp:
+            sslContext = nil
+            sslServerHostname = nil
+        case .ssl(let host, _, let tls):
+            do {
+                sslContext = try Self.makeSSLContext(tls)
+            } catch {
+                logger.error("Failed to build TLS context: \(error)")
+                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)"))
+            }
+            // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
+            // nil for them. This does not weaken verification: under
+            // .fullVerification NIOSSL still validates identity with a nil
+            // hostname by matching the connection's remote address against
+            // the certificate's IP SANs (NIOSSLHandler.validateHostname →
+            // validIdentityForService), and fails the handshake on no match.
+            let hostname = tls.serverHostname ?? host
+            sslServerHostname = Self.isIPAddressLiteral(hostname) ? nil : hostname
         }
-
-        logger.debug("Socket file exists, creating bootstrap...")
 
         let bootstrap = ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -51,11 +81,23 @@ public final class UnixSocketConnection: @unchecked Sendable {
                     notificationHub: self.notificationHub
                 )
                 self.responseRouter = router
-                return channel.pipeline.addHandlers([
+
+                var handlers: [ChannelHandler] = []
+                if let sslContext {
+                    do {
+                        handlers.append(try NIOSSLClientHandler(context: sslContext, serverHostname: sslServerHostname))
+                    } catch {
+                        self.logger.error("Failed to create TLS handler: \(error)")
+                        return channel.eventLoop.makeFailedFuture(error)
+                    }
+                    handlers.append(TLSHandshakeWaitHandler())
+                }
+                handlers.append(contentsOf: [
                     ByteToMessageHandler(OVSDBJSONFrameDecoder()),
                     MessageToByteHandler(StringToByteEncoder()),
                     router
-                ]).map { _ in
+                ] as [ChannelHandler])
+                return channel.pipeline.addHandlers(handlers).map { _ in
                     self.logger.debug("Channel pipeline initialized successfully")
                 }.flatMapError { error in
                     self.logger.error("Failed to initialize channel pipeline: \(error)")
@@ -63,26 +105,71 @@ public final class UnixSocketConnection: @unchecked Sendable {
                 }
             }
 
-        logger.debug("Attempting to connect to Unix domain socket...")
+        let connectFuture: EventLoopFuture<Channel>
+        switch endpoint {
+        case .unix(let path):
+            connectFuture = bootstrap.connect(unixDomainSocketPath: path)
+        case .tcp(let host, let port), .ssl(let host, let port, _):
+            connectFuture = bootstrap.connect(host: host, port: port)
+        }
 
-        return bootstrap.connect(unixDomainSocketPath: socketPath)
+        return connectFuture
+            .flatMap { channel -> EventLoopFuture<Channel> in
+                // For ssl: endpoints the TCP connect completing is not enough;
+                // certificate verification happens during the TLS handshake,
+                // so hold the connect future until the handshake finishes and
+                // fail it if verification fails.
+                guard sslContext != nil else {
+                    return channel.eventLoop.makeSucceededFuture(channel)
+                }
+                return channel.pipeline.handler(type: TLSHandshakeWaitHandler.self)
+                    .flatMap { handler in
+                        handler.handshakeFuture ?? channel.eventLoop.makeSucceededFuture(())
+                    }
+                    .map { channel }
+            }
             .map { channel in
                 self.logger.debug("Raw connection established, setting up channel...")
                 self.connectionLock.lock()
                 self.channel = channel
                 self.isConnected = true
                 self.connectionLock.unlock()
-                self.logger.info("Successfully connected to Unix socket")
+                self.logger.info("Successfully connected to \(self.endpoint)")
                 self.logger.debug("Channel active: \(channel.isActive), writable: \(channel.isWritable)")
             }
             .flatMapError { error in
-                self.logger.error("Failed to connect to Unix socket: \(error)")
+                self.logger.error("Failed to connect to \(self.endpoint): \(error)")
                 self.logger.error("Error type: \(type(of: error))")
                 if let ioError = error as? IOError {
                     self.logger.error("IO error code: \(ioError.errnoCode)")
                 }
-                return self.eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Failed to connect to \(self.socketPath): \(error)"))
+                return self.eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Failed to connect to \(self.endpoint): \(error)"))
             }
+    }
+
+    private static func makeSSLContext(_ tls: OVSDBTLSConfiguration) throws -> NIOSSLContext {
+        var configuration = TLSConfiguration.makeClientConfiguration()
+        if let caPath = tls.caCertificatePath {
+            configuration.trustRoots = .file(caPath)
+        }
+        if let certPath = tls.clientCertificatePath {
+            configuration.certificateChain = try NIOSSLCertificate.fromPEMFile(certPath).map { .certificate($0) }
+        }
+        if let keyPath = tls.clientPrivateKeyPath {
+            configuration.privateKey = .file(keyPath)
+        }
+        if !tls.verifiesServerCertificate {
+            configuration.certificateVerification = .none
+        }
+        return try NIOSSLContext(configuration: configuration)
+    }
+
+    private static func isIPAddressLiteral(_ host: String) -> Bool {
+        var ipv4 = in_addr()
+        var ipv6 = in6_addr()
+        return host.withCString { pointer in
+            inet_pton(AF_INET, pointer, &ipv4) == 1 || inet_pton(AF_INET6, pointer, &ipv6) == 1
+        }
     }
 
     public func disconnect() -> EventLoopFuture<Void> {
@@ -92,7 +179,7 @@ public final class UnixSocketConnection: @unchecked Sendable {
             return eventLoopGroup.next().makeSucceededFuture(())
         }
 
-        logger.info("Disconnecting from Unix socket")
+        logger.info("Disconnecting from \(endpoint)")
         self.isConnected = false
         self.responseRouter = nil
         connectionLock.unlock()
@@ -103,7 +190,7 @@ public final class UnixSocketConnection: @unchecked Sendable {
             self.connectionLock.lock()
             self.channel = nil
             self.connectionLock.unlock()
-            self.logger.info("Successfully disconnected from Unix socket")
+            self.logger.info("Successfully disconnected from \(self.endpoint)")
         }
     }
 
@@ -122,7 +209,7 @@ public final class UnixSocketConnection: @unchecked Sendable {
             let data = try encoder.encode(message)
             guard let jsonString = String(data: data, encoding: .utf8) else {
                 throw OVNManagerError.encodingError(
-                    NSError(domain: "UnixSocketConnection", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert data to string"])
+                    NSError(domain: "OVSDBSocketConnection", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert data to string"])
                 )
             }
 
@@ -164,6 +251,74 @@ public final class UnixSocketConnection: @unchecked Sendable {
         connectionLock.lock()
         defer { connectionLock.unlock() }
         return isConnected && channel?.isActive == true
+    }
+}
+
+// MARK: - TLS Handshake Wait
+
+/// Surfaces TLS handshake completion as a future, so `connect()` on an `ssl:`
+/// endpoint succeeds only after certificate verification instead of at TCP
+/// establishment. All members are accessed on the channel's event loop.
+final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Any
+
+    private let timeout: TimeAmount
+    private var promise: EventLoopPromise<Void>?
+    private var timeoutTask: Scheduled<Void>?
+    private var isComplete = false
+
+    init(timeout: TimeAmount = .seconds(30)) {
+        self.timeout = timeout
+    }
+
+    /// nil only before the handler is added to a pipeline.
+    var handshakeFuture: EventLoopFuture<Void>? {
+        return promise?.futureResult
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        promise = context.eventLoop.makePromise(of: Void.self)
+        // A server that accepts TCP but never answers the ClientHello (e.g. an
+        // ssl: endpoint pointed at a cleartext port) would otherwise hang the
+        // connect forever.
+        let channel = context.channel
+        timeoutTask = context.eventLoop.scheduleTask(in: timeout) {
+            self.complete(.failure(OVNManagerError.connectionFailed("TLS handshake timed out")))
+            channel.close(promise: nil)
+        }
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if let tlsEvent = event as? TLSUserEvent, case .handshakeCompleted = tlsEvent {
+            complete(.success(()))
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        complete(.failure(error))
+        context.fireErrorCaught(error)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        complete(.failure(OVNManagerError.connectionFailed("Connection closed during TLS handshake")))
+        context.fireChannelInactive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        complete(.failure(OVNManagerError.connectionFailed("Connection closed before TLS handshake completed")))
+    }
+
+    private func complete(_ result: Result<Void, Error>) {
+        guard !isComplete else { return }
+        isComplete = true
+        timeoutTask?.cancel()
+        switch result {
+        case .success:
+            promise?.succeed(())
+        case .failure(let error):
+            promise?.fail(error)
+        }
     }
 }
 

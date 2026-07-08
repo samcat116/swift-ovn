@@ -48,7 +48,7 @@ The codebase follows a clean architecture with clear separation of concerns:
 
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
-   - `UnixSocketConnection.swift`: SwiftNIO-based Unix socket implementation
+   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias)
    - `OVSDBConnection.swift`: OVSDB protocol with real-time monitoring via AsyncSequence
 
 2. **High-level managers** (`/Sources/SwiftOVN/Managers/`):
