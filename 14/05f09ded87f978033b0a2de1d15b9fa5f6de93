@@ -1,0 +1,55 @@
+Package.swift
+  s_f8c145b36c1b45::t_64fd38031d4abb 22
+  s_f8c145b36c1b45::t_ea22002968d29c 32
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_f8c145b36c1b45::t_00dd707007e634 10,12,18-20
+  s_f8c145b36c1b45::t_c1c48b66aa95fc 21
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_f8c145b36c1b45::t_95bf4271300913 192
+  s_f8c145b36c1b45::t_26ca565f8fba5a 162
+  s_f8c145b36c1b45::t_5aab889a59164e 4-153,160,174-175,184,194,201-202,211,215,228,234,254,259,268-269,279-280,286,316,320,329,334,346,356,362-363,369,383,388-389,398-399,412-413,420,432-433,447,454,460,471-472,496-497,501,535,543,564,567-568,571,575,583
+  s_f8c145b36c1b45::t_6551d1c6c0916a 173
+  s_f8c145b36c1b45::t_83aef453e7bf37 154
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_f8c145b36c1b45::t_ab300feba93406 10,12,19-21
+  s_f8c145b36c1b45::t_61017db9fde03c 22
+Sources/SwiftOVN/Core/OVSDBEndpoint.swift
+  s_f8c145b36c1b45::t_f2c86b1c111403 1-151
+Sources/SwiftOVN/Core/OVSDBTransport.swift
+  s_f8c145b36c1b45::t_349fd3954d097d 1-24
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_f8c145b36c1b45::t_9b9e592d0f9ab6 10,12,19-21
+  s_f8c145b36c1b45::t_334f4150494a20 22
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_f8c145b36c1b45::t_455a004baf2da8 1-134
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_f8c145b36c1b45::t_bd26f1b9188170 6,9-12,18-25,27
+  s_f8c145b36c1b45::t_1acc8bfe14177d 26
+README.md
+  s_f8c145b36c1b45::t_a489a14cb9b30b 110-112
+  s_f8c145b36c1b45::t_9476d84f8b5033 3
+  s_f8c145b36c1b45::t_6278aa47bf5600 8-9
+  s_f8c145b36c1b45::t_938cbd151cfb73 142-169
+CLAUDE.md
+  s_f8c145b36c1b45::t_f2d563f941a393 51
+Tests/SwiftOVNTests/OVSDBEndpointTests.swift
+  s_f8c145b36c1b45::t_33f634c086ff81 1-89
+Package.resolved
+  s_f8c145b36c1b45::t_724052f5b10008 2,40-48,59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "1405f09ded87f978033b0a2de1d15b9fa5f6de93",
+  "prompts": {},
+  "sessions": {
+    "s_f8c145b36c1b45": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9f64c7f-10af-4d3e-b798-e7531635d570",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
