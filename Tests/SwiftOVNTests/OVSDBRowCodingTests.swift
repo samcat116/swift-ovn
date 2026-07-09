@@ -349,17 +349,21 @@ final class OVSDBRowEncoderTests: XCTestCase {
             nexthop: "10.0.0.1",
             policy: "src-ip",
             route_table: "rt1",
+            selection_fields: ["ip_src", "ip_dst"],
             options: ["ecmp_symmetric_reply": "true"],
             external_ids: ["owner": "test"]
         )
 
         let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
+        // selection_fields is a plain string set, not rewritten into UUID atoms.
+        XCTAssertEqual(row["selection_fields"], wireSet([.string("ip_src"), .string("ip_dst")]))
         let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterStaticRoute.self, from: row)
 
         XCTAssertEqual(decoded.ip_prefix, route.ip_prefix)
         XCTAssertEqual(decoded.nexthop, route.nexthop)
         XCTAssertEqual(decoded.policy, route.policy)
         XCTAssertEqual(decoded.route_table, route.route_table)
+        XCTAssertEqual(decoded.selection_fields, route.selection_fields)
         XCTAssertEqual(decoded.options, route.options)
         XCTAssertEqual(decoded.external_ids, route.external_ids)
     }

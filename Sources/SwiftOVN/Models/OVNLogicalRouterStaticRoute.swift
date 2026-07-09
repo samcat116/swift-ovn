@@ -18,15 +18,18 @@ public struct OVNLogicalRouterStaticRoute: Codable, Sendable {
     public let bfd: String?
     /// Named route table this route belongs to (empty string is the main table).
     public let route_table: String?
+    /// Packet fields used for ECMP hashing when multiple routes share a prefix
+    /// (OVN 25.03+). Plain string set, e.g. `["ip_src", "ip_dst"]`.
+    public let selection_fields: [String]?
     public let options: [String: String]?
     public let external_ids: [String: String]?
 
     private enum CodingKeys: String, CodingKey {
         case uuid = "_uuid"
-        case ip_prefix, nexthop, output_port, policy, bfd, route_table, options, external_ids
+        case ip_prefix, nexthop, output_port, policy, bfd, route_table, selection_fields, options, external_ids
     }
 
-    public init(ip_prefix: String, nexthop: String, output_port: String? = nil, policy: String? = nil, bfd: String? = nil, route_table: String? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
+    public init(ip_prefix: String, nexthop: String, output_port: String? = nil, policy: String? = nil, bfd: String? = nil, route_table: String? = nil, selection_fields: [String]? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
         self.uuid = nil
         self.ip_prefix = ip_prefix
         self.nexthop = nexthop
@@ -34,6 +37,7 @@ public struct OVNLogicalRouterStaticRoute: Codable, Sendable {
         self.policy = policy
         self.bfd = bfd
         self.route_table = route_table
+        self.selection_fields = selection_fields
         self.options = options
         self.external_ids = external_ids
     }
