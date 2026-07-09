@@ -490,6 +490,238 @@ public actor OVNManager: OVNManaging {
         logger.info("Deleted static route: \(uuid)")
     }
 
+    // MARK: - Gateway Chassis Operations
+
+    public func getGatewayChassis() async throws -> [OVNGatewayChassis] {
+        let rows = try await connection.selectAll(from: OVNTable.gatewayChassis, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNGatewayChassis.self)
+        }
+    }
+
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
+    public func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws -> String {
+        let row = try createRow(from: chassis)
+        let result = try await connection.insert(into: OVNTable.gatewayChassis, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created gateway chassis: \(chassis.name)")
+        return uuidValue
+    }
+
+    /// Creates a gateway chassis and attaches it to the named logical router
+    /// port (Logical_Router_Port.gateway_chassis) in a single OVSDB
+    /// transaction, mirroring `ovn-nbctl lrp-set-gateway-chassis`.
+    /// Gateway_Chassis is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits.
+    public func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws -> String {
+        let portCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerPortName))
+
+        guard try await rowUUID(in: OVNTable.logicalRouterPort, where: portCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical router port not found: \(routerPortName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.gatewayChassis,
+            in: database,
+            row: try createRow(from: chassis),
+            uuidName: "new_gw_chassis",
+            parentTable: OVNTable.logicalRouterPort,
+            parentColumn: "gateway_chassis",
+            parentCondition: portCondition
+        )
+
+        logger.info("Created gateway chassis: \(chassis.name) on router port: \(routerPortName)")
+        return uuidValue
+    }
+
+    public func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: chassis)
+
+        let count = try await connection.update(table: OVNTable.gatewayChassis, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Gateway chassis not found: \(uuid)")
+        }
+
+        logger.info("Updated gateway chassis: \(uuid)")
+    }
+
+    public func deleteGatewayChassis(uuid: String) async throws {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.gatewayChassis,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalRouterPort, column: "gateway_chassis")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Gateway chassis not found: \(uuid)")
+        }
+
+        logger.info("Deleted gateway chassis: \(uuid)")
+    }
+
+    // MARK: - HA Chassis Group Operations
+
+    public func getHAChassisGroups() async throws -> [OVNHAChassisGroup] {
+        let rows = try await connection.selectAll(from: OVNTable.haChassisGroup, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNHAChassisGroup.self)
+        }
+    }
+
+    public func getHAChassisGroup(named name: String) async throws -> OVNHAChassisGroup? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.haChassisGroup, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNHAChassisGroup.self)
+    }
+
+    /// Creates an HA chassis group. HA_Chassis_Group is a root table, so the
+    /// row persists on its own; attach members with `createHAChassis(_:inGroup:)`
+    /// and reference it from a port's `ha_chassis_group` column.
+    public func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws -> String {
+        let row = try createRow(from: group)
+        let result = try await connection.insert(into: OVNTable.haChassisGroup, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created HA chassis group: \(group.name)")
+        return uuidValue
+    }
+
+    public func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: group)
+
+        let count = try await connection.update(table: OVNTable.haChassisGroup, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("HA chassis group not found: \(uuid)")
+        }
+
+        logger.info("Updated HA chassis group: \(group.name)")
+    }
+
+    public func deleteHAChassisGroup(uuid: String) async throws {
+        // The ha_chassis_group columns on Logical_Router_Port and
+        // Logical_Switch_Port are strong references, so ovsdb-server rejects
+        // deleting the group while a port still points at it. Detach those
+        // port columns in the same transaction before deleting. The group's
+        // HA_Chassis members become orphans and are garbage-collected.
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.haChassisGroup,
+            in: database,
+            uuid: uuid,
+            parentReferences: [
+                OVSDBParentReference(table: OVNTable.logicalRouterPort, column: "ha_chassis_group"),
+                OVSDBParentReference(table: OVNTable.logicalSwitchPort, column: "ha_chassis_group")
+            ]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("HA chassis group not found: \(uuid)")
+        }
+
+        logger.info("Deleted HA chassis group: \(uuid)")
+    }
+
+    // MARK: - HA Chassis Operations
+
+    public func getHAChassis() async throws -> [OVNHAChassis] {
+        let rows = try await connection.selectAll(from: OVNTable.haChassis, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNHAChassis.self)
+        }
+    }
+
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createHAChassis(_:inGroup:) so the member is attached to its group.")
+    public func createHAChassis(_ chassis: OVNHAChassis) async throws -> String {
+        let row = try createRow(from: chassis)
+        let result = try await connection.insert(into: OVNTable.haChassis, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created HA chassis: \(chassis.chassis_name)")
+        return uuidValue
+    }
+
+    /// Creates an HA chassis and attaches it to the named HA chassis group
+    /// (HA_Chassis_Group.ha_chassis) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl ha-chassis-group-add-chassis`. HA_Chassis is not a root
+    /// table, so an unreferenced row is garbage-collected when the transaction
+    /// commits.
+    public func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws -> String {
+        let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(groupName))
+
+        guard try await rowUUID(in: OVNTable.haChassisGroup, where: groupCondition) != nil else {
+            throw OVNManagerError.operationFailed("HA chassis group not found: \(groupName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.haChassis,
+            in: database,
+            row: try createRow(from: chassis),
+            uuidName: "new_ha_chassis",
+            parentTable: OVNTable.haChassisGroup,
+            parentColumn: "ha_chassis",
+            parentCondition: groupCondition
+        )
+
+        logger.info("Created HA chassis: \(chassis.chassis_name) in group: \(groupName)")
+        return uuidValue
+    }
+
+    public func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: chassis)
+
+        let count = try await connection.update(table: OVNTable.haChassis, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("HA chassis not found: \(uuid)")
+        }
+
+        logger.info("Updated HA chassis: \(uuid)")
+    }
+
+    public func deleteHAChassis(uuid: String) async throws {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.haChassis,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.haChassisGroup, column: "ha_chassis")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("HA chassis not found: \(uuid)")
+        }
+
+        logger.info("Deleted HA chassis: \(uuid)")
+    }
+
     // MARK: - ACL Operations
     
     public func getACLs() async throws -> [OVNACL] {
