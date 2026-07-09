@@ -1,0 +1,20 @@
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_1b4aae1ef41ff0::t_2b565c97858d0c 680-681
+  s_1b4aae1ef41ff0::t_6efd79c53a4d1f 1097-1105,1109-1126,1128-1130,1132,1134,1136-1142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "54a4685500ab56042eb8f24ba832a6a42134115f",
+  "prompts": {},
+  "sessions": {
+    "s_1b4aae1ef41ff0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "24c18c6a-5b8b-45a6-bbba-50572057c547",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
