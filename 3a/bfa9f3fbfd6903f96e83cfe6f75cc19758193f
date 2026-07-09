@@ -1,0 +1,23 @@
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_b2293b4bcccdfd::t_6d9f1508a0bbfe 44-46
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_b2293b4bcccdfd::t_1bc3287d777f63 329,336-337,339
+Sources/SwiftOVN/Models/OVNLogicalRouterStaticRoute.swift
+  s_b2293b4bcccdfd::t_769201b62c45ee 12-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3abfa9f3fbfd6903f96e83cfe6f75cc19758193f",
+  "prompts": {},
+  "sessions": {
+    "s_b2293b4bcccdfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2c8a19b-ba19-4c9e-8a09-38afe3d0543c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
