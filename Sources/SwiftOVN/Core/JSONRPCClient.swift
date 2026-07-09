@@ -47,7 +47,7 @@ public actor JSONRPCClient {
     
     // MARK: - Generic JSON-RPC Methods
     
-    public func call<T: Codable>(
+    public func call<T: Codable & Sendable>(
         method: String,
         params: JSONRPCParams? = nil,
         responseType: T.Type

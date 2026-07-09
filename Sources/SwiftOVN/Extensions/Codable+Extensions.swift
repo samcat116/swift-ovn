@@ -14,26 +14,24 @@ extension Array where Element == Int {
     }
 }
 
+// These build the RFC 7047 map wire format (`["map", [[k, v], ...]]`) rather
+// than a plain JSON object, so they can be used directly to construct row
+// column values. Use `JSONValue.map(_:)` for the underlying encoding.
 extension Dictionary where Key == String, Value == String {
     func toJSONValue() -> JSONValue {
-        let mapped = self.mapValues { JSONValue.string($0) }
-        return .object(mapped)
+        return .map(self)
     }
 }
 
 extension Dictionary where Key == String, Value == Int {
     func toJSONValue() -> JSONValue {
-        let mapped = self.mapValues { JSONValue.number(Double($0)) }
-        return .object(mapped)
+        return .map(self)
     }
 }
 
 extension Dictionary where Key == Int, Value == String {
     func toJSONValue() -> JSONValue {
-        let mapped = Dictionary<String, JSONValue>(
-            uniqueKeysWithValues: self.map { (String($0.key), JSONValue.string($0.value)) }
-        )
-        return .object(mapped)
+        return .map(self)
     }
 }
 
@@ -146,47 +144,48 @@ extension JSONValue {
     static func set<T>(_ values: [T]) -> JSONValue where T: Equatable {
         if values.isEmpty {
             return .array([.string("set"), .array([])])
-        } else if values.count == 1 {
-            // Single value sets are represented as just the value
-            if let stringValue = values.first as? String {
-                return .string(stringValue)
-            } else if let intValue = values.first as? Int {
-                return .number(Double(intValue))
-            } else if let doubleValue = values.first as? Double {
-                return .number(doubleValue)
-            }
+        } else if values.count == 1, let scalar = scalarJSONValue(values[0]) {
+            // RFC 7047: a single-element set is sent as the bare scalar.
+            return scalar
         }
-        
-        // Multiple values as a set
-        var jsonArray: [JSONValue] = []
-        for value in values {
-            if let stringValue = value as? String {
-                jsonArray.append(.string(stringValue))
-            } else if let intValue = value as? Int {
-                jsonArray.append(.number(Double(intValue)))
-            } else if let doubleValue = value as? Double {
-                jsonArray.append(.number(doubleValue))
-            }
-        }
-        
+
+        // Multiple values as a set.
+        let jsonArray = values.compactMap { scalarJSONValue($0) }
         return .array([.string("set"), .array(jsonArray)])
     }
-    
-    var setValue: [JSONValue]? {
-        // Handle single value (not wrapped in set)
-        if case .string(_) = self, case .number(_) = self, case .boolean(_) = self {
-            return [self]
+
+    /// Maps a supported scalar element (String, Bool, Int, Double) to a
+    /// `JSONValue`, or `nil` for unsupported types. `Bool` is checked before
+    /// the numeric types because it must not be coerced into a number.
+    private static func scalarJSONValue<T>(_ value: T) -> JSONValue? {
+        if let stringValue = value as? String {
+            return .string(stringValue)
+        } else if let boolValue = value as? Bool {
+            return .boolean(boolValue)
+        } else if let intValue = value as? Int {
+            return .number(Double(intValue))
+        } else if let doubleValue = value as? Double {
+            return .number(doubleValue)
         }
-        
-        // Handle set array format
-        if case .array(let array) = self,
-           array.count == 2,
-           case .string("set") = array[0],
-           case .array(let values) = array[1] {
-            return values
-        }
-        
         return nil
+    }
+
+    var setValue: [JSONValue]? {
+        // A bare scalar is a single-element set (RFC 7047).
+        switch self {
+        case .string, .number, .boolean:
+            return [self]
+        case .array(let array):
+            // The `["set", [...]]` wire form.
+            if array.count == 2,
+               case .string("set") = array[0],
+               case .array(let values) = array[1] {
+                return values
+            }
+            return nil
+        default:
+            return nil
+        }
     }
     
     var setStringValues: [String]? {
