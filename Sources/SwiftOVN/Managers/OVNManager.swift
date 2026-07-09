@@ -677,8 +677,8 @@ public actor OVNManager: OVNManaging {
 
     /// Adds logical switch ports to the group's membership without rewriting
     /// the whole `ports` set, mirroring `ovn-nbctl pg-set-ports` incrementally.
-    /// `ports` is a weak reference set, so a UUID whose port row no longer
-    /// exists at commit is silently dropped rather than rejected.
+    /// Throws if any requested port no longer exists, so a stale UUID can't be
+    /// silently dropped from this weak reference set (see `mutatePorts`).
     public func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws {
         try await mutatePorts(portUUIDs, portGroup: name, mutator: "insert")
     }
@@ -1094,23 +1094,52 @@ private extension OVNManager {
     /// Inserts or deletes a set of Logical_Switch_Port UUIDs in a port
     /// group's `ports` column via a single mutate op. A no-op (empty UUID
     /// list) is skipped so the caller never issues an empty mutation.
+    ///
+    /// `Port_Group.ports` is a weak reference set: ovsdb-server silently drops
+    /// a UUID whose Logical_Switch_Port no longer exists at commit, so an
+    /// `insert` of a stale UUID would report the port group matched while
+    /// applying no membership change. For inserts we therefore guard each
+    /// added port with a same-transaction wait op that aborts the transaction
+    /// unless the port row still exists at commit (mirroring the load-balancer
+    /// attach guard). Deletes need no such guard — removing a stale UUID is a
+    /// harmless no-op.
     func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws {
         guard !portUUIDs.isEmpty else { return }
 
-        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let portSet = JSONValue.array([
-            .string("set"),
-            .array(portUUIDs.map { .array([.string("uuid"), .string($0)]) })
-        ])
+        let portAtoms = portUUIDs.map { JSONValue.array([.string("uuid"), .string($0)]) }
+        let portSet = JSONValue.array([.string("set"), .array(portAtoms)])
 
-        let count = try await connection.mutate(
+        var operations: [OVSDBOperation] = []
+        if mutator == "insert" {
+            for uuid in portUUIDs {
+                let portCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+                operations.append(OVSDBOperation(
+                    op: "wait",
+                    table: OVNTable.logicalSwitchPort,
+                    whereConditions: [portCondition],
+                    columns: ["_uuid"],
+                    rows: [],
+                    until: "!=",
+                    timeout: 0
+                ))
+            }
+        }
+
+        let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        operations.append(OVSDBOperation(
+            op: "mutate",
             table: OVNTable.portGroup,
-            in: database,
-            where: [condition],
+            whereConditions: [groupCondition],
             mutations: [OVSDBMutation(column: "ports", mutator: mutator, value: portSet)]
-        )
+        ))
 
-        if count == 0 {
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard case .object(let mutateResult)? = results.last,
+              case .number(let count)? = mutateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format")
+        }
+        if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Port group not found: \(name)")
         }
     }
