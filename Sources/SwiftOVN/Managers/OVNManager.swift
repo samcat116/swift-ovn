@@ -843,7 +843,7 @@ public actor OVNManager: OVNManaging {
     
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 let updates = connection.monitorUpdates()
                 do {
                     for try await update in updates {
@@ -853,6 +853,11 @@ public actor OVNManager: OVNManaging {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            // Cancel the forwarding task if the consumer drops the stream, so it
+            // doesn't outlive them waiting on the underlying connection.
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }

@@ -112,8 +112,81 @@ final class OVNManagerTests: XCTestCase {
     func testJSONValueUUIDHandling() throws {
         let uuidValue = JSONValue.uuid("12345678-1234-5678-9abc-123456789012")
         let extractedUUID = uuidValue.uuidValue
-        
+
         XCTAssertEqual(extractedUUID, "12345678-1234-5678-9abc-123456789012")
+    }
+
+    // MARK: - JSONValue set/map wire-format assertions
+
+    func testJSONValueSetOfBoolsPreservesBooleans() throws {
+        // Regression: set(_:) previously dropped Bool elements, silently
+        // producing an empty set on the wire.
+        let set = JSONValue.set([true, false])
+
+        guard case .array(let outer) = set, outer.count == 2,
+              case .string("set") = outer[0],
+              case .array(let elements) = outer[1] else {
+            return XCTFail("Expected [\"set\", [...]] shape, got \(set)")
+        }
+        XCTAssertEqual(elements, [.boolean(true), .boolean(false)])
+
+        // And it must serialize as JSON booleans, not 0/1.
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(set))
+        guard let outer = json as? [Any], outer.count == 2 else {
+            return XCTFail("Expected 2-element array, got \(json)")
+        }
+        XCTAssertEqual(outer[0] as? String, "set")
+        XCTAssertEqual(outer[1] as? [Bool], [true, false])
+    }
+
+    func testJSONValueSingleElementSetIsBareScalar() throws {
+        // RFC 7047: a one-element set is the bare value, not ["set", [value]].
+        XCTAssertEqual(JSONValue.set(["only"]), .string("only"))
+        XCTAssertEqual(JSONValue.set([true]), .boolean(true))
+        XCTAssertEqual(JSONValue.set([42]), .number(42))
+    }
+
+    func testJSONValueSetValueUnwrapsBareScalar() throws {
+        // Regression: the old impossible conjunction made setValue return nil
+        // for a bare scalar instead of a single-element set.
+        XCTAssertEqual(JSONValue.string("x").setValue, [.string("x")])
+        XCTAssertEqual(JSONValue.number(7).setValue, [.number(7)])
+        XCTAssertEqual(JSONValue.boolean(true).setValue, [.boolean(true)])
+        // The wrapped multi-element form still round-trips.
+        XCTAssertEqual(JSONValue.set(["a", "b"]).setValue, [.string("a"), .string("b")])
+    }
+
+    func testStringDictionaryToJSONValueIsMapWireFormat() throws {
+        // toJSONValue() must produce ["map", [[k, v], ...]] so it can build row
+        // columns directly, not a bare JSON object.
+        let value = ["a": "b"].toJSONValue()
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+        guard let array = json as? [Any], array.count == 2,
+              array[0] as? String == "map",
+              let pairs = array[1] as? [[Any]], pairs.count == 1 else {
+            return XCTFail("Expected [\"map\", [[k, v]]] shape, got \(json)")
+        }
+        XCTAssertEqual(pairs[0][0] as? String, "a")
+        XCTAssertEqual(pairs[0][1] as? String, "b")
+    }
+
+    func testIntDictionaryToJSONValueEncodesIntegerValues() throws {
+        // Integer map values must serialize as JSON integers, not 5.0.
+        let value = ["ttl": 5].toJSONValue()
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+        let pairs = (json as? [Any])?[1] as? [[Any]]
+        XCTAssertEqual(pairs?.first?[0] as? String, "ttl")
+        XCTAssertEqual(pairs?.first?[1] as? Int, 5)
+    }
+
+    func testOVSDBMutationConvenienceEncodesAsArray() throws {
+        // The convenience builders must produce the RFC 7047 3-tuple wire form.
+        let mutation = OVSDBMutation.insert(column: "ports", value: "lsp0")
+
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(mutation))
+        XCTAssertEqual(json as? [String], ["ports", "insert", "lsp0"])
     }
     
     func testOVNACLCreation() throws {

@@ -3,10 +3,12 @@ import NIO
 
 // MARK: - OVS Management Protocol
 
-// Typealias for statistics dictionaries that may contain non-Sendable values
-public typealias StatisticsDictionary = [String: Any]
+/// A column-keyed bag of statistics/status values (e.g. `status`,
+/// `other_config`, `statistics`). Each value keeps its OVSDB wire shape as a
+/// `JSONValue`, so the type is `Sendable` and consistent with the rest of the
+/// typed API.
+public typealias StatisticsDictionary = [String: JSONValue]
 
-@preconcurrency
 public protocol OVSManaging: Sendable {
     // Connection Management
     func connect() async throws
@@ -93,9 +95,9 @@ public protocol OVSManaging: Sendable {
     func deleteQueue(uuid: String) async throws
     
     // Statistics Operations
-    nonisolated func getBridgeStatistics(bridge: String) async throws -> [String: Any]
-    nonisolated func getPortStatistics(port: String) async throws -> [String: Any]
-    nonisolated func getInterfaceStatistics(interface: String) async throws -> [String: Any]
+    func getBridgeStatistics(bridge: String) async throws -> StatisticsDictionary
+    func getPortStatistics(port: String) async throws -> StatisticsDictionary
+    func getInterfaceStatistics(interface: String) async throws -> StatisticsDictionary
     
     // Monitoring
     func startMonitoring(tables: [String]) async throws -> String
@@ -198,7 +200,8 @@ public struct OVSFlowBuilder: Sendable {
 // MARK: - Helper Extensions
 
 public extension OVSManaging {
-    func connectToOVS(socketPath: String = "/var/run/openvswitch/db.sock") async throws {
+    /// Connects using the endpoint the manager was constructed with.
+    func connectToOVS() async throws {
         try await connect()
     }
     

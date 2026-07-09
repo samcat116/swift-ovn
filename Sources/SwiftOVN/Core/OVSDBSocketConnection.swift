@@ -10,17 +10,30 @@ public typealias UnixSocketConnection = OVSDBSocketConnection
 
 public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     private let eventLoopGroup: EventLoopGroup
+    /// True when we created `eventLoopGroup` ourselves and are therefore
+    /// responsible for shutting it down; false when the caller injected one.
+    private let ownsEventLoopGroup: Bool
     private let logger: Logger
     private var channel: Channel?
     private let endpoint: OVSDBEndpoint
     private var isConnected: Bool = false
     private var responseRouter: JSONRPCResponseRouter?
+    /// The in-flight `connect()` future, if any. Guards against concurrent
+    /// `connect()` calls each bootstrapping their own channel (which would
+    /// leak all but the last). All access is under `connectionLock`.
+    private var inFlightConnect: EventLoopFuture<Void>?
     private let connectionLock = NSLock()
     private let notificationHub = JSONRPCNotificationHub()
 
     public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.endpoint = endpoint
-        self.eventLoopGroup = eventLoopGroup ?? MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        if let eventLoopGroup {
+            self.eventLoopGroup = eventLoopGroup
+            self.ownsEventLoopGroup = false
+        } else {
+            self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+            self.ownsEventLoopGroup = true
+        }
         self.logger = logger ?? Logger(label: "ovn-manager.socket")
     }
 
@@ -28,17 +41,51 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
     }
 
+    deinit {
+        // Only shut down a group we created; an injected one is the caller's
+        // to manage. Without this, each connection created with no injected
+        // group leaks its event-loop thread.
+        if ownsEventLoopGroup {
+            try? eventLoopGroup.syncShutdownGracefully()
+        }
+    }
+
     public func connect() -> EventLoopFuture<Void> {
         connectionLock.lock()
-        let alreadyConnected = isConnected
-        connectionLock.unlock()
-
-        guard !alreadyConnected else {
+        if isConnected {
+            connectionLock.unlock()
             logger.debug("Already connected to \(endpoint)")
             return eventLoopGroup.next().makeSucceededFuture(())
         }
+        if let inFlightConnect {
+            connectionLock.unlock()
+            logger.debug("connect() already in progress for \(endpoint), reusing it")
+            return inFlightConnect
+        }
+        let future = makeConnectFuture()
+        // Clear the in-flight slot once this attempt settles so a later
+        // reconnect can start fresh.
+        let deduplicated = future.always { [weak self] _ in
+            guard let self else { return }
+            self.connectionLock.lock()
+            self.inFlightConnect = nil
+            self.connectionLock.unlock()
+        }
+        inFlightConnect = deduplicated
+        connectionLock.unlock()
+        return deduplicated
+    }
 
+    private func makeConnectFuture() -> EventLoopFuture<Void> {
         logger.info("Connecting to OVSDB endpoint: \(endpoint)")
+
+        // Created here (not in the channel initializer) so it can be assigned
+        // to `responseRouter` under the lock once the connection succeeds.
+        let router = JSONRPCResponseRouter(
+            logger: logger,
+            eventLoopGroup: eventLoopGroup,
+            notificationHub: notificationHub
+        )
 
         // TLS state that must exist before the pipeline is built.
         let sslContext: NIOSSLContext?
@@ -75,12 +122,6 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel in
                 self.logger.debug("Initializing channel pipeline...")
-                let router = JSONRPCResponseRouter(
-                    logger: self.logger,
-                    eventLoopGroup: self.eventLoopGroup,
-                    notificationHub: self.notificationHub
-                )
-                self.responseRouter = router
 
                 var handlers: [ChannelHandler] = []
                 if let sslContext {
@@ -132,6 +173,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                 self.logger.debug("Raw connection established, setting up channel...")
                 self.connectionLock.lock()
                 self.channel = channel
+                self.responseRouter = router
                 self.isConnected = true
                 self.connectionLock.unlock()
                 self.logger.info("Successfully connected to \(self.endpoint)")

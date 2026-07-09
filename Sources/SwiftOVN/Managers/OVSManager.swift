@@ -775,80 +775,48 @@ public actor OVSManager: OVSManaging {
     
     // MARK: - Statistics Operations
 
-    nonisolated public func getBridgeStatistics(bridge: String) async throws -> [String: Any] {
+    nonisolated public func getBridgeStatistics(bridge: String) async throws -> StatisticsDictionary {
         // Bridge statistics are available in the status column
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(bridge))
         let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["status", "other_config"])
-        
+
         guard let firstRow = rows.first else {
             return [:]
         }
-        
-        var result: [String: Any] = [:]
-        
-        // Add status information
-        if let status = firstRow["status"] {
-            result["status"] = OVSDBRowDecoder.plainObject(from: status)
-        }
-        
-        // Add other_config information  
-        if let otherConfig = firstRow["other_config"] {
-            result["other_config"] = OVSDBRowDecoder.plainObject(from: otherConfig)
-        }
-        
+
+        var result: StatisticsDictionary = [:]
+        result["status"] = firstRow["status"]
+        result["other_config"] = firstRow["other_config"]
         return result
     }
 
-    nonisolated public func getPortStatistics(port: String) async throws -> [String: Any] {
+    nonisolated public func getPortStatistics(port: String) async throws -> StatisticsDictionary {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(port))
         let rows = try await connection.select(from: OVSTable.port, in: database, where: [condition], columns: ["status", "external_ids", "other_config"])
-        
+
         guard let firstRow = rows.first else {
             return [:]
         }
-        
-        var result: [String: Any] = [:]
-        
-        // Add available information
-        if let status = firstRow["status"] {
-            result["status"] = OVSDBRowDecoder.plainObject(from: status)
-        }
-        
-        if let externalIds = firstRow["external_ids"] {
-            result["external_ids"] = OVSDBRowDecoder.plainObject(from: externalIds)
-        }
-        
-        if let otherConfig = firstRow["other_config"] {
-            result["other_config"] = OVSDBRowDecoder.plainObject(from: otherConfig)
-        }
-        
+
+        var result: StatisticsDictionary = [:]
+        result["status"] = firstRow["status"]
+        result["external_ids"] = firstRow["external_ids"]
+        result["other_config"] = firstRow["other_config"]
         return result
     }
 
-    nonisolated public func getInterfaceStatistics(interface: String) async throws -> [String: Any] {
+    nonisolated public func getInterfaceStatistics(interface: String) async throws -> StatisticsDictionary {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(interface))
         let rows = try await connection.select(from: OVSTable.interface, in: database, where: [condition], columns: ["status", "external_ids", "statistics"])
-        
+
         guard let firstRow = rows.first else {
             return [:]
         }
-        
-        var result: [String: Any] = [:]
-        
-        // Add available information
-        if let status = firstRow["status"] {
-            result["status"] = OVSDBRowDecoder.plainObject(from: status)
-        }
-        
-        if let externalIds = firstRow["external_ids"] {
-            result["external_ids"] = OVSDBRowDecoder.plainObject(from: externalIds)
-        }
-        
-        // Interface table might actually have statistics column
-        if let statistics = firstRow["statistics"] {
-            result["statistics"] = OVSDBRowDecoder.plainObject(from: statistics)
-        }
-        
+
+        var result: StatisticsDictionary = [:]
+        result["status"] = firstRow["status"]
+        result["external_ids"] = firstRow["external_ids"]
+        result["statistics"] = firstRow["statistics"]
         return result
     }
     
@@ -870,7 +838,7 @@ public actor OVSManager: OVSManaging {
     
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 let updates = connection.monitorUpdates()
                 do {
                     for try await update in updates {
@@ -880,6 +848,11 @@ public actor OVSManager: OVSManaging {
                 } catch {
                     continuation.finish(throwing: error)
                 }
+            }
+            // Cancel the forwarding task if the consumer drops the stream, so it
+            // doesn't outlive them waiting on the underlying connection.
+            continuation.onTermination = { _ in
+                task.cancel()
             }
         }
     }

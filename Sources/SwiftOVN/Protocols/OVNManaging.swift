@@ -3,8 +3,7 @@ import NIO
 
 // MARK: - OVN Management Protocol
 
-@preconcurrency
-public protocol OVNManaging {
+public protocol OVNManaging: Sendable {
     // Connection Management
     func connect() async throws
     func disconnect() async throws
@@ -136,11 +135,14 @@ public enum OVNTable {
 // MARK: - Helper Extensions
 
 public extension OVNManaging {
-    func connectToNorthbound(socketPath: String = "/var/run/ovn/ovnnb_db.sock") async throws {
+    /// Connects using the endpoint the manager was constructed with. The
+    /// database (northbound/southbound) is fixed at construction time, so
+    /// there is no socket path to pass here.
+    func connectToNorthbound() async throws {
         try await connect()
     }
-    
-    func connectToSouthbound(socketPath: String = "/var/run/ovn/ovnsb_db.sock") async throws {
+
+    func connectToSouthbound() async throws {
         try await connect()
     }
 }
