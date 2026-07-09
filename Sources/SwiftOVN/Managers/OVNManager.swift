@@ -598,7 +598,119 @@ public actor OVNManager: OVNManaging {
 
         logger.info("Deleted ACL: \(uuid)")
     }
-    
+
+    // MARK: - Port Group Operations
+
+    public func getPortGroups() async throws -> [OVNPortGroup] {
+        let rows = try await connection.selectAll(from: OVNTable.portGroup, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNPortGroup.self)
+        }
+    }
+
+    public func getPortGroup(named name: String) async throws -> OVNPortGroup? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.portGroup, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNPortGroup.self)
+    }
+
+    /// Creates a port group, mirroring `ovn-nbctl pg-add`. Port_Group is a
+    /// root table, so the row persists until it is explicitly deleted.
+    public func createPortGroup(_ portGroup: OVNPortGroup) async throws -> String {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(portGroup.name))
+
+        guard try await rowUUID(in: OVNTable.portGroup, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Port group already exists: \(portGroup.name)")
+        }
+
+        let row = try createRow(from: portGroup)
+
+        // Guard against a duplicate name racing in between the check above and
+        // the insert: the wait op aborts the transaction unless no row with
+        // this name still exists at commit.
+        let operations = [
+            OVSDBOperation(
+                op: "wait",
+                table: OVNTable.portGroup,
+                whereConditions: [nameCondition],
+                columns: ["name"],
+                rows: [],
+                until: "==",
+                timeout: 0
+            ),
+            OVSDBOperation(
+                op: "insert",
+                table: OVNTable.portGroup,
+                row: row
+            )
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let insertResult) = results[1],
+              let uuid = insertResult["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created port group: \(portGroup.name)")
+        return uuidValue
+    }
+
+    public func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: portGroup)
+
+        let count = try await connection.update(table: OVNTable.portGroup, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Port group not found: \(uuid)")
+        }
+
+        logger.info("Updated port group: \(portGroup.name)")
+    }
+
+    /// Adds logical switch ports to the group's membership without rewriting
+    /// the whole `ports` set, mirroring `ovn-nbctl pg-set-ports` incrementally.
+    /// `ports` is a weak reference set, so a UUID whose port row no longer
+    /// exists at commit is silently dropped rather than rejected.
+    public func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws {
+        try await mutatePorts(portUUIDs, portGroup: name, mutator: "insert")
+    }
+
+    /// Removes logical switch ports from the group's membership without
+    /// rewriting the whole `ports` set.
+    public func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws {
+        try await mutatePorts(portUUIDs, portGroup: name, mutator: "delete")
+    }
+
+    public func deletePortGroup(uuid: String) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.portGroup, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Port group not found: \(uuid)")
+        }
+
+        logger.info("Deleted port group: \(uuid)")
+    }
+
+    public func deletePortGroup(named name: String) async throws {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let count = try await connection.delete(from: OVNTable.portGroup, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Port group not found: \(name)")
+        }
+
+        logger.info("Deleted port group: \(name)")
+    }
+
     // MARK: - Load Balancer Operations
     
     public func getLoadBalancers() async throws -> [OVNLoadBalancer] {
@@ -976,6 +1088,30 @@ private extension OVNManager {
 
         if count == 0 {
             throw OVNManagerError.operationFailed("\(parentDescription) not found: \(parentName)")
+        }
+    }
+
+    /// Inserts or deletes a set of Logical_Switch_Port UUIDs in a port
+    /// group's `ports` column via a single mutate op. A no-op (empty UUID
+    /// list) is skipped so the caller never issues an empty mutation.
+    func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws {
+        guard !portUUIDs.isEmpty else { return }
+
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let portSet = JSONValue.array([
+            .string("set"),
+            .array(portUUIDs.map { .array([.string("uuid"), .string($0)]) })
+        ])
+
+        let count = try await connection.mutate(
+            table: OVNTable.portGroup,
+            in: database,
+            where: [condition],
+            mutations: [OVSDBMutation(column: "ports", mutator: mutator, value: portSet)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Port group not found: \(name)")
         }
     }
 
