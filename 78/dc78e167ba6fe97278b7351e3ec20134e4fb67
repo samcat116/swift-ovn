@@ -1,0 +1,19 @@
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_4fea13f64f314d::t_96e0f48a381639 47-50,52,68-77,80,86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "78dc78e167ba6fe97278b7351e3ec20134e4fb67",
+  "prompts": {},
+  "sessions": {
+    "s_4fea13f64f314d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da961bb0-86d4-41a7-b072-8715a421fba3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
