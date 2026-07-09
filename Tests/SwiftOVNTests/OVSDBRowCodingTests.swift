@@ -326,16 +326,17 @@ final class OVSDBRowEncoderTests: XCTestCase {
         let route = OVNLogicalRouterStaticRoute(
             ip_prefix: "10.0.0.0/24",
             nexthop: "192.168.1.1",
-            output_port: uuidB,
+            output_port: "lrp0",
             policy: "dst-ip",
             bfd: uuidC
         )
 
         let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
 
-        // Reference columns become UUID atoms; nexthop stays a plain string.
-        XCTAssertEqual(row["output_port"], wireUUID(uuidB))
+        // bfd is the only reference column; output_port is a plain port-name
+        // string and nexthop/ip_prefix stay plain strings.
         XCTAssertEqual(row["bfd"], wireUUID(uuidC))
+        XCTAssertEqual(row["output_port"], .string("lrp0"))
         XCTAssertEqual(row["nexthop"], .string("192.168.1.1"))
         XCTAssertEqual(row["ip_prefix"], .string("10.0.0.0/24"))
         XCTAssertEqual(row["policy"], .string("dst-ip"))

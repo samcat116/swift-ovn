@@ -9,8 +9,8 @@ public struct OVNLogicalRouterStaticRoute: Codable, Sendable {
     public let ip_prefix: String
     /// Next-hop IP, or the name of an `output_port` for a link-local route.
     public let nexthop: String
-    /// Logical router port the packet is sent out of. UUID reference to a
-    /// `Logical_Router_Port` row.
+    /// Name of the logical router port the packet is sent out of. This is a
+    /// plain port-name string, not a UUID reference.
     public let output_port: String?
     /// Routing policy: `"dst-ip"` (default) or `"src-ip"`.
     public let policy: String?
