@@ -1,0 +1,45 @@
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_4fea13f64f314d::t_c17ccf9d986fc8 6
+  s_4fea13f64f314d::t_d8dff23a00f368 138-141,144-145
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_4fea13f64f314d::t_6238301b92d231 846,857-860
+  s_4fea13f64f314d::t_d4e8d7c492824a 861
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_4fea13f64f314d::t_b6cd10c6697025 50
+Sources/SwiftOVN/Protocols/OVSManaging.swift
+  s_4fea13f64f314d::t_8ea9ebcee83f16 98-100
+  s_4fea13f64f314d::t_93e104ef2405d7 6-10
+  s_4fea13f64f314d::t_c28fcad26c8d46 203-204
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_4fea13f64f314d::t_083aec7c6a84ab 841,852-855
+  s_4fea13f64f314d::t_f9a5a5a370a8fd 778,782,786-789,793,796,800-804,808,811,815-819
+  s_4fea13f64f314d::t_3b4611da860461 856
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_4fea13f64f314d::t_1a725d46fed89b 115,118-134,140-190
+  s_4fea13f64f314d::t_161c013ddb5441 135-139
+Sources/SwiftOVN/Extensions/Codable+Extensions.swift
+  s_4fea13f64f314d::t_82ea5622fa69e6 17-19,22,28,34
+  s_4fea13f64f314d::t_06c5177ad7068b 147-149,151-153,156-172,174-176,178-187
+Sources/SwiftOVN/Models/JSONRPCResponse.swift
+  s_4fea13f64f314d::t_b2758a6c5557d7 3,7-11
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_4fea13f64f314d::t_77a5e6b276299b 176
+  s_4fea13f64f314d::t_dd0954e9abe4df 13-15,21-24,30-36,44-52,55-56,60-77,79,82-88
+  s_4fea13f64f314d::t_cb0bf91f7a8777 89
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "88172ee380ab2743d8cc05219b00c9d5acedc113",
+  "prompts": {},
+  "sessions": {
+    "s_4fea13f64f314d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "da961bb0-86d4-41a7-b072-8715a421fba3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
