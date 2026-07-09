@@ -322,6 +322,52 @@ final class OVSDBRowEncoderTests: XCTestCase {
         XCTAssertEqual(row["flow_tables"], wireMap([(.number(0), wireUUID(uuidB))]))
     }
 
+    func testStaticRouteReferenceColumnsEncodeUUIDAtoms() throws {
+        let route = OVNLogicalRouterStaticRoute(
+            ip_prefix: "10.0.0.0/24",
+            nexthop: "192.168.1.1",
+            output_port: "lrp0",
+            policy: "dst-ip",
+            bfd: uuidC
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
+
+        // bfd is the only reference column; output_port is a plain port-name
+        // string and nexthop/ip_prefix stay plain strings.
+        XCTAssertEqual(row["bfd"], wireUUID(uuidC))
+        XCTAssertEqual(row["output_port"], .string("lrp0"))
+        XCTAssertEqual(row["nexthop"], .string("192.168.1.1"))
+        XCTAssertEqual(row["ip_prefix"], .string("10.0.0.0/24"))
+        XCTAssertEqual(row["policy"], .string("dst-ip"))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testStaticRouteRoundTrip() throws {
+        let route = OVNLogicalRouterStaticRoute(
+            ip_prefix: "0.0.0.0/0",
+            nexthop: "10.0.0.1",
+            policy: "src-ip",
+            route_table: "rt1",
+            selection_fields: ["ip_src", "ip_dst"],
+            options: ["ecmp_symmetric_reply": "true"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
+        // selection_fields is a plain string set, not rewritten into UUID atoms.
+        XCTAssertEqual(row["selection_fields"], wireSet([.string("ip_src"), .string("ip_dst")]))
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterStaticRoute.self, from: row)
+
+        XCTAssertEqual(decoded.ip_prefix, route.ip_prefix)
+        XCTAssertEqual(decoded.nexthop, route.nexthop)
+        XCTAssertEqual(decoded.policy, route.policy)
+        XCTAssertEqual(decoded.route_table, route.route_table)
+        XCTAssertEqual(decoded.selection_fields, route.selection_fields)
+        XCTAssertEqual(decoded.options, route.options)
+        XCTAssertEqual(decoded.external_ids, route.external_ids)
+    }
+
     func testDHCPOptionsRoundTrip() throws {
         let dhcp = OVNDHCPOptions(
             cidr: "10.0.0.0/24",

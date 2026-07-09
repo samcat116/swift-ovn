@@ -41,6 +41,9 @@ enum OVSDBRowEncoder {
                 "dhcpv4_options", "dhcpv6_options",
                 // Logical_Router
                 "static_routes", "policies", "nat",
+                // Logical_Router_Static_Route (output_port is a plain
+                // port-name string, not a reference)
+                "bfd",
                 // Logical_Router_Port
                 "gateway_chassis", "ha_chassis_group",
                 // Load_Balancer
