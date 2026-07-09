@@ -1,0 +1,37 @@
+Sources/SwiftOVN/Models/OVNLogicalRouter.swift
+  s_4d82eeec7bfc8a::t_e51eb38530b485 35
+  s_4d82eeec7bfc8a::t_b84f8042d67ef5 21-34,36,47
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_4d82eeec7bfc8a::t_1913cb2d54b318 149-209,590
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_4d82eeec7bfc8a::t_1913cb2d54b318 135-188
+Sources/SwiftOVN/Models/OVNLogicalRouterPort.swift
+  s_4d82eeec7bfc8a::t_b84f8042d67ef5 21-34,36,47
+  s_4d82eeec7bfc8a::t_e51eb38530b485 35
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_4d82eeec7bfc8a::t_e51eb38530b485 905-926,1011
+Sources/SwiftOVN/Models/OVNDynamicRouting.swift
+  s_4d82eeec7bfc8a::t_b84f8042d67ef5 1-198
+Sources/SwiftOVN/Models/OVNAdvertisedRoute.swift
+  s_4d82eeec7bfc8a::t_b84f8042d67ef5 1-15
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_4d82eeec7bfc8a::t_e51eb38530b485 106-107,135-136,150
+Sources/SwiftOVN/Models/OVNLearnedRoute.swift
+  s_4d82eeec7bfc8a::t_b84f8042d67ef5 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "4736f2589af111898c71c36e9bc638de47790045",
+  "prompts": {},
+  "sessions": {
+    "s_4d82eeec7bfc8a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f479c-9b6c-7ae1-bc12-57440a493adb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
