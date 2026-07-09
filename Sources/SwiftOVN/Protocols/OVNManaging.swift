@@ -58,6 +58,29 @@ public protocol OVNManaging {
     func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws
     func deleteStaticRoute(uuid: String) async throws
 
+    // Gateway Chassis Operations
+    func getGatewayChassis() async throws -> [OVNGatewayChassis]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
+    func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws -> String
+    func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws -> String
+    func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws
+    func deleteGatewayChassis(uuid: String) async throws
+
+    // HA Chassis Group Operations
+    func getHAChassisGroups() async throws -> [OVNHAChassisGroup]
+    func getHAChassisGroup(named name: String) async throws -> OVNHAChassisGroup?
+    func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws -> String
+    func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws
+    func deleteHAChassisGroup(uuid: String) async throws
+
+    // HA Chassis Operations
+    func getHAChassis() async throws -> [OVNHAChassis]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createHAChassis(_:inGroup:) so the member is attached to its group.")
+    func createHAChassis(_ chassis: OVNHAChassis) async throws -> String
+    func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws -> String
+    func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws
+    func deleteHAChassis(uuid: String) async throws
+
     // ACL Operations
     func getACLs() async throws -> [OVNACL]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
@@ -119,6 +142,9 @@ public enum OVNTable {
     public static let logicalRouter = "Logical_Router"
     public static let logicalRouterPort = "Logical_Router_Port"
     public static let logicalRouterStaticRoute = "Logical_Router_Static_Route"
+    public static let gatewayChassis = "Gateway_Chassis"
+    public static let haChassis = "HA_Chassis"
+    public static let haChassisGroup = "HA_Chassis_Group"
     public static let acl = "ACL"
     public static let portGroup = "Port_Group"
     public static let loadBalancer = "Load_Balancer"

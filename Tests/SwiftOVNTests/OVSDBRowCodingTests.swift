@@ -368,6 +368,79 @@ final class OVSDBRowEncoderTests: XCTestCase {
         XCTAssertEqual(decoded.external_ids, route.external_ids)
     }
 
+    func testGatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
+        let chassis = OVNGatewayChassis(
+            name: "lrp0-hv1",
+            chassis_name: "hv1",
+            priority: 100,
+            options: ["k": "v"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
+
+        // chassis_name is a plain string (a Chassis *name*), not a UUID atom.
+        XCTAssertEqual(row["chassis_name"], .string("hv1"))
+        XCTAssertEqual(row["name"], .string("lrp0-hv1"))
+        XCTAssertEqual(row["priority"], .number(100))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testGatewayChassisRoundTrip() throws {
+        let chassis = OVNGatewayChassis(
+            name: "lrp0-hv2",
+            chassis_name: "hv2",
+            priority: 50,
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNGatewayChassis.self, from: row)
+
+        XCTAssertEqual(decoded.name, chassis.name)
+        XCTAssertEqual(decoded.chassis_name, chassis.chassis_name)
+        XCTAssertEqual(decoded.priority, chassis.priority)
+        XCTAssertEqual(decoded.external_ids, chassis.external_ids)
+    }
+
+    func testHAChassisGroupEncodesHAChassisAsUUIDSet() throws {
+        let group = OVNHAChassisGroup(
+            name: "grp0",
+            ha_chassis: [uuidA, uuidB],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: group, hints: .ovn)
+
+        XCTAssertEqual(row["ha_chassis"], wireSet([wireUUID(uuidA), wireUUID(uuidB)]))
+        XCTAssertEqual(row["name"], .string("grp0"))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testHAChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
+        let chassis = OVNHAChassis(
+            chassis_name: "hv3",
+            priority: 20,
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
+
+        XCTAssertEqual(row["chassis_name"], .string("hv3"))
+        XCTAssertEqual(row["priority"], .number(20))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testHAChassisRoundTrip() throws {
+        let chassis = OVNHAChassis(chassis_name: "hv4", priority: 10)
+
+        let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNHAChassis.self, from: row)
+
+        XCTAssertEqual(decoded.chassis_name, chassis.chassis_name)
+        XCTAssertEqual(decoded.priority, chassis.priority)
+    }
+
     func testDHCPOptionsRoundTrip() throws {
         let dhcp = OVNDHCPOptions(
             cidr: "10.0.0.0/24",

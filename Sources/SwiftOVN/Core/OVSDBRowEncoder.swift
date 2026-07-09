@@ -46,6 +46,9 @@ enum OVSDBRowEncoder {
                 "bfd",
                 // Logical_Router_Port
                 "gateway_chassis", "ha_chassis_group",
+                // HA_Chassis_Group (chassis_name in Gateway_Chassis/HA_Chassis
+                // is a plain chassis-name string, not a reference)
+                "ha_chassis",
                 // Load_Balancer
                 "health_check",
                 // NAT (weak references to Address_Set)
