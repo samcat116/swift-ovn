@@ -132,6 +132,60 @@ final class OVSDBRowDecoderTests: XCTestCase {
         XCTAssertNil(chassis.transport_zones)
     }
 
+    func testAdvertisedRouteRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "logical_port": wireUUID(uuidC),
+            "ip_prefix": .string("192.0.2.10/32"),
+            "tracked_port": emptySet,
+            "external_ids": wireStringMap(["owner": "northd"]),
+        ]
+
+        let route = try OVSDBRowDecoder.decode(OVNAdvertisedRoute.self, from: row)
+
+        XCTAssertEqual(route.uuid, uuidA)
+        XCTAssertEqual(route.datapath, uuidB)
+        XCTAssertEqual(route.logical_port, uuidC)
+        XCTAssertEqual(route.ip_prefix, "192.0.2.10/32")
+        XCTAssertNil(route.tracked_port)
+        XCTAssertEqual(route.external_ids, ["owner": "northd"])
+    }
+
+    func testAdvertisedRouteTrackedPortAtom() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "logical_port": wireUUID(uuidC),
+            "ip_prefix": .string("10.0.0.0/24"),
+            "tracked_port": wireUUID(uuidC),
+        ]
+
+        let route = try OVSDBRowDecoder.decode(OVNAdvertisedRoute.self, from: row)
+
+        XCTAssertEqual(route.tracked_port, uuidC)
+    }
+
+    func testLearnedRouteRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "logical_port": wireUUID(uuidC),
+            "ip_prefix": .string("203.0.113.0/24"),
+            "nexthop": .string("192.0.2.254"),
+            "external_ids": wireMap([]),
+        ]
+
+        let route = try OVSDBRowDecoder.decode(OVNLearnedRoute.self, from: row)
+
+        XCTAssertEqual(route.uuid, uuidA)
+        XCTAssertEqual(route.datapath, uuidB)
+        XCTAssertEqual(route.logical_port, uuidC)
+        XCTAssertEqual(route.ip_prefix, "203.0.113.0/24")
+        XCTAssertEqual(route.nexthop, "192.0.2.254")
+        XCTAssertEqual(route.external_ids, [:])
+    }
+
     // MARK: Open_vSwitch
 
     func testInterfaceWithUnsetAndBareScalars() throws {

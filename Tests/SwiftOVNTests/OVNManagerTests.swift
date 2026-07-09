@@ -219,6 +219,67 @@ final class OVNManagerTests: XCTestCase {
         XCTAssertEqual(loadBalancer.vips["192.168.1.100:80"], "192.168.1.10:8080,192.168.1.11:8080")
         XCTAssertEqual(loadBalancer.protocolType, "tcp")
     }
+
+    func testLogicalRouterDynamicRoutingHelpers() throws {
+        let router = OVNLogicalRouter(
+            name: "lr0",
+            options: ["existing": "kept"]
+        )
+
+        let dynamicRouter = router.withDynamicRouting(
+            redistribute: [.connected, .staticRoutes, .nat, .loadBalancer],
+            vrfID: 42,
+            vrfName: "tenant-a",
+            noLearning: true,
+            ipv4PrefixNexthop: "192.0.2.1",
+            ipv6PrefixNexthop: "2001:db8::1"
+        )
+
+        XCTAssertTrue(dynamicRouter.dynamicRoutingEnabled)
+        XCTAssertEqual(dynamicRouter.dynamicRoutingRedistribute, [.connected, .staticRoutes, .nat, .loadBalancer])
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing"], "true")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-redistribute"], "connected,lb,nat,static")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-vrf-id"], "42")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-vrf-name"], "tenant-a")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-no-learning"], "true")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-v4-prefix-nexthop"], "192.0.2.1")
+        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-v6-prefix-nexthop"], "2001:db8::1")
+        XCTAssertEqual(dynamicRouter.options?["existing"], "kept")
+
+        let disabledRouter = dynamicRouter.withoutDynamicRouting()
+        XCTAssertEqual(disabledRouter.options, ["existing": "kept"])
+    }
+
+    func testLogicalRouterPortDynamicRoutingHelpers() throws {
+        let port = OVNLogicalRouterPort(
+            name: "lrp0",
+            mac: "00:00:00:00:00:01",
+            networks: ["10.0.0.1/24"],
+            options: ["existing": "kept"]
+        )
+
+        let dynamicPort = port.withDynamicRouting(
+            redistribute: [.connectedAsHost],
+            maintainVRF: true,
+            noLearning: false,
+            portName: "fabric0",
+            routingProtocols: [.bgp, .bfd],
+            routingProtocolRedirect: "bgp-speaker-lsp"
+        )
+
+        XCTAssertEqual(dynamicPort.dynamicRoutingRedistribute, [.connectedAsHost])
+        XCTAssertEqual(dynamicPort.routingProtocols, [.bgp, .bfd])
+        XCTAssertEqual(dynamicPort.options?["dynamic-routing-redistribute"], "connected-as-host")
+        XCTAssertEqual(dynamicPort.options?["dynamic-routing-maintain-vrf"], "true")
+        XCTAssertEqual(dynamicPort.options?["dynamic-routing-no-learning"], "false")
+        XCTAssertEqual(dynamicPort.options?["dynamic-routing-port-name"], "fabric0")
+        XCTAssertEqual(dynamicPort.options?["routing-protocols"], "BFD,BGP")
+        XCTAssertEqual(dynamicPort.options?["routing-protocol-redirect"], "bgp-speaker-lsp")
+        XCTAssertEqual(dynamicPort.options?["existing"], "kept")
+
+        let clearedPort = dynamicPort.withoutDynamicRoutingOverrides()
+        XCTAssertEqual(clearedPort.options, ["existing": "kept"])
+    }
     
     func testOVSFlowBuilder() throws {
         let flow = OVSFlowBuilder()
