@@ -1,0 +1,32 @@
+Sources/SwiftOVN/Models/OVNHAChassisGroup.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 1-27
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 493-724
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 423-494
+  s_1b4aae1ef41ff0::t_de7f96012a8883 495
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 61-83,155-157
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 49-51
+Sources/SwiftOVN/Models/OVNGatewayChassis.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 1-33
+Sources/SwiftOVN/Models/OVNHAChassis.swift
+  s_1b4aae1ef41ff0::t_a6ce78a1853860 1-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e6eddf11f114dc48b7d6061466e00ccfbb2a9f39",
+  "prompts": {},
+  "sessions": {
+    "s_1b4aae1ef41ff0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "24c18c6a-5b8b-45a6-bbba-50572057c547",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
