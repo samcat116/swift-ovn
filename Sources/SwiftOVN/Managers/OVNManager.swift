@@ -620,12 +620,20 @@ public actor OVNManager: OVNManaging {
     }
 
     public func deleteHAChassisGroup(uuid: String) async throws {
-        // HA_Chassis_Group is a root table, and the ha_chassis_group columns on
-        // Logical_Router_Port / Logical_Switch_Port are weak references that
-        // ovsdb-server clears automatically, so a plain delete is safe. The
-        // group's HA_Chassis members become orphans and are garbage-collected.
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVNTable.haChassisGroup, in: database, where: [condition])
+        // The ha_chassis_group columns on Logical_Router_Port and
+        // Logical_Switch_Port are strong references, so ovsdb-server rejects
+        // deleting the group while a port still points at it. Detach those
+        // port columns in the same transaction before deleting. The group's
+        // HA_Chassis members become orphans and are garbage-collected.
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.haChassisGroup,
+            in: database,
+            uuid: uuid,
+            parentReferences: [
+                OVSDBParentReference(table: OVNTable.logicalRouterPort, column: "ha_chassis_group"),
+                OVSDBParentReference(table: OVNTable.logicalSwitchPort, column: "ha_chassis_group")
+            ]
+        )
 
         if count == 0 {
             throw OVNManagerError.operationFailed("HA chassis group not found: \(uuid)")

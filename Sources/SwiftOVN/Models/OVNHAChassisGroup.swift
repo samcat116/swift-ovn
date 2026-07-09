@@ -1,7 +1,7 @@
 import Foundation
 
-/// A row in the OVN Northbound `HA_Chassis_Group` table. Referenced (weakly)
-/// from `Logical_Router_Port.ha_chassis_group` and `Logical_Switch_Port`, it
+/// A row in the OVN Northbound `HA_Chassis_Group` table. Referenced from
+/// `Logical_Router_Port.ha_chassis_group` and `Logical_Switch_Port`, it
 /// groups `HA_Chassis` members that back a gateway with active/backup
 /// failover. This is a root table, so a group persists even when no port
 /// references it.
