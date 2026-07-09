@@ -322,6 +322,47 @@ final class OVSDBRowEncoderTests: XCTestCase {
         XCTAssertEqual(row["flow_tables"], wireMap([(.number(0), wireUUID(uuidB))]))
     }
 
+    func testStaticRouteReferenceColumnsEncodeUUIDAtoms() throws {
+        let route = OVNLogicalRouterStaticRoute(
+            ip_prefix: "10.0.0.0/24",
+            nexthop: "192.168.1.1",
+            output_port: uuidB,
+            policy: "dst-ip",
+            bfd: uuidC
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
+
+        // Reference columns become UUID atoms; nexthop stays a plain string.
+        XCTAssertEqual(row["output_port"], wireUUID(uuidB))
+        XCTAssertEqual(row["bfd"], wireUUID(uuidC))
+        XCTAssertEqual(row["nexthop"], .string("192.168.1.1"))
+        XCTAssertEqual(row["ip_prefix"], .string("10.0.0.0/24"))
+        XCTAssertEqual(row["policy"], .string("dst-ip"))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testStaticRouteRoundTrip() throws {
+        let route = OVNLogicalRouterStaticRoute(
+            ip_prefix: "0.0.0.0/0",
+            nexthop: "10.0.0.1",
+            policy: "src-ip",
+            route_table: "rt1",
+            options: ["ecmp_symmetric_reply": "true"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterStaticRoute.self, from: row)
+
+        XCTAssertEqual(decoded.ip_prefix, route.ip_prefix)
+        XCTAssertEqual(decoded.nexthop, route.nexthop)
+        XCTAssertEqual(decoded.policy, route.policy)
+        XCTAssertEqual(decoded.route_table, route.route_table)
+        XCTAssertEqual(decoded.options, route.options)
+        XCTAssertEqual(decoded.external_ids, route.external_ids)
+    }
+
     func testDHCPOptionsRoundTrip() throws {
         let dhcp = OVNDHCPOptions(
             cidr: "10.0.0.0/24",

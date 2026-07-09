@@ -50,6 +50,14 @@ public protocol OVNManaging {
     func deleteLogicalRouterPort(uuid: String) async throws
     func deleteLogicalRouterPort(named name: String) async throws
 
+    // Logical Router Static Route Operations
+    func getStaticRoutes() async throws -> [OVNLogicalRouterStaticRoute]
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createStaticRoute(_:onRouter:) so the route is attached to its router.")
+    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws -> String
+    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws -> String
+    func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws
+    func deleteStaticRoute(uuid: String) async throws
+
     // ACL Operations
     func getACLs() async throws -> [OVNACL]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
@@ -110,6 +118,7 @@ public enum OVNTable {
     public static let logicalSwitchPort = "Logical_Switch_Port"
     public static let logicalRouter = "Logical_Router"
     public static let logicalRouterPort = "Logical_Router_Port"
+    public static let logicalRouterStaticRoute = "Logical_Router_Static_Route"
     public static let acl = "ACL"
     public static let portGroup = "Port_Group"
     public static let loadBalancer = "Load_Balancer"

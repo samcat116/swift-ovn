@@ -409,7 +409,87 @@ public actor OVNManager: OVNManaging {
 
         logger.info("Deleted logical router port: \(name)")
     }
-    
+
+    // MARK: - Logical Router Static Route Operations
+
+    public func getStaticRoutes() async throws -> [OVNLogicalRouterStaticRoute] {
+        let rows = try await connection.selectAll(from: OVNTable.logicalRouterStaticRoute, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNLogicalRouterStaticRoute.self)
+        }
+    }
+
+    @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createStaticRoute(_:onRouter:) so the route is attached to its router.")
+    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws -> String {
+        let row = try createRow(from: route)
+        let result = try await connection.insert(into: OVNTable.logicalRouterStaticRoute, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created static route: \(route.ip_prefix)")
+        return uuidValue
+    }
+
+    /// Creates a static route and attaches it to the named logical router
+    /// (Logical_Router.static_routes) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl lr-route-add`. Logical_Router_Static_Route is not a root
+    /// table, so an unreferenced row is garbage-collected when the transaction
+    /// commits.
+    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws -> String {
+        let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
+
+        guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.logicalRouterStaticRoute,
+            in: database,
+            row: try createRow(from: route),
+            uuidName: "new_route",
+            parentTable: OVNTable.logicalRouter,
+            parentColumn: "static_routes",
+            parentCondition: routerCondition
+        )
+
+        logger.info("Created static route: \(route.ip_prefix) on router: \(routerName)")
+        return uuidValue
+    }
+
+    public func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: route)
+
+        let count = try await connection.update(table: OVNTable.logicalRouterStaticRoute, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Static route not found: \(uuid)")
+        }
+
+        logger.info("Updated static route: \(uuid)")
+    }
+
+    public func deleteStaticRoute(uuid: String) async throws {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.logicalRouterStaticRoute,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalRouter, column: "static_routes")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Static route not found: \(uuid)")
+        }
+
+        logger.info("Deleted static route: \(uuid)")
+    }
+
     // MARK: - ACL Operations
     
     public func getACLs() async throws -> [OVNACL] {
