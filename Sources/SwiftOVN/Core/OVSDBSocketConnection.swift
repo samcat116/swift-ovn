@@ -44,9 +44,12 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     deinit {
         // Only shut down a group we created; an injected one is the caller's
         // to manage. Without this, each connection created with no injected
-        // group leaks its event-loop thread.
+        // group leaks its event-loop thread. Shut down asynchronously: if the
+        // last reference is released by one of the group's own EventLoop
+        // callbacks, `deinit` runs on that EventLoop, where the synchronous
+        // variant would fatally trap.
         if ownsEventLoopGroup {
-            try? eventLoopGroup.syncShutdownGracefully()
+            eventLoopGroup.shutdownGracefully { _ in }
         }
     }
 
@@ -62,18 +65,26 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             logger.debug("connect() already in progress for \(endpoint), reusing it")
             return inFlightConnect
         }
-        let future = makeConnectFuture()
+        // Reserve the in-flight slot with a promise so concurrent callers
+        // dedup, then release the lock *before* wiring up the real future.
+        // `makeConnectFuture()` can return an already-completed future (missing
+        // socket, invalid TLS); cascading it — and the slot-clearing callback —
+        // would otherwise run synchronously while we still hold the
+        // non-reentrant lock and deadlock when called on the group's EventLoop.
+        let promise = eventLoopGroup.next().makePromise(of: Void.self)
+        inFlightConnect = promise.futureResult
+        connectionLock.unlock()
+
         // Clear the in-flight slot once this attempt settles so a later
         // reconnect can start fresh.
-        let deduplicated = future.always { [weak self] _ in
+        promise.futureResult.whenComplete { [weak self] _ in
             guard let self else { return }
             self.connectionLock.lock()
             self.inFlightConnect = nil
             self.connectionLock.unlock()
         }
-        inFlightConnect = deduplicated
-        connectionLock.unlock()
-        return deduplicated
+        makeConnectFuture().cascade(to: promise)
+        return promise.futureResult
     }
 
     private func makeConnectFuture() -> EventLoopFuture<Void> {
