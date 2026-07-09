@@ -89,6 +89,16 @@ public protocol OVNManaging: Sendable {
     func updateACL(uuid: String, _ acl: OVNACL) async throws
     func deleteACL(uuid: String) async throws
 
+    // Port Group Operations
+    func getPortGroups() async throws -> [OVNPortGroup]
+    func getPortGroup(named name: String) async throws -> OVNPortGroup?
+    func createPortGroup(_ portGroup: OVNPortGroup) async throws -> String
+    func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws
+    func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws
+    func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws
+    func deletePortGroup(uuid: String) async throws
+    func deletePortGroup(named name: String) async throws
+
     // Load Balancer Operations
     func getLoadBalancers() async throws -> [OVNLoadBalancer]
     func getLoadBalancer(named name: String) async throws -> OVNLoadBalancer?

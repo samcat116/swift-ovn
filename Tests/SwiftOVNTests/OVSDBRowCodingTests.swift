@@ -368,6 +368,58 @@ final class OVSDBRowEncoderTests: XCTestCase {
         XCTAssertEqual(decoded.external_ids, route.external_ids)
     }
 
+    func testPortGroupReferenceColumnsEncodeUUIDAtoms() throws {
+        let portGroup = OVNPortGroup(
+            name: "pg-web",
+            ports: [uuidB, uuidC],
+            acls: [uuidA],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: portGroup, hints: .ovn)
+
+        // ports and acls are reference sets rewritten into UUID atoms; the
+        // encoder always emits the tagged ["set", ...] form, even for one item.
+        XCTAssertEqual(row["ports"], wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        XCTAssertEqual(row["acls"], wireSet([wireUUID(uuidA)]))
+        XCTAssertEqual(row["name"], .string("pg-web"))
+        XCTAssertNil(row["_uuid"])
+    }
+
+    func testPortGroupRoundTrip() throws {
+        let portGroup = OVNPortGroup(
+            name: "pg-db",
+            ports: [uuidB, uuidC],
+            acls: [uuidA],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: portGroup, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNPortGroup.self, from: row)
+
+        XCTAssertEqual(decoded.name, portGroup.name)
+        XCTAssertEqual(decoded.ports, portGroup.ports)
+        XCTAssertEqual(decoded.acls, portGroup.acls)
+        XCTAssertEqual(decoded.external_ids, portGroup.external_ids)
+    }
+
+    /// A fresh, empty port group has its reference sets sent as the empty set,
+    /// which decodes to nil rather than an empty array.
+    func testPortGroupWithEmptyMembership() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("pg-empty"),
+            "ports": emptySet,
+            "acls": emptySet,
+        ]
+
+        let portGroup = try OVSDBRowDecoder.decode(OVNPortGroup.self, from: row)
+
+        XCTAssertEqual(portGroup.name, "pg-empty")
+        XCTAssertNil(portGroup.ports)
+        XCTAssertNil(portGroup.acls)
+    }
+
     func testGatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
         let chassis = OVNGatewayChassis(
             name: "lrp0-hv1",
