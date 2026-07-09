@@ -18,7 +18,22 @@ public struct OVNLogicalRouter: Codable, Sendable {
     }
     
     public init(name: String, ports: [String]? = nil, static_routes: [String]? = nil, policies: [String]? = nil, nat: [String]? = nil, load_balancer: [String]? = nil, enabled: Bool? = true, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
-        self.uuid = nil
+        self.init(
+            uuid: nil,
+            name: name,
+            ports: ports,
+            static_routes: static_routes,
+            policies: policies,
+            nat: nat,
+            load_balancer: load_balancer,
+            enabled: enabled,
+            options: options,
+            external_ids: external_ids
+        )
+    }
+
+    init(uuid: String?, name: String, ports: [String]? = nil, static_routes: [String]? = nil, policies: [String]? = nil, nat: [String]? = nil, load_balancer: [String]? = nil, enabled: Bool? = true, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
+        self.uuid = uuid
         self.name = name
         self.ports = ports
         self.static_routes = static_routes

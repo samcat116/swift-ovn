@@ -103,6 +103,8 @@ public protocol OVNManaging {
     func getChassisPrivate() async throws -> [OVNChassisPrivate]
     func getPortBindings() async throws -> [OVNPortBinding]
     func getLogicalFlows() async throws -> [OVNLogicalFlow]
+    func getAdvertisedRoutes() async throws -> [OVNAdvertisedRoute]
+    func getLearnedRoutes() async throws -> [OVNLearnedRoute]
 }
 
 // MARK: - OVN Database Constants
@@ -130,6 +132,8 @@ public enum OVNTable {
     public static let chassisPrivate = "Chassis_Private"
     public static let portBinding = "Port_Binding"
     public static let logicalFlow = "Logical_Flow"
+    public static let advertisedRoute = "Advertised_Route"
+    public static let learnedRoute = "Learned_Route"
     public static let encap = "Encap"
 }
 

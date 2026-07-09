@@ -902,6 +902,28 @@ public actor OVNManager: OVNManaging {
             try parseRow(row, as: OVNLogicalFlow.self)
         }
     }
+
+    public func getAdvertisedRoutes() async throws -> [OVNAdvertisedRoute] {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("Advertised Route operations require southbound database")
+        }
+
+        let rows = try await connection.selectAll(from: OVNTable.advertisedRoute, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNAdvertisedRoute.self)
+        }
+    }
+
+    public func getLearnedRoutes() async throws -> [OVNLearnedRoute] {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("Learned Route operations require southbound database")
+        }
+
+        let rows = try await connection.selectAll(from: OVNTable.learnedRoute, in: database)
+        return try rows.compactMap { row in
+            try parseRow(row, as: OVNLearnedRoute.self)
+        }
+    }
 }
 
 // MARK: - Helper Methods
