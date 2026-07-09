@@ -1,0 +1,21 @@
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_b2293b4bcccdfd::t_e05e0c45170670 352,358-359,366
+Sources/SwiftOVN/Models/OVNLogicalRouterStaticRoute.swift
+  s_b2293b4bcccdfd::t_dc513085e9ee82 21-23,29,32,40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cd51c34a640bdf694285ae379e5858b14411e72d",
+  "prompts": {},
+  "sessions": {
+    "s_b2293b4bcccdfd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c2c8a19b-ba19-4c9e-8a09-38afe3d0543c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
