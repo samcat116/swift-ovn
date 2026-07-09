@@ -627,30 +627,35 @@ public actor OVNManager: OVNManaging {
 
         let row = try createRow(from: portGroup)
 
+        // `ports` is a weak reference set, so any initial member whose port row
+        // is stale at commit would be silently dropped from the insert. Guard
+        // each supplied port so a stale UUID aborts the whole insert instead of
+        // creating a group with missing membership.
+        var operations = portExistenceWaitOps(portGroup.ports ?? [])
+
         // Guard against a duplicate name racing in between the check above and
         // the insert: the wait op aborts the transaction unless no row with
         // this name still exists at commit.
-        let operations = [
-            OVSDBOperation(
-                op: "wait",
-                table: OVNTable.portGroup,
-                whereConditions: [nameCondition],
-                columns: ["name"],
-                rows: [],
-                until: "==",
-                timeout: 0
-            ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVNTable.portGroup,
-                row: row
-            )
-        ]
+        operations.append(OVSDBOperation(
+            op: "wait",
+            table: OVNTable.portGroup,
+            whereConditions: [nameCondition],
+            columns: ["name"],
+            rows: [],
+            until: "==",
+            timeout: 0
+        ))
+        let insertIndex = operations.count
+        operations.append(OVSDBOperation(
+            op: "insert",
+            table: OVNTable.portGroup,
+            row: row
+        ))
 
         let results = try await connection.transact(in: database, operations: operations)
 
-        guard results.count >= 2,
-              case .object(let insertResult) = results[1],
+        guard results.count > insertIndex,
+              case .object(let insertResult) = results[insertIndex],
               let uuid = insertResult["uuid"],
               case .array(let uuidArray) = uuid,
               uuidArray.count == 2,
@@ -666,9 +671,26 @@ public actor OVNManager: OVNManaging {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: portGroup)
 
-        let count = try await connection.update(table: OVNTable.portGroup, in: database, where: [condition], row: row)
+        // A full-row update rewrites the weak-reference `ports` set, so guard
+        // each supplied port the same way create/mutate do: a stale UUID aborts
+        // the update rather than being silently dropped from the new set.
+        var operations = portExistenceWaitOps(portGroup.ports ?? [])
+        let updateIndex = operations.count
+        operations.append(OVSDBOperation(
+            op: "update",
+            table: OVNTable.portGroup,
+            whereConditions: [condition],
+            row: row
+        ))
 
-        if count == 0 {
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count > updateIndex,
+              case .object(let updateResult) = results[updateIndex],
+              case .number(let count)? = updateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+        if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Port group not found: \(uuid)")
         }
 
@@ -1109,21 +1131,8 @@ private extension OVNManager {
         let portAtoms = portUUIDs.map { JSONValue.array([.string("uuid"), .string($0)]) }
         let portSet = JSONValue.array([.string("set"), .array(portAtoms)])
 
-        var operations: [OVSDBOperation] = []
-        if mutator == "insert" {
-            for uuid in portUUIDs {
-                let portCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-                operations.append(OVSDBOperation(
-                    op: "wait",
-                    table: OVNTable.logicalSwitchPort,
-                    whereConditions: [portCondition],
-                    columns: ["_uuid"],
-                    rows: [],
-                    until: "!=",
-                    timeout: 0
-                ))
-            }
-        }
+        // Deletes need no guard — removing a stale UUID is a harmless no-op.
+        var operations = mutator == "insert" ? portExistenceWaitOps(portUUIDs) : []
 
         let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         operations.append(OVSDBOperation(
@@ -1141,6 +1150,26 @@ private extension OVNManager {
         }
         if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Port group not found: \(name)")
+        }
+    }
+
+    /// Builds a `wait` op per port UUID that aborts the enclosing transaction
+    /// unless that `Logical_Switch_Port` still exists at commit. `Port_Group`'s
+    /// `ports` is a weak reference set, so ovsdb-server would otherwise silently
+    /// drop a stale UUID and report the write as succeeding. Used by any
+    /// transaction that writes the `ports` column (create, update, mutate).
+    func portExistenceWaitOps(_ portUUIDs: [String]) -> [OVSDBOperation] {
+        portUUIDs.map { uuid in
+            let portCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+            return OVSDBOperation(
+                op: "wait",
+                table: OVNTable.logicalSwitchPort,
+                whereConditions: [portCondition],
+                columns: ["_uuid"],
+                rows: [],
+                until: "!=",
+                timeout: 0
+            )
         }
     }
 
