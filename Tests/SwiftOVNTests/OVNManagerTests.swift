@@ -513,6 +513,54 @@ final class JSONRPCClientMockTests: XCTestCase {
         XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_bridge"])
     }
 
+    func testInsertBridgeAttachedCreatesInternalPortWireFormat() throws {
+        // `ovs-vsctl add-br` semantics: Interface + Port + Bridge inserted and
+        // chained by named-uuid, then referenced from the Open_vSwitch root.
+        // Without the internal Port/Interface pair, ovs-vswitchd never creates
+        // the bridge's Linux netdev.
+        let operations = OVSDBReferenceTransactions.insertBridgeAttached(
+            bridgeRow: ["name": .string("br-ex"), "ports": .string("stale-caller-value")],
+            portRow: ["name": .string("br-ex")],
+            interfaceRow: ["name": .string("br-ex"), "type": .string("internal")]
+        )
+
+        let json = try encodeOperations(operations)
+        XCTAssertEqual(json.count, 4)
+
+        // Op 0: the internal interface, carrying its uuid-name for the port.
+        XCTAssertEqual(json[0]["op"] as? String, "insert")
+        XCTAssertEqual(json[0]["table"] as? String, "Interface")
+        XCTAssertEqual(json[0]["uuid-name"] as? String, "new_interface")
+        XCTAssertEqual((json[0]["row"] as? [String: Any])?["type"] as? String, "internal")
+
+        // Op 1: the port, its interfaces chained to the new interface.
+        XCTAssertEqual(json[1]["op"] as? String, "insert")
+        XCTAssertEqual(json[1]["table"] as? String, "Port")
+        XCTAssertEqual(json[1]["uuid-name"] as? String, "new_port")
+        XCTAssertEqual(
+            (json[1]["row"] as? [String: Any])?["interfaces"] as? [String],
+            ["named-uuid", "new_interface"])
+
+        // Op 2: the bridge, its ports overwritten with the new port.
+        XCTAssertEqual(json[2]["op"] as? String, "insert")
+        XCTAssertEqual(json[2]["table"] as? String, "Bridge")
+        XCTAssertEqual(json[2]["uuid-name"] as? String, "new_bridge")
+        XCTAssertEqual(
+            (json[2]["row"] as? [String: Any])?["ports"] as? [String],
+            ["named-uuid", "new_port"])
+
+        // Op 3: root reference, unconditioned (the one Open_vSwitch row).
+        XCTAssertEqual(json[3]["op"] as? String, "mutate")
+        XCTAssertEqual(json[3]["table"] as? String, "Open_vSwitch")
+        XCTAssertEqual((json[3]["where"] as? [Any])?.count, 0)
+        guard let mutation = (json[3]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
+            return XCTFail("Expected one [column, mutator, value] mutation")
+        }
+        XCTAssertEqual(mutation[0] as? String, "bridges")
+        XCTAssertEqual(mutation[1] as? String, "insert")
+        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_bridge"])
+    }
+
     func testDeleteDetachingTransactionWireFormat() throws {
         let uuid = "5e9b0a79-6f38-4e5f-b112-3f0a35b4d2a1"
         let operations = OVSDBReferenceTransactions.deleteDetaching(

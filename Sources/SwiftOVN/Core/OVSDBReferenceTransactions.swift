@@ -102,4 +102,57 @@ public enum OVSDBReferenceTransactions {
 
         return operations
     }
+
+    /// Operations for creating an OVS bridge the way `ovs-vsctl add-br` does:
+    /// `insert`(Interface) → `insert`(Port) → `insert`(Bridge) →
+    /// `mutate`(Open_vSwitch.bridges += bridge). `ovs-vswitchd` instantiates a
+    /// bridge's Linux netdev from its bridge-named internal Port/Interface
+    /// pair — a bare Bridge row commits fine in OVSDB but never materializes a
+    /// datapath or host-visible device, leaving the bridge inert. All three
+    /// rows are in non-root tables, so the inserts and the chaining references
+    /// must commit in one transaction. The bridge row's `ports` and the port
+    /// row's `interfaces` are overwritten with the `named-uuid` references
+    /// that chain the inserts; the root mutate carries no condition
+    /// (`Open_vSwitch` holds a single row that always exists).
+    public static func insertBridgeAttached(
+        bridgeRow: OVSDBRow,
+        portRow: OVSDBRow,
+        interfaceRow: OVSDBRow
+    ) -> [OVSDBOperation] {
+        var bridgeRow = bridgeRow
+        var portRow = portRow
+        bridgeRow["ports"] = .array([.string("named-uuid"), .string("new_port")])
+        portRow["interfaces"] = .array([.string("named-uuid"), .string("new_interface")])
+
+        return [
+            OVSDBOperation(
+                op: "insert",
+                table: "Interface",
+                row: interfaceRow,
+                uuidName: "new_interface"
+            ),
+            OVSDBOperation(
+                op: "insert",
+                table: "Port",
+                row: portRow,
+                uuidName: "new_port"
+            ),
+            OVSDBOperation(
+                op: "insert",
+                table: "Bridge",
+                row: bridgeRow,
+                uuidName: "new_bridge"
+            ),
+            OVSDBOperation(
+                op: "mutate",
+                table: "Open_vSwitch",
+                whereConditions: [],
+                mutations: [OVSDBMutation(
+                    column: "bridges",
+                    mutator: "insert",
+                    value: .array([.string("named-uuid"), .string("new_bridge")])
+                )]
+            )
+        ]
+    }
 }
