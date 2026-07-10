@@ -422,6 +422,55 @@ final class OVSDBRowEncoderTests: XCTestCase {
         XCTAssertEqual(decoded.external_ids, route.external_ids)
     }
 
+    func testLogicalRouterPortRoundTripWithIPv6RAConfigs() throws {
+        let port = OVNLogicalRouterPort(
+            name: "lrp-net0",
+            mac: "0a:58:0a:00:00:01",
+            networks: ["10.0.0.1/24", "fd12:3456:789a::1/64"],
+            ipv6_ra_configs: ["address_mode": "dhcpv6_stateful", "send_periodic": "true"],
+            options: ["gateway_mtu": "1500"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
+        XCTAssertEqual(
+            row["ipv6_ra_configs"],
+            wireStringMap(["address_mode": "dhcpv6_stateful", "send_periodic": "true"])
+        )
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
+
+        XCTAssertEqual(decoded.name, port.name)
+        XCTAssertEqual(decoded.mac, port.mac)
+        XCTAssertEqual(decoded.networks, port.networks)
+        XCTAssertEqual(decoded.ipv6_ra_configs, port.ipv6_ra_configs)
+        XCTAssertEqual(decoded.options, port.options)
+        XCTAssertEqual(decoded.external_ids, port.external_ids)
+    }
+
+    /// A router port fresh from ovn-nbctl carries ipv6_ra_configs as an empty
+    /// map; rows from peers that predate the column omit it entirely. Both
+    /// must decode.
+    func testLogicalRouterPortWithoutIPv6RAConfigs() throws {
+        let bareRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("lrp-bare"),
+            "mac": .string("0a:58:0a:00:00:01"),
+            "networks": .string("10.0.0.1/24"),
+        ]
+        let bare = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: bareRow)
+        XCTAssertNil(bare.ipv6_ra_configs)
+
+        let emptyMapRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("lrp-empty"),
+            "mac": .string("0a:58:0a:00:00:01"),
+            "networks": .string("10.0.0.1/24"),
+            "ipv6_ra_configs": wireMap([]),
+        ]
+        let empty = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: emptyMapRow)
+        XCTAssertEqual(empty.ipv6_ra_configs, [:])
+    }
+
     func testPortGroupReferenceColumnsEncodeUUIDAtoms() throws {
         let portGroup = OVNPortGroup(
             name: "pg-web",

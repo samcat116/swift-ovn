@@ -9,15 +9,16 @@ public struct OVNLogicalRouterPort: Codable, Sendable {
     public let enabled: Bool?
     public let gateway_chassis: [String]?
     public let ha_chassis_group: String?
+    public let ipv6_ra_configs: [String: String]?
     public let options: [String: String]?
     public let external_ids: [String: String]?
-    
+
     private enum CodingKeys: String, CodingKey {
         case uuid = "_uuid"
-        case name, mac, networks, peer, enabled, gateway_chassis, ha_chassis_group, options, external_ids
+        case name, mac, networks, peer, enabled, gateway_chassis, ha_chassis_group, ipv6_ra_configs, options, external_ids
     }
-    
-    public init(name: String, mac: String, networks: [String], peer: String? = nil, enabled: Bool? = true, gateway_chassis: [String]? = nil, ha_chassis_group: String? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
+
+    public init(name: String, mac: String, networks: [String], peer: String? = nil, enabled: Bool? = true, gateway_chassis: [String]? = nil, ha_chassis_group: String? = nil, ipv6_ra_configs: [String: String]? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
         self.init(
             uuid: nil,
             name: name,
@@ -27,12 +28,13 @@ public struct OVNLogicalRouterPort: Codable, Sendable {
             enabled: enabled,
             gateway_chassis: gateway_chassis,
             ha_chassis_group: ha_chassis_group,
+            ipv6_ra_configs: ipv6_ra_configs,
             options: options,
             external_ids: external_ids
         )
     }
 
-    init(uuid: String?, name: String, mac: String, networks: [String], peer: String? = nil, enabled: Bool? = true, gateway_chassis: [String]? = nil, ha_chassis_group: String? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
+    init(uuid: String?, name: String, mac: String, networks: [String], peer: String? = nil, enabled: Bool? = true, gateway_chassis: [String]? = nil, ha_chassis_group: String? = nil, ipv6_ra_configs: [String: String]? = nil, options: [String: String]? = nil, external_ids: [String: String]? = nil) {
         self.uuid = uuid
         self.name = name
         self.mac = mac
@@ -41,6 +43,7 @@ public struct OVNLogicalRouterPort: Codable, Sendable {
         self.enabled = enabled
         self.gateway_chassis = gateway_chassis
         self.ha_chassis_group = ha_chassis_group
+        self.ipv6_ra_configs = ipv6_ra_configs
         self.options = options
         self.external_ids = external_ids
     }
