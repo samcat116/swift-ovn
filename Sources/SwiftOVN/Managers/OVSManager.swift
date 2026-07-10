@@ -66,20 +66,24 @@ public actor OVSManager: OVSManaging {
         return try parseRow(firstRow, as: OVSBridge.self)
     }
     
-    /// Creates a bridge and attaches it to the Open_vSwitch root row
-    /// (Open_vSwitch.bridges) in a single OVSDB transaction, mirroring
-    /// `ovs-vsctl add-br`. Bridge is not a root table, so an unreferenced
-    /// row is garbage-collected when the transaction commits.
+    /// Creates a bridge with its bridge-named internal port/interface pair
+    /// and attaches it to the Open_vSwitch root row (Open_vSwitch.bridges) in
+    /// a single OVSDB transaction, mirroring `ovs-vsctl add-br`. The internal
+    /// pair is what makes `ovs-vswitchd` instantiate the bridge's Linux
+    /// netdev — a bare Bridge row commits fine but never gets a datapath or a
+    /// host-visible device. Bridge, Port, and Interface are not root tables,
+    /// so unreferenced rows are garbage-collected when the transaction
+    /// commits. Any UUIDs in `bridge.ports` are replaced by the new internal
+    /// port. Returns the new bridge's UUID.
     public func createBridge(_ bridge: OVSBridge) async throws -> String {
-        let uuidValue = try await connection.insertAttached(
-            into: OVSTable.bridge,
-            in: database,
-            row: try createRow(from: bridge),
-            uuidName: "new_bridge",
-            parentTable: OVSTable.openVSwitch,
-            parentColumn: "bridges",
-            parentCondition: nil
+        let operations = OVSDBReferenceTransactions.insertBridgeAttached(
+            bridgeRow: try createRow(from: bridge),
+            portRow: try createRow(from: OVSPort(name: bridge.name, interfaces: [])),
+            interfaceRow: try createRow(from: OVSInterface(name: bridge.name, interfaceType: "internal"))
         )
+
+        let results = try await connection.transact(in: database, operations: operations)
+        let uuidValue = try OVSDBConnection.uuid(fromInsertResults: results, at: 2)
 
         logger.info("Created bridge: \(bridge.name)")
         return uuidValue
