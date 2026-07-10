@@ -1,0 +1,21 @@
+Sources/SwiftOVN/Models/OVNLogicalRouterPort.swift
+  s_eb8d88f42f560f::t_442fb23e7305ac 12,15,18,20-21,31,37,46
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_eb8d88f42f560f::t_bcc8e52fbf032d 425-473
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "278d9f38cb5115da44bd6ec7d296f2ab356664eb",
+  "prompts": {},
+  "sessions": {
+    "s_eb8d88f42f560f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "100f01e6-cb6f-4ea1-acb7-8737af15ef62",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
