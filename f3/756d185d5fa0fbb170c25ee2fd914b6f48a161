@@ -1,0 +1,64 @@
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_0f281595a5d3d6::t_76040e9babda41 400-405,408-410,418-421
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_0f281595a5d3d6::t_6b59b8929d0368 843-848,850-852,857-860
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_0f281595a5d3d6::t_57a5893af77138 191-196,198-201,203-204,208,215-221
+  s_0f281595a5d3d6::t_b39ecefda338e0 205-207
+Tests/SwiftOVNTests/MessageRoutingTests.swift
+  s_0f281595a5d3d6::t_bf328e2b49e99b 52,264,393-466
+  s_0f281595a5d3d6::t_85519e84c3538f 66
+  s_0f281595a5d3d6::t_ebceb9c7f60ed9 169-171,174-212
+  s_0f281595a5d3d6::t_b4d5a0ad11a337 107
+  s_0f281595a5d3d6::t_739cc684b2931a 11-12,23-51
+  s_0f281595a5d3d6::t_ee03ce8761f7bf 88
+  s_0f281595a5d3d6::t_263031c72cd0f5 129-130,135-168,172-173,213-263
+  s_f65b135d9b9b85::t_62ec31d983854a 53,265
+Sources/SwiftOVN/Models/OVNManagerError.swift
+  s_0f281595a5d3d6::t_da3e012fb27658 12-15
+  s_0f281595a5d3d6::t_e02cfe9c9e9171 42-43
+Sources/SwiftOVN/Core/OVSDBTransport.swift
+  s_0f281595a5d3d6::t_aa3b198c57ed3f 17-23,31-42
+  s_0f281595a5d3d6::t_8f23e649ab59e7 43
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_0f281595a5d3d6::t_4915e0c5d9e2f1 12-20
+  s_0f281595a5d3d6::t_b0c1b5162774ed 35,46-48
+  s_0f281595a5d3d6::t_55f27c7fb82767 104-108
+  s_0f281595a5d3d6::t_8a533ad3ec5166 311-318,321-352
+  s_0f281595a5d3d6::t_d14ad880afe3e7 435-444,446-452,454-468,470,472-484,488,493-495,498,501-526,532,534,537-543,547-575
+  s_0f281595a5d3d6::t_c9c1c60179a3b9 576
+Sources/SwiftOVN/Models/JSONRPCNotificationEvent.swift
+  s_0f281595a5d3d6::t_8fa7ecbb0be79c 1-14,21-27
+  s_0f281595a5d3d6::t_da3b857f4a913d 15-20
+README.md
+  s_0f281595a5d3d6::t_3582716cad4125 93-100,102-105,112-118
+  s_0f281595a5d3d6::t_5ba054fb50b9da 119
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_0f281595a5d3d6::t_29aae4c8afa846 74-108
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_0f281595a5d3d6::t_9e9037a57d825e 1210-1215,1217-1219,1224-1227
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "f3756d185d5fa0fbb170c25ee2fd914b6f48a161",
+  "prompts": {},
+  "sessions": {
+    "s_0f281595a5d3d6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "27b8c61d-92de-44e6-b933-b9d9d3e0fd61",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    },
+    "s_f65b135d9b9b85": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d20059d8-84b0-427f-a6e0-9cb58fbae441",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
