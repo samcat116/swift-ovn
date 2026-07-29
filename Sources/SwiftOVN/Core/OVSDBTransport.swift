@@ -16,11 +16,31 @@ public protocol OVSDBTransport: Sendable {
     /// See `OVSDBSocketConnection.notifications()`: the returned stream must
     /// buffer from creation time and finish when the connection closes.
     func notifications() -> AsyncStream<JSONRPCNotification>
+    /// See `OVSDBSocketConnection.notificationEvents()`: as `notifications()`,
+    /// but reporting notifications discarded because the consumer fell behind.
+    ///
+    /// The default implementation wraps `notifications()` and therefore never
+    /// reports a gap; a transport that bounds its buffering should implement
+    /// this directly so consumers can tell that their view is incomplete.
+    func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent>
     var isConnectionActive: Bool { get }
 }
 
 public extension OVSDBTransport {
     func receive<T: Codable & Sendable>(as type: T.Type, requestId: JSONRPCIdentifier) -> EventLoopFuture<T> {
         return receive(as: type, requestId: requestId, timeout: .seconds(30))
+    }
+
+    func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {
+        let notifications = notifications()
+        return AsyncStream { continuation in
+            let task = Task {
+                for await notification in notifications {
+                    continuation.yield(.notification(notification))
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }

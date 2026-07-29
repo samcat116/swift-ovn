@@ -9,6 +9,15 @@ import Logging
 public typealias UnixSocketConnection = OVSDBSocketConnection
 
 public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
+    /// Notifications buffered per notification-stream consumer before the
+    /// oldest are discarded.
+    ///
+    /// Large enough to ride out a consumer that is briefly busy, small enough
+    /// that a consumer which stops draining altogether cannot exhaust memory
+    /// on a high-volume monitor (Southbound `Logical_Flow`). Applies at every
+    /// layer that re-buffers notifications, including `monitorUpdates()`.
+    public static let notificationBufferSize = 256
+
     private let eventLoopGroup: EventLoopGroup
     /// True when we created `eventLoopGroup` ourselves and are therefore
     /// responsible for shutting it down; false when the caller injected one.
@@ -23,7 +32,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     /// leak all but the last). All access is under `connectionLock`.
     private var inFlightConnect: EventLoopFuture<Void>?
     private let connectionLock = NSLock()
-    private let notificationHub = JSONRPCNotificationHub()
+    private let notificationHub: JSONRPCNotificationHub
 
     public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.endpoint = endpoint
@@ -34,7 +43,9 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
             self.ownsEventLoopGroup = true
         }
-        self.logger = logger ?? Logger(label: "ovn-manager.socket")
+        let resolvedLogger = logger ?? Logger(label: "ovn-manager.socket")
+        self.logger = resolvedLogger
+        self.notificationHub = JSONRPCNotificationHub(logger: resolvedLogger)
     }
 
     public convenience init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
@@ -89,6 +100,11 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
 
     private func makeConnectFuture() -> EventLoopFuture<Void> {
         logger.info("Connecting to OVSDB endpoint: \(endpoint)")
+
+        // A previous channel going inactive marked the hub closed so that late
+        // subscribers got a finished stream instead of a hang; this connection
+        // will publish again, so subscriptions from here on are live.
+        notificationHub.reopen()
 
         // Created here (not in the channel initializer) so it can be assigned
         // to `responseRouter` under the lock once the connection succeeds.
@@ -292,11 +308,48 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     ///
     /// The stream buffers notifications from the moment it is created, so
     /// subscribe *before* issuing the request that triggers them (e.g.
-    /// `monitor`) and no notification is lost even while the consumer is busy.
-    /// The stream finishes when the connection closes. Subscribing is valid
-    /// before `connect()` and multiple subscribers each receive every
+    /// `monitor`) and no notification is lost while the consumer is busy —
+    /// up to `notificationBufferSize` of them. A consumer that falls further
+    /// behind has its oldest notifications discarded (with a warning logged);
+    /// use `notificationEvents()` to observe those gaps in-stream.
+    ///
+    /// The stream finishes when the connection closes, and a stream created
+    /// after the connection has closed is already finished. Subscribing is
+    /// valid before `connect()` and multiple subscribers each receive every
     /// notification.
     public func notifications() -> AsyncStream<JSONRPCNotification> {
+        let events = notificationHub.subscribe()
+        let logger = self.logger
+        return AsyncStream(bufferingPolicy: .bufferingNewest(Self.notificationBufferSize)) { continuation in
+            let task = Task {
+                var isOverflowing = false
+                for await event in events {
+                    switch event {
+                    case .notification(let notification):
+                        if case .dropped = continuation.yield(notification) {
+                            if !isOverflowing {
+                                isOverflowing = true
+                                logger.warning("Notification buffer full (\(Self.notificationBufferSize)); the consumer of notifications() is not keeping up. Use notificationEvents() to see how many were discarded.")
+                            }
+                        } else {
+                            isOverflowing = false
+                        }
+                    case .dropped(let count):
+                        logger.warning("Discarded \(count) notification(s): the consumer of notifications() is not keeping up. Use notificationEvents() to observe this in-stream.")
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Like `notifications()`, but reports discarded notifications in-stream as
+    /// `.dropped(count:)` events instead of only logging them.
+    ///
+    /// Prefer this when a gap matters — a monitor consumer, for instance, must
+    /// re-take a snapshot rather than continue from an incomplete view.
+    public func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {
         return notificationHub.subscribe()
     }
 
@@ -379,45 +432,146 @@ final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable 
 
 /// Fans server-initiated notifications out to any number of subscribers.
 ///
-/// Each subscriber gets an unbounded `AsyncStream`, so notifications that
-/// arrive while the consumer is between iterations are buffered rather than
-/// dropped. Outlives the channel handler so subscriptions can be created
-/// before the connection is established.
+/// Each subscriber gets its own `AsyncStream` buffering up to `bufferSize`
+/// notifications, so notifications arriving while the consumer is between
+/// iterations are still delivered. The buffer is bounded on purpose: an
+/// unbounded one lets a single stalled consumer grow the process without limit
+/// (Southbound `Logical_Flow` updates are both large and frequent). When it
+/// overflows the oldest notifications are discarded and the subscriber is sent
+/// a `.dropped(count:)` event so the gap is visible rather than silent.
+///
+/// Outlives the channel handler so subscriptions can be created before the
+/// connection is established, and survives a reconnect (see `reopen()`).
 final class JSONRPCNotificationHub: @unchecked Sendable {
-    private let lock = NSLock()
-    private var subscribers: [UUID: AsyncStream<JSONRPCNotification>.Continuation] = [:]
+    private struct Subscriber {
+        let continuation: AsyncStream<JSONRPCNotificationEvent>.Continuation
+        /// Notifications discarded since this subscriber was last told about
+        /// a gap. Reported with the next event that reaches its buffer.
+        var pendingDrops: Int = 0
+    }
 
-    func subscribe() -> AsyncStream<JSONRPCNotification> {
+    private let lock = NSLock()
+    private let bufferSize: Int
+    private let logger: Logger
+    private var subscribers: [UUID: Subscriber] = [:]
+    /// Set by `finishAll()` when the connection drops. Without it a
+    /// `subscribe()` after the connection is gone would hand back a stream
+    /// whose continuation nothing ever finishes, hanging the consumer's
+    /// `for await` forever. Cleared by `reopen()` on the next connect.
+    private var isClosed = false
+
+    init(bufferSize: Int = OVSDBSocketConnection.notificationBufferSize, logger: Logger? = nil) {
+        // A zero-length buffer would make `yield` report the value it was just
+        // handed as the dropped one, which breaks the drop accounting below.
+        self.bufferSize = max(1, bufferSize)
+        self.logger = logger ?? Logger(label: "ovn-manager.notifications")
+    }
+
+    func subscribe() -> AsyncStream<JSONRPCNotificationEvent> {
         let id = UUID()
-        let (stream, continuation) = AsyncStream.makeStream(of: JSONRPCNotification.self)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: JSONRPCNotificationEvent.self,
+            bufferingPolicy: .bufferingNewest(bufferSize)
+        )
+
+        lock.lock()
+        if isClosed {
+            lock.unlock()
+            // Nothing will ever publish on this hub again; finish immediately
+            // rather than leave the consumer waiting on a dead stream.
+            continuation.finish()
+            return stream
+        }
         continuation.onTermination = { [weak self] _ in
             self?.removeSubscriber(id)
         }
-        lock.lock()
-        subscribers[id] = continuation
+        subscribers[id] = Subscriber(continuation: continuation)
         lock.unlock()
         return stream
     }
 
+    /// Publishes to every subscriber. Called from the channel's event loop, so
+    /// calls are serialized with respect to each other and the per-subscriber
+    /// drop counts below stay consistent.
     func publish(_ notification: JSONRPCNotification) {
         lock.lock()
-        let continuations = Array(subscribers.values)
+        let entries = Array(subscribers)
         lock.unlock()
 
-        for continuation in continuations {
-            continuation.yield(notification)
+        for (id, subscriber) in entries {
+            var delta = 0
+
+            if subscriber.pendingDrops > 0 {
+                // `.bufferingNewest` always accepts the value and evicts the
+                // oldest instead, so the report itself is guaranteed a slot;
+                // whatever it displaced is folded back into the count.
+                let result = subscriber.continuation.yield(.dropped(count: subscriber.pendingDrops))
+                if case .terminated = result { continue }
+                delta -= subscriber.pendingDrops
+                if case .dropped(let evicted) = result {
+                    delta += Self.notificationCount(of: evicted)
+                }
+            }
+
+            if case .dropped(let evicted) = subscriber.continuation.yield(.notification(notification)) {
+                delta += Self.notificationCount(of: evicted)
+            }
+
+            if delta > 0 && subscriber.pendingDrops == 0 {
+                // Log once per overflow episode rather than once per discarded
+                // notification, which under a sustained overflow would itself
+                // flood.
+                logger.warning("Notification buffer full (\(bufferSize)); a subscriber is not keeping up and notifications are being discarded")
+            }
+            adjustPendingDrops(id, by: delta)
         }
     }
 
     func finishAll() {
         lock.lock()
-        let continuations = Array(subscribers.values)
+        let entries = Array(subscribers.values)
         subscribers.removeAll()
+        isClosed = true
         lock.unlock()
 
-        for continuation in continuations {
-            continuation.finish()
+        for subscriber in entries {
+            // Last chance to tell a lagging consumer about the gap; after the
+            // finish below nothing more can be delivered.
+            if subscriber.pendingDrops > 0 {
+                subscriber.continuation.yield(.dropped(count: subscriber.pendingDrops))
+            }
+            subscriber.continuation.finish()
         }
+    }
+
+    /// Clears the closed flag so a reconnect can publish again. The hub is
+    /// created once per connection object but each connect builds a fresh
+    /// channel, so without this every subscription after the first disconnect
+    /// would come back already finished.
+    func reopen() {
+        lock.lock()
+        isClosed = false
+        lock.unlock()
+    }
+
+    /// How many server notifications an evicted stream element represents.
+    private static func notificationCount(of event: JSONRPCNotificationEvent) -> Int {
+        switch event {
+        case .notification:
+            return 1
+        case .dropped(let count):
+            return count
+        }
+    }
+
+    private func adjustPendingDrops(_ id: UUID, by delta: Int) {
+        guard delta != 0 else { return }
+        lock.lock()
+        if var subscriber = subscribers[id] {
+            subscriber.pendingDrops = max(0, subscriber.pendingDrops + delta)
+            subscribers[id] = subscriber
+        }
+        lock.unlock()
     }
 
     private func removeSubscriber(_ id: UUID) {
