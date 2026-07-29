@@ -33,6 +33,12 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     private var inFlightConnect: EventLoopFuture<Void>?
     private let connectionLock = NSLock()
     private let notificationHub: JSONRPCNotificationHub
+    /// Reused across sends: constructing a `JSONEncoder` is not free, and one
+    /// per outbound request adds up on the paths that write large transactions
+    /// (a port-group update emits a `wait` op per port). Its configuration is
+    /// never mutated after this point, so concurrent `encode` calls only read
+    /// it — the same reason `JSONRPCResponseRouter` keeps a single decoder.
+    private let encoder = Foundation.JSONEncoder()
 
     public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.endpoint = endpoint
@@ -160,9 +166,11 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                     }
                     handlers.append(TLSHandshakeWaitHandler())
                 }
+                // Outbound needs no handler: `send` and the router's echo reply
+                // both write a `ByteBuffer`, which is what the TLS handler (or
+                // the socket) wants already.
                 handlers.append(contentsOf: [
                     ByteToMessageHandler(OVSDBJSONFrameDecoder()),
-                    MessageToByteHandler(StringToByteEncoder()),
                     router
                 ] as [ChannelHandler])
                 return channel.pipeline.addHandlers(handlers).map { _ in
@@ -274,16 +282,25 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         connectionLock.unlock()
 
         do {
-            let encoder = Foundation.JSONEncoder()
             let data = try encoder.encode(message)
-            guard let jsonString = String(data: data, encoding: .utf8) else {
-                throw OVNManagerError.encodingError(
-                    NSError(domain: "OVSDBSocketConnection", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert data to string"])
-                )
-            }
 
-            logger.debug("Sending message: \(jsonString)")
-            return channel.writeAndFlush(jsonString + "\n")
+            // Straight from the encoder's bytes into the channel's buffer. Going
+            // via `String` cost two more full copies of the payload — one to
+            // decode the UTF-8, one for the `+ "\n"` concatenation — before the
+            // outbound handler copied it into a `ByteBuffer` anyway. That is
+            // wasted work on exactly the writes that are already large.
+            //
+            // The trailing newline is not needed for framing (the peer parses a
+            // stream of JSON objects, as does `OVSDBJSONFrameDecoder`), but it
+            // keeps the wire readable in a packet capture, so it stays.
+            var buffer = channel.allocator.buffer(capacity: data.count + 1)
+            buffer.writeBytes(data)
+            buffer.writeInteger(UInt8(ascii: "\n"))
+
+            // `debug` takes an autoclosure, so this decodes the payload only
+            // when debug logging is actually enabled.
+            logger.debug("Sending message: \(String(decoding: data, as: UTF8.self))")
+            return channel.writeAndFlush(buffer)
         } catch {
             logger.error("Failed to encode message: \(error)")
             return eventLoopGroup.next().makeFailedFuture(OVNManagerError.encodingError(error))
@@ -672,12 +689,11 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
 
         do {
             let data = try JSONSerialization.data(withJSONObject: reply)
-            guard let jsonString = String(data: data, encoding: .utf8) else {
-                logger.error("Failed to encode echo reply as UTF-8")
-                return
-            }
+            var buffer = context.channel.allocator.buffer(capacity: data.count + 1)
+            buffer.writeBytes(data)
+            buffer.writeInteger(UInt8(ascii: "\n"))
             logger.debug("Replying to server echo request")
-            context.writeAndFlush(NIOAny(jsonString + "\n"), promise: nil)
+            context.writeAndFlush(NIOAny(buffer), promise: nil)
         } catch {
             logger.error("Failed to serialize echo reply: \(error)")
         }
@@ -901,13 +917,5 @@ struct OVSDBJSONFrameDecoder: ByteToMessageDecoder {
         escaped = false
         objectStartOffset = nil
         scannedOffset = 0
-    }
-}
-
-private struct StringToByteEncoder: MessageToByteEncoder {
-    typealias OutboundIn = String
-
-    func encode(data: String, out: inout ByteBuffer) throws {
-        out.writeString(data)
     }
 }
