@@ -129,11 +129,7 @@ public actor JSONRPCClient {
         var paramsArray: [JSONValue] = [.string(database)]
         
         for operation in operations {
-            let encoder = JSONEncoder()
-            let data = try encoder.encode(operation)
-            let jsonObject = try JSONSerialization.jsonObject(with: data)
-            let jsonValue = try convertToJSONValue(jsonObject)
-            paramsArray.append(jsonValue)
+            paramsArray.append(try JSONValueEncoder.encode(operation))
         }
         
         let params = JSONRPCParams.array(paramsArray)
@@ -150,11 +146,8 @@ public actor JSONRPCClient {
         monitorId: String,
         requests: [String: OVSDBMonitorRequest]
     ) async throws -> JSONValue {
-        let encoder = JSONEncoder()
-        let requestsData = try encoder.encode(requests)
-        let requestsObject = try JSONSerialization.jsonObject(with: requestsData)
-        let requestsValue = try convertToJSONValue(requestsObject)
-        
+        let requestsValue = try JSONValueEncoder.encode(requests)
+
         let params = JSONRPCParams.array([
             .string(database),
             .string(monitorId),
@@ -207,51 +200,5 @@ public actor JSONRPCClient {
                 task.cancel()
             }
         }
-    }
-}
-
-// MARK: - Helper Functions
-
-/// A JSON boolean and an integer 0/1 both bridge to `NSNumber` once a value
-/// has been through `JSONSerialization`. On Linux Foundation
-/// `(0 as NSNumber) as? Bool` succeeds and returns `false` (likewise `1` →
-/// `true`), so this distinguishes a genuine boolean by its underlying
-/// CoreFoundation / Objective-C type rather than trusting an `as? Bool` cast.
-func isBooleanNSNumber(_ number: NSNumber) -> Bool {
-    #if canImport(ObjectiveC)
-    return CFGetTypeID(number) == CFBooleanGetTypeID()
-    #else
-    return String(cString: number.objCType) == "c"
-    #endif
-}
-
-func convertToJSONValue(_ object: Any) throws -> JSONValue {
-    if object is NSNull {
-        return .null
-    } else if let number = object as? NSNumber {
-        // Must precede the `as? Bool` branch: an integer NSNumber holding 0 or
-        // 1 also casts to Bool on Linux, so checking Bool first turned integer
-        // 0/1 into false/true. That silently serialized an OVSDB `wait` op's
-        // `timeout: 0` as `"timeout": false`, which ovsdb-server rejects
-        // ("Type mismatch for member 'timeout'"), breaking every insert that
-        // attaches a row to a parent (logical switch ports, bridges, ...).
-        return isBooleanNSNumber(number) ? .boolean(number.boolValue) : .number(number.doubleValue)
-    } else if let bool = object as? Bool {
-        return .boolean(bool)
-    } else if let string = object as? String {
-        return .string(string)
-    } else if let array = object as? [Any] {
-        let jsonArray = try array.map { try convertToJSONValue($0) }
-        return .array(jsonArray)
-    } else if let dict = object as? [String: Any] {
-        var jsonObject: [String: JSONValue] = [:]
-        for (key, value) in dict {
-            jsonObject[key] = try convertToJSONValue(value)
-        }
-        return .object(jsonObject)
-    } else {
-        throw OVNManagerError.encodingError(
-            NSError(domain: "JSONRPCClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported type for JSON conversion"])
-        )
     }
 }
