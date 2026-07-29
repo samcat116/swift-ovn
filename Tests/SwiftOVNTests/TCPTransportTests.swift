@@ -71,6 +71,41 @@ final class TCPTransportTests: XCTestCase {
         try await connection.disconnect()
     }
 
+    func testNotificationsSubscribedAfterDisconnectAreFinished() async throws {
+        let server = try await startServer()
+        let port = try XCTUnwrap(server.localAddress?.port)
+
+        let connection = OVSDBSocketConnection(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await connection.connect().get()
+        try await connection.disconnect().get()
+
+        // Subscribing once the connection is gone used to hand back a stream
+        // nothing would ever finish, hanging the consumer.
+        let stream = connection.notifications()
+        let finished = await withTaskGroup(of: Bool.self) { taskGroup in
+            taskGroup.addTask {
+                for await _ in stream {}
+                return true
+            }
+            taskGroup.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                return false
+            }
+            let first = await taskGroup.next() ?? false
+            taskGroup.cancelAll()
+            return first
+        }
+        XCTAssertTrue(finished, "A stream created after disconnect must already be finished")
+
+        // Reconnecting revives the hub, so later subscribers are live again.
+        try await connection.connect().get()
+        XCTAssertTrue(connection.isConnectionActive)
+        try await connection.disconnect().get()
+    }
+
     func testConnectFailsWhenNothingIsListening() async throws {
         // Bind and immediately close to obtain a port with no listener.
         let server = try await startServer()

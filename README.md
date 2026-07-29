@@ -90,18 +90,32 @@ print("Bridge statistics: \(stats)")
 let monitorId = try await SwiftOVN.startMonitoring(tables: ["Logical_Switch", "Logical_Switch_Port"])
 
 // Process updates in real-time
-for try await update in SwiftOVN.monitorUpdates() {
-    if let newRow = update.new {
-        print("Row updated: \(newRow)")
+do {
+    for try await update in SwiftOVN.monitorUpdates() {
+        if let newRow = update.new {
+            print("Row updated: \(newRow)")
+        }
+        if let oldRow = update.old {
+            print("Previous row: \(oldRow)")
+        }
     }
-    if let oldRow = update.old {
-        print("Previous row: \(oldRow)")
-    }
+} catch OVNManagerError.notificationsDropped(let count) {
+    // The consumer fell behind and `count` updates were discarded, so this
+    // view is now incomplete. Restart the monitor for a fresh snapshot.
+    print("Missed \(count) updates, resynchronizing")
 }
 
 // Stop monitoring when done
 try await SwiftOVN.stopMonitoring(monitorId: monitorId)
 ```
+
+Update streams buffer a bounded number of updates per consumer
+(`OVSDBSocketConnection.notificationBufferSize`). A consumer that stops
+draining — easy to do on a Southbound `Logical_Flow` monitor, where updates are
+large and frequent — gets `OVNManagerError.notificationsDropped` instead of
+growing the buffer until the process runs out of memory. Work that can lag
+behind the stream should hand updates to its own queue, and re-monitor when a
+drop is reported.
 
 ## Architecture
 

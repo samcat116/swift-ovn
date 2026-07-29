@@ -9,6 +9,10 @@ public enum OVNManagerError: Error, Sendable {
     case rpcError(JSONRPCError)
     case invalidSocket(String)
     case operationFailed(String)
+    /// Monitor updates were discarded because the consumer fell behind, so the
+    /// stream it was reading no longer describes every change. Restart the
+    /// monitor to get a fresh snapshot.
+    case notificationsDropped(count: Int)
 }
 
 // Without an explicit `errorDescription`, bridging to `NSError` discards the
@@ -35,6 +39,8 @@ extension OVNManagerError: LocalizedError {
             return "Invalid OVSDB socket: \(path)"
         case .operationFailed(let message):
             return message
+        case .notificationsDropped(let count):
+            return "Dropped \(count) OVSDB notification(s) because the consumer fell behind; the monitor's view is incomplete and the monitor must be restarted"
         }
     }
 }

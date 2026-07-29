@@ -397,9 +397,17 @@ public actor OVSDBConnection {
     /// Create the stream *before* calling `startMonitoring` so no update is
     /// missed; updates are buffered while the consumer is between iterations.
     /// The stream lives until the connection closes or the consumer cancels.
+    ///
+    /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`) so
+    /// a consumer that stops draining cannot exhaust memory. One that falls
+    /// that far behind gets `OVNManagerError.notificationsDropped`: rows were
+    /// lost, so restart the monitor to resynchronize from a fresh snapshot
+    /// instead of continuing from an incomplete view.
     nonisolated public func monitorUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBUpdate, Error> {
         let clientStream = client.monitorUpdates()
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
             let task = Task {
                 do {
                     for try await (id, tableUpdates) in clientStream {
@@ -407,7 +415,10 @@ public actor OVSDBConnection {
                             continue
                         }
                         for update in Self.parseTableUpdates(tableUpdates) {
-                            continuation.yield(update)
+                            if case .dropped = continuation.yield(update) {
+                                continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                                return
+                            }
                         }
                     }
                     continuation.finish()

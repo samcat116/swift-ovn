@@ -840,13 +840,24 @@ public actor OVSManager: OVSManaging {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
     
+    /// Streams row changes from this manager's monitors.
+    ///
+    /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`); a
+    /// consumer that falls further behind gets
+    /// `OVNManagerError.notificationsDropped` rather than driving the process
+    /// out of memory. Restart the monitor to resynchronize.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
             let task = Task {
                 let updates = connection.monitorUpdates()
                 do {
                     for try await update in updates {
-                        continuation.yield(update)
+                        if case .dropped = continuation.yield(update) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
                     }
                     continuation.finish()
                 } catch {

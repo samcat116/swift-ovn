@@ -188,18 +188,37 @@ public actor JSONRPCClient {
     /// underlying stream buffers notifications between iterations. The stream
     /// has no idle timeout — it lives until the connection closes or the
     /// consumer cancels.
+    ///
+    /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`).
+    /// A consumer that falls further behind than that would otherwise make the
+    /// client buffer without limit, so instead the stream throws
+    /// `OVNManagerError.notificationsDropped`: updates were lost, and the only
+    /// correct recovery is to restart the monitor for a fresh snapshot.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
-        let notifications = connection.notifications()
-        return AsyncThrowingStream { continuation in
+        let events = connection.notificationEvents()
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
             let task = Task {
-                for await notification in notifications {
+                for await event in events {
+                    guard case .notification(let notification) = event else {
+                        guard case .dropped(let count) = event else { continue }
+                        continuation.finish(throwing: OVNManagerError.notificationsDropped(count: count))
+                        return
+                    }
                     guard notification.method == "update",
                           case .array(let paramsArray)? = notification.params,
                           paramsArray.count >= 2,
                           case .string(let monitorId) = paramsArray[0] else {
                         continue
                     }
-                    continuation.yield((monitorId, paramsArray[1]))
+                    // `.bufferingOldest` keeps the updates already buffered and
+                    // rejects this one, so the consumer sees an unbroken run of
+                    // updates followed by the error rather than a silent gap.
+                    if case .dropped = continuation.yield((monitorId, paramsArray[1])) {
+                        continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                        return
+                    }
                 }
                 continuation.finish()
             }
