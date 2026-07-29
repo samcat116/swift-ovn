@@ -9,7 +9,7 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 - 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL)
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
-- 🌍 **Cross-Platform**: Works on Linux, macOS, and other platforms supported by Swift
+- 🐧 **Linux-Targeted**: Built for the Linux hosts OVN/OVS run on; builds on macOS for local development
 - 🛡️ **Comprehensive Error Handling**: Detailed error types and proper error propagation
 - 📚 **Feature Complete**: Support for all major OVN and OVS operations
 
@@ -253,9 +253,13 @@ do {
 
 ## Requirements
 
-- Swift 5.9+
-- SwiftNIO 2.65.0+
-- Access to OVN/OVS Unix domain sockets
+- Swift 6.2+
+- SwiftNIO 2.98.0+, swift-nio-ssl 2.37.1+
+- **Linux** for deployment — OVN/OVS run there, and that is where this library
+  is meant to run. macOS 26+ builds for local development and testing only;
+  there is no OVSDB server to connect to on Apple platforms, so the floor is
+  set to the newest release rather than the oldest one that would work.
+- Access to an OVSDB server over a Unix domain socket, `tcp:`, or `ssl:`
 
 ## Contributing
 

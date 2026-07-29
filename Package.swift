@@ -5,12 +5,17 @@ import PackageDescription
 
 let package = Package(
     name: "SwiftOVN",
+    // OVN/OVS run on Linux, which is this package's only deployment target.
+    // `platforms:` cannot express that — it only sets minimum deployment
+    // targets for Apple OSes — so the macOS floor exists purely so the package
+    // builds for local development. It is deliberately set to the newest
+    // release the toolchain knows about, since nothing ships against it: that
+    // keeps every modern stdlib API (Synchronization's Mutex/Atomic, Span,
+    // InlineArray) usable without `@available` guards. The
+    // iOS/watchOS/tvOS/visionOS floors were never meaningful — there is no
+    // OVSDB server to talk to on those platforms.
     platforms: [
-        .macOS(.v13),
-        .iOS(.v16),
-        .watchOS(.v9),
-        .tvOS(.v16),
-        .visionOS(.v1)
+        .macOS(.v26)
     ],
     products: [
         .library(
