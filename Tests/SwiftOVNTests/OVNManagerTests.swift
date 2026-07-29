@@ -708,4 +708,61 @@ final class OVSDBJSONFrameDecoderTests: XCTestCase {
         let framed = try frames(feeding: [#"{"id":1}{"id":"#, #"2}"#])
         XCTAssertEqual(framed, [#"{"id":1}"#, #"{"id":2}"#])
     }
+
+    // MARK: - Scan-state continuity across reads
+    //
+    // The decoder resumes scanning where the previous read stopped instead of
+    // re-scanning from the start, so every piece of scanner state (string
+    // membership, backslash escaping, nesting depth, object start) has to
+    // survive a chunk boundary landing in the middle of it.
+
+    func testBackslashEscapeSplitAcrossReads() throws {
+        // The chunk boundary falls between a backslash and the quote it
+        // escapes. If `escaped` did not persist, the quote would be read as
+        // closing the string and the `}` after it would end the object early.
+        let framed = try frames(feeding: [#"{"match":"a\"#, #""b}c","id":1}"#])
+        XCTAssertEqual(framed, [#"{"match":"a\"b}c","id":1}"#])
+    }
+
+    func testBraceInsideStringSplitAcrossReads() throws {
+        // Boundary inside a string that contains braces; `inString` must persist.
+        let framed = try frames(feeding: [#"{"e":"x{y"#, #"}z","id":1}"#])
+        XCTAssertEqual(framed, [#"{"e":"x{y}z","id":1}"#])
+    }
+
+    func testNestingDepthSplitAcrossReads() throws {
+        // Boundary between nested opening braces; `depth` must persist so the
+        // first inner `}` is not mistaken for the end of the top-level object.
+        let framed = try frames(feeding: [#"{"a":{"b":{"#, #""c":1}}}"#])
+        XCTAssertEqual(framed, [#"{"a":{"b":{"c":1}}}"#])
+    }
+
+    func testLeadingWhitespaceSplitAcrossReads() throws {
+        // Whitespace before the object arrives in its own reads, so the object
+        // does not start at the reader index; `objectStartOffset` must persist.
+        let framed = try frames(feeding: ["\n\n", "  ", #"{"id"#, #"":1}"#])
+        XCTAssertEqual(framed, [#"{"id":1}"#])
+    }
+
+    func testSecondObjectSplitAfterFirstIsEmitted() throws {
+        // Scan state must be reset once an object is consumed, so the offsets
+        // recorded for the first object do not leak into the second.
+        let framed = try frames(feeding: [#"{"id":1}"#, #"{"na"#, #"me":"x"}"#])
+        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"name":"x"}"#])
+    }
+
+    func testByteAtATimeDeliveryOfNestedObject() throws {
+        // Maximal fragmentation: every byte is its own read, so the decoder
+        // resumes on each one. This is also the pathological case for the old
+        // rescan-from-the-start framer.
+        let message = #"{"id":1,"result":{"rows":[{"name":"ls0","other":"a\"b{}"}]}}"#
+        let framed = try frames(feeding: message.map { String($0) })
+        XCTAssertEqual(framed, [message])
+    }
+
+    func testManyConcatenatedObjectsInOneRead() throws {
+        let messages = (1...50).map { #"{"id":\#($0)}"# }
+        let framed = try frames(feeding: [messages.joined()])
+        XCTAssertEqual(framed, messages)
+    }
 }
