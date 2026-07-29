@@ -1,0 +1,20 @@
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_e8058c4ef41c93::t_284a71fd63f40f 26-39
+  s_e8058c4ef41c93::t_2158e64184dd43 451-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "5ec7da4460f8b1a2034e01d3a80799de965f9996",
+  "prompts": {},
+  "sessions": {
+    "s_e8058c4ef41c93": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "57e9ab48-2479-4894-b271-c729042fa9b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
