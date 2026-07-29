@@ -382,7 +382,7 @@ private struct OVSDBUnkeyedContainer: UnkeyedDecodingContainer {
     private mutating func nextDecoder() throws -> OVSDBValueDecoder {
         guard !isAtEnd else { throw endError(JSONValue.self) }
         var path = codingPath
-        path.append(OVSDBIndexKey(intValue: currentIndex))
+        path.append(JSONIndexKey(intValue: currentIndex))
         let decoder = OVSDBValueDecoder(value: elements[currentIndex], codingPath: path)
         currentIndex += 1
         return decoder
@@ -390,18 +390,10 @@ private struct OVSDBUnkeyedContainer: UnkeyedDecodingContainer {
 
     private func endError<T>(_ type: T.Type) -> DecodingError {
         var path = codingPath
-        path.append(OVSDBIndexKey(intValue: currentIndex))
+        path.append(JSONIndexKey(intValue: currentIndex))
         return DecodingError.valueNotFound(type, DecodingError.Context(
             codingPath: path,
             debugDescription: "Unkeyed container is at end"
         ))
     }
-}
-
-private struct OVSDBIndexKey: CodingKey {
-    let intValue: Int?
-    var stringValue: String { "Index \(intValue ?? 0)" }
-
-    init(intValue: Int) { self.intValue = intValue }
-    init?(stringValue: String) { return nil }
 }

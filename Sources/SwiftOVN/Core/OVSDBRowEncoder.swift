@@ -76,20 +76,27 @@ enum OVSDBRowEncoder {
     /// Encodes the model to a row of wire-format column values. The `_uuid`
     /// column is omitted (it is server-assigned and immutable).
     static func makeRow<T: Encodable>(from object: T, hints: ColumnHints) throws -> OVSDBRow {
-        let data = try JSONEncoder().encode(object)
-        let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let encoded = try JSONValueEncoder.encode(object)
+        guard case .object(let columns) = encoded else {
+            throw OVNManagerError.encodingError(
+                NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "A row must encode to a JSON object, got \(encoded)",
+                ])
+            )
+        }
 
         var row: OVSDBRow = [:]
-        for (column, value) in jsonObject where column != "_uuid" {
+        for (column, value) in columns where column != "_uuid" {
             row[column] = try columnValue(value, column: column, hints: hints)
         }
         return row
     }
 
-    private static func columnValue(_ value: Any, column: String, hints: ColumnHints) throws -> JSONValue {
+    private static func columnValue(_ value: JSONValue, column: String, hints: ColumnHints) throws -> JSONValue {
         let isUUIDRef = hints.uuidReferenceColumns.contains(column)
 
-        if let dictionary = value as? [String: Any] {
+        switch value {
+        case .object(let dictionary):
             let integerKeys = hints.integerKeyedMapColumns.contains(column)
             let uuidValues = hints.uuidValuedMapColumns.contains(column)
             var pairs: [JSONValue] = []
@@ -101,7 +108,7 @@ enum OVSDBRowEncoder {
                     keyJSON = .string(key)
                 }
                 let valueJSON: JSONValue
-                if uuidValues, let uuid = mapValue as? String {
+                if uuidValues, case .string(let uuid) = mapValue {
                     valueJSON = .array([.string("uuid"), .string(uuid)])
                 } else {
                     valueJSON = try atomValue(mapValue, isUUIDRef: false)
@@ -109,51 +116,30 @@ enum OVSDBRowEncoder {
                 pairs.append(.array([keyJSON, valueJSON]))
             }
             return .array([.string("map"), .array(pairs)])
-        }
 
-        if let array = value as? [Any] {
+        case .array(let array):
             let items = try array.map { try atomValue($0, isUUIDRef: isUUIDRef) }
             return .array([.string("set"), .array(items)])
-        }
 
-        return try atomValue(value, isUUIDRef: isUUIDRef)
+        default:
+            return try atomValue(value, isUUIDRef: isUUIDRef)
+        }
     }
 
-    private static func atomValue(_ value: Any, isUUIDRef: Bool) throws -> JSONValue {
-        if value is NSNull {
-            return .null
+    private static func atomValue(_ value: JSONValue, isUUIDRef: Bool) throws -> JSONValue {
+        switch value {
+        case .null, .boolean, .number:
+            // Booleans and numbers are already distinct here — nothing in this
+            // path turns one into the other.
+            return value
+        case .string(let string):
+            return isUUIDRef ? .array([.string("uuid"), .string(string)]) : value
+        case .array, .object:
+            throw OVNManagerError.encodingError(
+                NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "Unsupported atom for OVSDB wire conversion: \(value)",
+                ])
+            )
         }
-        if let number = value as? NSNumber {
-            if isBoolean(number) {
-                return .boolean(number.boolValue)
-            }
-            return .number(number.doubleValue)
-        }
-        if let bool = value as? Bool {
-            return .boolean(bool)
-        }
-        if let string = value as? String {
-            if isUUIDRef {
-                return .array([.string("uuid"), .string(string)])
-            }
-            return .string(string)
-        }
-        throw OVNManagerError.encodingError(
-            NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Unsupported atom for OVSDB wire conversion: \(type(of: value))",
-            ])
-        )
-    }
-
-    /// Distinguishes JSON booleans from numbers: `NSNumber(value: true)` is
-    /// also castable to integer types, so `as? Bool`-style checks would turn
-    /// integer columns holding 0/1 into booleans (which ovsdb-server
-    /// rejects for integer-typed columns).
-    private static func isBoolean(_ number: NSNumber) -> Bool {
-        #if canImport(ObjectiveC)
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-        #else
-        return String(cString: number.objCType) == "c"
-        #endif
     }
 }
