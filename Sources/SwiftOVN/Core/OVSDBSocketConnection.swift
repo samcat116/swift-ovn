@@ -247,7 +247,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         }
     }
 
-    public func send<T: Codable>(_ message: T) -> EventLoopFuture<Void> {
+    public func send<T: Codable & Sendable>(_ message: T) -> EventLoopFuture<Void> {
         connectionLock.lock()
         guard let channel = channel, isConnected else {
             connectionLock.unlock()
@@ -274,7 +274,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         }
     }
 
-    public func receive<T: Codable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount = .seconds(30)) -> EventLoopFuture<T> {
+    public func receive<T: Codable & Sendable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount = .seconds(30)) -> EventLoopFuture<T> {
         connectionLock.lock()
         guard let responseRouter = responseRouter, isConnected else {
             connectionLock.unlock()
@@ -553,7 +553,7 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
         }
     }
 
-    func waitForResponse<T: Codable>(requestId: JSONRPCIdentifier, type: T.Type, timeout: TimeAmount) -> EventLoopFuture<T> {
+    func waitForResponse<T: Codable & Sendable>(requestId: JSONRPCIdentifier, type: T.Type, timeout: TimeAmount) -> EventLoopFuture<T> {
         guard let eventLoop = eventLoop else {
             let failedPromise = eventLoopGroup.next().makePromise(of: T.self)
             failedPromise.fail(OVNManagerError.connectionFailed("Event loop not available"))
@@ -624,7 +624,7 @@ private protocol PendingRequestProtocol {
     func fail(with error: Error)
 }
 
-private struct PendingRequestWrapper<T: Codable>: PendingRequestProtocol {
+private struct PendingRequestWrapper<T: Codable & Sendable>: PendingRequestProtocol {
     let promise: EventLoopPromise<T>
     let timeoutTask: Scheduled<Void>
 
@@ -651,18 +651,37 @@ private struct PendingRequestWrapper<T: Codable>: PendingRequestProtocol {
 /// A newline-based framer therefore mis-frames these messages. This decoder instead
 /// tracks `{`/`}` nesting depth to emit exactly one complete top-level object per
 /// message, ignoring braces that appear inside JSON strings and honoring `\` escapes.
-final class OVSDBJSONFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
+///
+/// The scan position and brace state persist across `decode` calls. `decode` is
+/// re-invoked on every arriving chunk, so restarting the scan at the beginning
+/// each time would re-examine the whole accumulated message — O(N·k) for a
+/// message of N bytes delivered in k reads. That is quadratic for the
+/// multi-megabyte `monitor` updates ovsdb-server sends for large tables
+/// (Southbound `Logical_Flow` in particular). Resuming where the previous call
+/// stopped keeps framing linear in the message size.
+struct OVSDBJSONFrameDecoder: ByteToMessageDecoder {
     typealias InboundOut = String
 
-    func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
+    /// Brace-nesting depth within the object currently being scanned.
+    private var depth = 0
+    private var inString = false
+    private var escaped = false
+    /// Offset from the reader index of the `{` opening the object currently
+    /// being scanned; nil while between objects.
+    private var objectStartOffset: Int?
+    /// How many bytes from the reader index have already been examined.
+    private var scannedOffset = 0
+
+    mutating func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
         let view = buffer.readableBytesView
 
-        var depth = 0
-        var inString = false
-        var escaped = false
-        var objectStart: Int?
+        // Clamped defensively: the scan cursor is only ever advanced over bytes
+        // that remain buffered, so it cannot exceed the readable range, but a
+        // stale cursor would trap rather than merely re-scan.
+        let resumeOffset = min(scannedOffset, view.count)
 
-        var index = view.startIndex
+        var offset = resumeOffset
+        var index = view.index(view.startIndex, offsetBy: resumeOffset)
         while index < view.endIndex {
             let byte = view[index]
 
@@ -680,16 +699,20 @@ final class OVSDBJSONFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
                     inString = true
                 case UInt8(ascii: "{"):
                     if depth == 0 {
-                        objectStart = index
+                        objectStartOffset = offset
                     }
                     depth += 1
                 case UInt8(ascii: "}"):
                     if depth > 0 {
                         depth -= 1
-                        if depth == 0, let start = objectStart {
-                            // A complete top-level object spans start...index inclusive.
-                            let leading = view.distance(from: view.startIndex, to: start)
-                            let length = view.distance(from: start, to: index) + 1
+                        if depth == 0, let leading = objectStartOffset {
+                            // A complete top-level object spans leading...offset inclusive.
+                            let length = offset - leading + 1
+
+                            // Everything up to and including this object leaves the
+                            // buffer, so the next scan starts clean at the new reader
+                            // index regardless of which branch below is taken.
+                            resetScanState()
 
                             // Discard any leading whitespace/delimiters before the object,
                             // then read the object itself and fire it downstream.
@@ -709,14 +732,25 @@ final class OVSDBJSONFrameDecoder: ByteToMessageDecoder, @unchecked Sendable {
             }
 
             index = view.index(after: index)
+            offset += 1
         }
 
-        // No complete object yet — wait for more data.
+        // No complete object yet — remember how far we got so the next chunk
+        // resumes here instead of re-scanning from the start.
+        scannedOffset = offset
         return .needMoreData
+    }
+
+    private mutating func resetScanState() {
+        depth = 0
+        inString = false
+        escaped = false
+        objectStartOffset = nil
+        scannedOffset = 0
     }
 }
 
-private final class StringToByteEncoder: MessageToByteEncoder, @unchecked Sendable {
+private struct StringToByteEncoder: MessageToByteEncoder {
     typealias OutboundIn = String
 
     func encode(data: String, out: inout ByteBuffer) throws {

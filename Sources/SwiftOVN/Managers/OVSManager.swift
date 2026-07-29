@@ -2,7 +2,10 @@ import Foundation
 import NIO
 import Logging
 
-public actor OVSManager: OVSManaging {
+/// Not an actor: every stored property is an immutable `let`, and all state
+/// lives behind `OVSDBConnection` (which *is* an actor). Isolating this type
+/// too would add an executor hop to every call while protecting nothing.
+public final class OVSManager: OVSManaging {
     private let connection: OVSDBConnection
     private let logger: Logger
     private let database: String
@@ -17,7 +20,7 @@ public actor OVSManager: OVSManaging {
         self.logger = logger ?? Logger(label: "ovn-manager.ovs")
     }
 
-    public init(socketPath: String, database: String = OVSDatabase.openVSwitch, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    public convenience init(socketPath: String, database: String = OVSDatabase.openVSwitch, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.init(endpoint: .unix(path: socketPath), database: database, eventLoopGroup: eventLoopGroup, logger: logger)
     }
     
