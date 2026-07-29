@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -18,11 +18,13 @@ let package = Package(
             targets: ["SwiftOVN"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        // 2.37.0 requires Swift tools 6.1; stay below it while this package
-        // and CI build with Swift 6.0.
-        .package(url: "https://github.com/apple/swift-nio-ssl.git", "2.26.0"..<"2.37.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.0.0"),
+        // 2.98.0 is the floor swift-nio-ssl 2.37.1 itself requires.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.98.0"),
+        // 2.37.1+ leads its default TLS group list with X25519MLKEM768, so
+        // consumers negotiate hybrid post-quantum key exchange. Do not lower
+        // this floor. Requires Swift tools 6.1+, hence the 6.2 tools version.
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.1"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     ],
     targets: [
         .target(

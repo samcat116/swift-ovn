@@ -23,6 +23,20 @@ private func wireStringMap(_ dictionary: [String: String]) -> JSONValue {
     return wireMap(dictionary.map { (.string($0.key), .string($0.value)) })
 }
 
+/// Sorts the pairs of a `["map", [[k, v], ...]]` value, leaving anything else
+/// untouched. RFC 7047 maps are unordered and both the encoder and
+/// `wireStringMap` derive their pair order from `Dictionary` iteration, which
+/// varies between processes — so multi-entry maps must be compared
+/// order-insensitively or the comparison flakes.
+private func normalizingMapOrder(_ value: JSONValue?) -> JSONValue? {
+    guard let value else { return nil }
+    guard case .array(let tagged) = value, tagged.count == 2,
+        case .string("map") = tagged[0],
+        case .array(let pairs) = tagged[1]
+    else { return value }
+    return .array([.string("map"), .array(pairs.sorted { String(describing: $0) < String(describing: $1) })])
+}
+
 private let uuidA = "0d53b52f-7f4c-4c8f-9b1e-1a2b3c4d5e6f"
 private let uuidB = "550e8400-e29b-41d4-a716-446655440000"
 private let uuidC = "9a3e11a4-9f7a-4d0a-8f5e-0123456789ab"
@@ -434,8 +448,8 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
         XCTAssertEqual(
-            row["ipv6_ra_configs"],
-            wireStringMap(["address_mode": "dhcpv6_stateful", "send_periodic": "true"])
+            normalizingMapOrder(row["ipv6_ra_configs"]),
+            normalizingMapOrder(wireStringMap(["address_mode": "dhcpv6_stateful", "send_periodic": "true"]))
         )
         let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
 
