@@ -1,0 +1,55 @@
+Tests/SwiftOVNTests/ConditionalMonitoringTests.swift
+  s_67eb8686cfc5bc::t_f9c6c505f276f2 709-753,965-966
+  s_67eb8686cfc5bc::t_ea6347c9c460e3 959-964
+  s_67eb8686cfc5bc::t_3544d0c16b00c1 967
+Sources/SwiftOVN/Models/OVSDBMonitorRequest.swift
+  s_67eb8686cfc5bc::t_91d918eda06f79 45-50
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_67eb8686cfc5bc::t_d76d8a108c4cb1 889
+  s_67eb8686cfc5bc::t_987f5c0c9d1c84 827,837-842
+  s_67eb8686cfc5bc::t_bb8291a00e855d 166-180
+  s_67eb8686cfc5bc::t_d1e8c6311ba90b 8
+  s_67eb8686cfc5bc::t_c6d367fac9f89b 192
+  s_67eb8686cfc5bc::t_c50245c2c172d5 96-102
+  s_67eb8686cfc5bc::t_35395e261b2e0f 340-346,356-365
+  s_67eb8686cfc5bc::t_3e1e3133c33f4a 59-61,71-75
+  s_67eb8686cfc5bc::t_b04b1b624938ce 928-932,934
+  s_67eb8686cfc5bc::t_3f8d1e0c23a4a0 1257-1260
+  s_67eb8686cfc5bc::t_10c9e70cf16666 249
+  s_67eb8686cfc5bc::t_517f67a595615b 21-24
+  s_67eb8686cfc5bc::t_1281c6f047b927 989-993
+  s_67eb8686cfc5bc::t_1a3553aeda377f 242
+  s_67eb8686cfc5bc::t_ea18414b651502 62-70
+  s_67eb8686cfc5bc::t_b7b3523987dd00 76-86,1002
+  s_67eb8686cfc5bc::t_901c518dcd4916 933
+  s_67eb8686cfc5bc::t_36f116252a9171 980-988,994-1001
+  s_67eb8686cfc5bc::t_d69d6011e3ae5e 237-241,254-255
+  s_67eb8686cfc5bc::t_e97b1d31cdea94 256
+  s_67eb8686cfc5bc::t_3593a34bfd35ed 385-387
+  s_67eb8686cfc5bc::t_8154cafce29f11 1083-1100
+  s_67eb8686cfc5bc::t_2c84b6594e7c2d 181
+  s_67eb8686cfc5bc::t_da9659e8b03091 366
+  s_67eb8686cfc5bc::t_d1d595d07d9be5 843
+  s_67eb8686cfc5bc::t_f04f94377d08b7 1003
+  s_67eb8686cfc5bc::t_3fe9626619a523 1101
+Sources/SwiftOVN/Core/OVSDBMonitorBroadcaster.swift
+  s_67eb8686cfc5bc::t_228ff4fdcb1d9f 58-69
+  s_67eb8686cfc5bc::t_95a4b93f3fa139 163-166
+  s_67eb8686cfc5bc::t_67e439cda6687b 111-114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "c6f93b270a549508b8a381ba7dbb6f07f0b75681",
+  "prompts": {},
+  "sessions": {
+    "s_67eb8686cfc5bc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab9abb82-b958-481a-9773-01a265d73c6c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
