@@ -122,6 +122,37 @@ public actor OVSDBConnection {
         return try Self.uuid(fromInsertResults: results, at: insertIndex)
     }
 
+    /// Inserts the child rows a parent's reference column must point at and
+    /// then the parent itself, in one transaction (see
+    /// `OVSDBReferenceTransactions.insertWithChildren`). Returns the parent
+    /// row's UUID; the children's UUIDs are readable from the parent's
+    /// reference column.
+    public func insertWithChildren(
+        into table: String,
+        in database: String,
+        row: OVSDBRow,
+        uuidName: String,
+        referenceColumn: String,
+        childRows: [OVSDBRow],
+        childTable: String,
+        childUUIDNamePrefix: String
+    ) async throws(OVNManagerError) -> String {
+        let operations = OVSDBReferenceTransactions.insertWithChildren(
+            row: row,
+            into: table,
+            uuidName: uuidName,
+            referenceColumn: referenceColumn,
+            childRows: childRows,
+            childTable: childTable,
+            childUUIDNamePrefix: childUUIDNamePrefix
+        )
+
+        let results = try await transact(in: database, operations: operations)
+
+        // The parent insert is the last operation of the transaction.
+        return try Self.uuid(fromInsertResults: results, at: childRows.count)
+    }
+
     /// Removes the row's UUID from each referencing parent column and deletes
     /// the row in one transaction (see `OVSDBReferenceTransactions`), so
     /// neither a dangling reference nor a rejected delete of a

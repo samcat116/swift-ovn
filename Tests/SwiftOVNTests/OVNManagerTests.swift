@@ -508,6 +508,46 @@ struct JSONRPCClientMockTests {
         #expect(mutation[2] as? [String] == ["named-uuid", "new_bridge"])
     }
 
+    @Test("insertWithChildren inserts the children first and references them from the parent")
+    func insertWithChildrenTransactionWireFormat() throws {
+        // `ovn-nbctl meter-add` semantics: Meter.bands has a schema minimum of
+        // one, so the bands have to be inserted and referenced in the same
+        // transaction as the meter or the insert is a constraint violation.
+        let operations = OVSDBReferenceTransactions.insertWithChildren(
+            row: ["name": .string("acl-log-meter"), "bands": .string("stale-caller-value")],
+            into: "Meter",
+            uuidName: "new_meter",
+            referenceColumn: "bands",
+            childRows: [["rate": .number(100)], ["rate": .number(200)]],
+            childTable: "Meter_Band",
+            childUUIDNamePrefix: "new_meter_band_"
+        )
+
+        let json = try encodeOperations(operations)
+        #expect(json.count == 3)
+
+        // Ops 0-1: one insert per band, each carrying its own uuid-name.
+        for (index, expectedRate) in [100, 200].enumerated() {
+            #expect(json[index]["op"] as? String == "insert")
+            #expect(json[index]["table"] as? String == "Meter_Band")
+            #expect(json[index]["uuid-name"] as? String == "new_meter_band_\(index)")
+            #expect((json[index]["row"] as? [String: Any])?["rate"] as? Int == expectedRate)
+        }
+
+        // Op 2: the meter, its bands overwritten with the new bands' references.
+        #expect(json[2]["op"] as? String == "insert")
+        #expect(json[2]["table"] as? String == "Meter")
+        #expect(json[2]["uuid-name"] as? String == "new_meter")
+        #expect((json[2]["row"] as? [String: Any])?["name"] as? String == "acl-log-meter")
+        let bands = try #require(
+            (json[2]["row"] as? [String: Any])?["bands"] as? [Any],
+            "Expected a tagged set for bands"
+        )
+        #expect(bands.count == 2)
+        #expect(bands[0] as? String == "set")
+        #expect(bands[1] as? [[String]] == [["named-uuid", "new_meter_band_0"], ["named-uuid", "new_meter_band_1"]])
+    }
+
     @Test("insertBridgeAttached creates the internal port pair")
     func insertBridgeAttachedCreatesInternalPortWireFormat() throws {
         // `ovs-vsctl add-br` semantics: Interface + Port + Bridge inserted and

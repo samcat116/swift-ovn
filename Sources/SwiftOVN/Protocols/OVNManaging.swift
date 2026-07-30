@@ -146,6 +146,21 @@ public protocol OVNManaging: Sendable {
     func updateQoSRule(uuid: String, _ qos: OVNQoS) async throws(OVNManagerError)
     func deleteQoSRule(uuid: String) async throws(OVNManagerError)
 
+    // Meter Operations
+    func getMeters() async throws(OVNManagerError) -> [OVNMeter]
+    func getMeter(named name: String) async throws(OVNManagerError) -> OVNMeter?
+    func createMeter(_ meter: OVNMeter, withBands bands: [OVNMeterBand]) async throws(OVNManagerError) -> String
+    func createMeter(_ meter: OVNMeter, withBand band: OVNMeterBand) async throws(OVNManagerError) -> String
+    func updateMeter(uuid: String, _ meter: OVNMeter) async throws(OVNManagerError)
+    func deleteMeter(uuid: String) async throws(OVNManagerError)
+    func deleteMeter(named name: String) async throws(OVNManagerError)
+
+    // Meter Band Operations
+    func getMeterBands() async throws(OVNManagerError) -> [OVNMeterBand]
+    func createMeterBand(_ band: OVNMeterBand, onMeter meterName: String) async throws(OVNManagerError) -> String
+    func updateMeterBand(uuid: String, _ band: OVNMeterBand) async throws(OVNManagerError)
+    func deleteMeterBand(uuid: String) async throws(OVNManagerError)
+
     // DHCP Operations
     func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions]
     func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws(OVNManagerError) -> String
@@ -198,6 +213,8 @@ public enum OVNTable {
     /// The Northbound `QoS` table (`OVNQoS`), not the identically named
     /// Open_vSwitch one (`OVSQoS`).
     public static let qos = "QoS"
+    public static let meter = "Meter"
+    public static let meterBand = "Meter_Band"
     
     // Southbound tables
     public static let chassis = "Chassis"

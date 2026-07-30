@@ -163,6 +163,7 @@ The package includes comprehensive Swift models for:
 - `OVNLoadBalancer` - Load balancing rules
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
+- `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
 
 #### OVS Models
