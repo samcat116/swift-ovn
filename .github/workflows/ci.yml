@@ -32,5 +32,39 @@ jobs:
       - name: Build
         run: swift build ${{ matrix.flags }}
 
+      # TEMPORARY (remove before merge): the run has hung here for the full job
+      # limit with no failure output, and it does not reproduce outside CI. This
+      # gives the hang 240s and then reports what it was doing — which tests
+      # never finished, and a backtrace of every thread — instead of another six
+      # hours of silence.
       - name: Run tests
-        run: swift test ${{ matrix.flags }}
+        run: |
+          set -u
+          swift test ${{ matrix.flags }} 2>&1 | tee /tmp/test.log &
+          TEST_PID=$!
+          for _ in $(seq 1 48); do
+            sleep 5
+            kill -0 "$TEST_PID" 2>/dev/null || break
+          done
+
+          if ! kill -0 "$TEST_PID" 2>/dev/null; then
+            wait "$TEST_PID"
+            exit $?
+          fi
+
+          echo "===== HUNG: no exit after 240s ====="
+          grep -o 'Test "[^"]*" started' /tmp/test.log \
+            | sed 's/^Test "//; s/" started$//' | sort -u > /tmp/started.txt
+          grep -oE 'Test "[^"]*"( with [0-9]+ test cases?)? (passed|failed)' /tmp/test.log \
+            | sed -E 's/^Test "//; s/"( with [0-9]+ test cases?)? (passed|failed)$//' | sort -u > /tmp/done.txt
+          echo "===== tests started but never finished ====="
+          comm -23 /tmp/started.txt /tmp/done.txt
+          echo "===== processes ====="
+          ps -ef || true
+          for pid in $(pgrep -f 'SwiftOVNPackageTests|swiftpm-testing-helper' || true); do
+            echo "===== backtrace of $pid ====="
+            lldb -p "$pid" --batch -o 'thread backtrace all' -o detach -o quit 2>&1 | head -600 || true
+          done
+          kill -9 "$TEST_PID" 2>/dev/null || true
+          pkill -9 -f 'SwiftOVNPackageTests|swiftpm-testing-helper' 2>/dev/null || true
+          exit 1
