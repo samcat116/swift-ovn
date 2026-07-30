@@ -9,21 +9,60 @@ import Logging
 public actor OVSDBConnection {
     private let client: JSONRPCClient
     private let logger: Logger
-    private var activeMonitors: Set<String> = []
-    
-    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+
+    /// What each live monitor was asked for, so it can be re-created on the new
+    /// session after a reconnect. A `Set<String>` of ids was enough while a
+    /// dropped connection was terminal; it is not enough now, because ids alone
+    /// would name monitors the server no longer has.
+    private struct MonitorSpec: Sendable {
+        let database: String
+        let requests: [String: OVSDBMonitorRequest]
+    }
+    private var activeMonitors: [String: MonitorSpec] = [:]
+    /// Watches for `.reconnected` and re-creates `activeMonitors` on the new
+    /// session. One task per connection, not per monitor stream, so the monitors
+    /// are re-created once no matter how many consumers there are.
+    private var monitorRecovery: Task<Void, Never>?
+
+    /// See `OVSDBSocketConnection.init(remotes:reconnect:leaderOnlyDatabase:…)`
+    /// for what the cluster parameters mean.
+    public init(
+        remotes: OVSDBRemotes,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
         self.client = JSONRPCClient(
-            endpoint: endpoint,
+            remotes: remotes,
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.logger = logger ?? Logger(label: "ovn-manager.ovsdb-connection")
     }
 
+    public init(
+        endpoint: OVSDBEndpoint,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
+        )
+    }
+
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
     }
-    
+
     public func connect() async throws(OVNManagerError) {
         try await client.connect()
 
@@ -35,12 +74,17 @@ public actor OVSDBConnection {
             logger.error("Failed to establish OVSDB connection: \(error)")
             throw error
         }
+
+        startMonitorRecovery()
     }
 
     public func disconnect() async throws(OVNManagerError) {
+        monitorRecovery?.cancel()
+        monitorRecovery = nil
+
         // Cancel all active monitors
         let monitors = activeMonitors
-        for monitorId in monitors {
+        for monitorId in monitors.keys {
             try? await client.cancelMonitor(monitorId: monitorId)
         }
         activeMonitors.removeAll()
@@ -48,13 +92,68 @@ public actor OVSDBConnection {
         try await client.disconnect()
         logger.info("Disconnected from OVSDB")
     }
-    
+
+    /// Whether a session is up right now. See
+    /// `OVSDBSocketConnection.isConnectionActive` for why this flickers once
+    /// reconnection is enabled, and prefer `connectionState`.
     public var isConnected: Bool {
         get async {
             return client.isConnected
         }
     }
-    
+
+    /// See `OVSDBSocketConnection.connectionState`.
+    nonisolated public var connectionState: OVSDBConnectionState {
+        return client.connectionState
+    }
+
+    /// See `OVSDBSocketConnection.connectionStates()`.
+    nonisolated public func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        return client.connectionStates()
+    }
+
+    // MARK: - Monitor recovery
+
+    /// Starts the task that re-creates this connection's monitors whenever the
+    /// transport reconnects.
+    private func startMonitorRecovery() {
+        guard monitorRecovery == nil else { return }
+        let events = client.notificationEvents()
+        monitorRecovery = Task { [weak self] in
+            for await event in events {
+                guard case .reconnected = event else { continue }
+                await self?.reestablishMonitors()
+            }
+        }
+    }
+
+    /// Re-issues every monitor on the session that just came up.
+    ///
+    /// The reply's initial rows are deliberately dropped: consumers were told the
+    /// stream has a hole (`OVNManagerError.monitorInterrupted`) and have to
+    /// re-read the rows themselves, and handing them a snapshot here would race
+    /// the updates already flowing on the new monitor. Resuming a monitor without
+    /// a gap needs `monitor_cond_since`.
+    private func reestablishMonitors() async {
+        guard !activeMonitors.isEmpty else { return }
+        logger.info("Connection re-established; restarting \(activeMonitors.count) monitor(s)")
+
+        for (monitorId, spec) in activeMonitors {
+            do {
+                _ = try await client.monitor(
+                    database: spec.database,
+                    monitorId: monitorId,
+                    requests: spec.requests
+                )
+                logger.info("Restarted monitor \(monitorId) on \(spec.database)")
+            } catch {
+                // The new session may itself have died; the next reconnect runs
+                // this again, so there is nothing to retry here.
+                logger.error("Failed to restart monitor \(monitorId) on \(spec.database): \(error)")
+            }
+        }
+    }
+
     // MARK: - Database Operations
     
     public func listDatabases() async throws(OVNManagerError) -> [String] {
@@ -384,6 +483,11 @@ public actor OVSDBConnection {
     ///
     /// To observe subsequent changes without missing any, create the
     /// `monitorUpdates()` stream *before* calling this method.
+    ///
+    /// The monitor is remembered, so a reconnect re-creates it on the new session
+    /// under the same ID and `stopMonitoring(monitorId:)` keeps working across
+    /// one. What a reconnect cannot do is replay what happened while the
+    /// connection was down — see `monitorUpdates()`.
     public func startMonitoring(
         database: String,
         tables: [String: OVSDBMonitorRequest],
@@ -397,7 +501,7 @@ public actor OVSDBConnection {
             requests: tables
         )
 
-        activeMonitors.insert(id)
+        activeMonitors[id] = MonitorSpec(database: database, requests: tables)
 
         let initialUpdates = Self.parseTableUpdates(initialState)
 
@@ -407,9 +511,11 @@ public actor OVSDBConnection {
     }
     
     public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
-        try await client.cancelMonitor(monitorId: monitorId)
+        // Forgotten first: whether or not the cancel reaches the server, this
+        // monitor must not be re-created by the next reconnect.
+        activeMonitors.removeValue(forKey: monitorId)
 
-        activeMonitors.remove(monitorId)
+        try await client.cancelMonitor(monitorId: monitorId)
 
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
@@ -426,6 +532,13 @@ public actor OVSDBConnection {
     /// that far behind gets `OVNManagerError.notificationsDropped`: rows were
     /// lost, so restart the monitor to resynchronize from a fresh snapshot
     /// instead of continuing from an incomplete view.
+    ///
+    /// A reconnect ends the stream with `OVNManagerError.monitorInterrupted` for
+    /// the same reason: the monitors have been re-created on the new session
+    /// automatically, but the changes made while the connection was down were
+    /// never sent to anyone. Recover by re-reading the rows and taking a new
+    /// stream — do not call `startMonitoring` again, or the monitor will be
+    /// duplicated.
     ///
     /// Everything this stream can fail with is an `OVNManagerError`, but the
     /// failure type stays `any Error`: every `AsyncThrowingStream` initializer

@@ -14,14 +14,47 @@ public final class OVSManager: OVSManaging {
     private let logger: Logger
     private let database: String
     
-    public init(endpoint: OVSDBEndpoint, database: String = OVSDatabase.openVSwitch, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    /// Manages `database` over a connection to the OVSDB server(s) at `remotes`.
+    ///
+    /// See `OVNManager.init(remotes:database:reconnect:leaderOnly:…)` for the
+    /// cluster parameters. An `Open_vSwitch` database is local and standalone, so
+    /// in practice this takes one remote and `leaderOnly` never has anything to
+    /// reject.
+    public init(
+        remotes: OVSDBRemotes,
+        database: String = OVSDatabase.openVSwitch,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnly: Bool = true,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
         self.connection = OVSDBConnection(
-            endpoint: endpoint,
+            remotes: remotes,
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnly ? database : nil,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.database = database
         self.logger = logger ?? Logger(label: "ovn-manager.ovs")
+    }
+
+    public convenience init(
+        endpoint: OVSDBEndpoint,
+        database: String = OVSDatabase.openVSwitch,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnly: Bool = true,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            database: database,
+            reconnect: reconnect,
+            leaderOnly: leaderOnly,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
+        )
     }
 
     public convenience init(socketPath: String, database: String = OVSDatabase.openVSwitch, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
@@ -45,7 +78,15 @@ public final class OVSManager: OVSManaging {
             return await connection.isConnected
         }
     }
-    
+
+    public nonisolated var connectionState: OVSDBConnectionState {
+        return connection.connectionState
+    }
+
+    public nonisolated func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        return connection.connectionStates()
+    }
+
     // MARK: - Database Operations
     
     public func listDatabases() async throws(OVNManagerError) -> [String] {

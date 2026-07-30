@@ -7,6 +7,7 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 - 🚀 **Type-Safe Swift Models**: Strongly typed, Codable structs for all OVN and OVS database schemas
 - ⚡ **High Performance**: SwiftNIO-based asynchronous socket communication
 - 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL, behind an opt-out [`TLS` trait](#the-tls-trait))
+- 🗳️ **Cluster-Aware**: [Multiple remotes](#clustered-databases-raft), leader discovery through `_Server`, and reconnection with jittered backoff
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
 - 🐧 **Linux-Targeted**: Built for the Linux hosts OVN/OVS run on; builds on macOS for local development
@@ -145,6 +146,7 @@ drop is reported.
 - **JSONRPCClient**: Low-level JSON-RPC communication over any OVSDB transport
 - **OVSDBSocketConnection**: SwiftNIO-based Unix socket, TCP, and TLS transport (`UnixSocketConnection` remains as an alias)
 - **OVSDBEndpoint**: Endpoint description (`.unix`/`.tcp`/`.ssl`) with OVN-style string parsing
+- **OVSDBRemotes / OVSDBReconnectPolicy / OVSDBConnectionState**: the cluster side of a connection — the ordered remote list, the reconnect backoff, and the observable lifecycle
 - **OVSDBConnection**: OVSDB protocol implementation with monitoring support
 - **SwiftOVN**: High-level interface for OVN operations
 - **OVSManager**: High-level interface for OVS operations
@@ -210,6 +212,59 @@ The existing `socketPath:` initializers are unchanged and equivalent to
 
 The `.ssl` endpoint requires the [`TLS` trait](#the-tls-trait), which is enabled
 by default. `.unix` and `.tcp` work either way.
+
+### Clustered Databases (RAFT)
+
+A production OVN control plane runs a clustered `ovsdb-server`, where a leader
+election drops the connections to the old leader and only the leader accepts
+writes. Pass the whole cluster — the equivalent of
+`ovn-nbctl --db=tcp:a:6641,tcp:b:6641,tcp:c:6641`:
+
+```swift
+let manager = OVNManager(
+    remotes: try OVSDBRemotes(parsing: "tcp:10.0.0.1:6641,tcp:10.0.0.2:6641,tcp:10.0.0.3:6641"),
+    database: OVNDatabase.northbound
+)
+try await manager.connect()
+```
+
+By default this connection:
+
+- tries each remote in order and, through the `_Server` database, prefers the one
+  that reports itself the leader of `database` — leaving a follower behind rather
+  than discovering it on the first rejected write (`leaderOnly: false` opts out;
+  it is not enforced when there is only one remote, and a server too old to
+  answer is used anyway),
+- re-establishes itself when the session drops, with a 1s–8s jittered backoff
+  (`reconnect:` takes an `OVSDBReconnectPolicy`; `.disabled` restores the
+  earlier behaviour of a dropped connection staying dropped), and
+- moves to another remote when the current one reports that it has stopped being
+  the leader.
+
+Reconnection deliberately does not hide the drop. Requests in flight when the
+session ends still fail, and monitors are *restarted* rather than resumed, so a
+`monitorUpdates()` stream ends with `OVNManagerError.monitorInterrupted` and the
+rows have to be re-read (resuming exactly where a monitor left off needs
+`monitor_cond_since`). `isConnected` keeps its meaning — a session is up right
+now — which with reconnection is a value that flickers; to act on it, observe the
+lifecycle instead:
+
+```swift
+for await state in manager.connectionStates() {
+    switch state {
+    case .connected(let endpoint):
+        print("attached to \(endpoint?.description ?? "a remote")")
+    case .connecting(_, let attempt):
+        print("connecting, attempt \(attempt)")
+    case .waiting(let retryIn, _):
+        print("backing off \(retryIn.nanoseconds / 1_000_000)ms")
+    case .closed(let reason):
+        print("closed: \(reason ?? "no reason given")")
+    case .idle:
+        break
+    }
+}
+```
 
 ### Custom Connection Configuration
 

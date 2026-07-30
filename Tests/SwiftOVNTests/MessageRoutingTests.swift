@@ -235,6 +235,8 @@ final class MessageRoutingTests {
                     delivered += 1
                 case .dropped(let count):
                     dropped += count
+                case .reconnected:
+                    Issue.record("Nothing reconnected: this core has no supervisor")
                 }
             }
             return (delivered, dropped)
@@ -549,6 +551,8 @@ struct JSONRPCNotificationHubTests {
                 notifications.append(try #require(notification.params?.stringValue))
             case .dropped(let count):
                 dropped += count
+            case .reconnected:
+                Issue.record("The hub was driven directly; nothing reconnected")
             }
         }
 
@@ -585,6 +589,9 @@ struct JSONRPCNotificationHubTests {
                 notifications.append(try #require(notification.params?.stringValue))
             case .dropped(let count):
                 dropped += count
+            case .reconnected:
+                Issue.record("The hub was driven directly; nothing reconnected")
+                return
             case nil:
                 Issue.record("Stream finished early")
                 return

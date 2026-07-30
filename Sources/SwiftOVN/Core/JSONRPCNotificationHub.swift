@@ -85,6 +85,20 @@ final class JSONRPCNotificationHub: Sendable {
     /// loop, so calls are serialized with respect to each other and the
     /// per-subscriber drop counts below stay consistent.
     func publish(_ notification: JSONRPCNotification) {
+        publish(event: .notification(notification))
+    }
+
+    /// Tells every subscriber that the connection was re-established and their
+    /// monitors were restarted (see `JSONRPCNotificationEvent.reconnected`).
+    ///
+    /// Published by the supervisor between sessions, when no monitor exists on
+    /// the new session yet — so nothing from it can reach a subscriber ahead of
+    /// this event.
+    func publishReconnected() {
+        publish(event: .reconnected)
+    }
+
+    private func publish(event: JSONRPCNotificationEvent) {
         // Snapshot under the lock, then yield outside it: `yield` can finish a
         // stream, whose `onTermination` reaches back into this lock.
         let entries = state.withLock { Array($0.subscribers) }
@@ -104,7 +118,7 @@ final class JSONRPCNotificationHub: Sendable {
                 }
             }
 
-            if case .dropped(let evicted) = subscriber.continuation.yield(.notification(notification)) {
+            if case .dropped(let evicted) = subscriber.continuation.yield(event) {
                 delta += Self.notificationCount(of: evicted)
             }
 
@@ -151,6 +165,13 @@ final class JSONRPCNotificationHub: Sendable {
             return 1
         case .dropped(let count):
             return count
+        case .reconnected:
+            // Not a notification, so evicting it loses no update — but it does
+            // lose the news that the monitors restarted. Counting it as one drop
+            // keeps the consumer from being told nothing at all: a drop report
+            // already means "re-read, your view has a hole", which is the action
+            // a missed reconnect calls for too.
+            return 1
         }
     }
 
@@ -165,6 +186,6 @@ final class JSONRPCNotificationHub: Sendable {
     }
 
     private func removeSubscriber(_ id: UUID) {
-        state.withLock { $0.subscribers.removeValue(forKey: id) }
+        state.withLock { _ = $0.subscribers.removeValue(forKey: id) }
     }
 }

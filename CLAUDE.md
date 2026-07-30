@@ -54,7 +54,11 @@ The codebase follows a clean architecture with clear separation of concerns:
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
    - `OVSDBSocketConnection.swift`: Public transport facade and channel bootstrap over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
-   - `OVSDBConnectionCore.swift`: The `NIOAsyncChannel` state machine — session, in-flight requests, inbound routing. Every piece of mutable transport state lives here, as actor state or behind a `Mutex`; there is no `@unchecked Sendable` in the transport
+   - `OVSDBConnectionCore.swift`: The `NIOAsyncChannel` state machine — session, in-flight requests, inbound routing — plus the supervisor that walks the remote list, vets each session and reconnects. Every piece of mutable transport state lives here, as actor state or behind a `Mutex`; there is no `@unchecked Sendable` in the transport
+   - `OVSDBRemotes.swift`: The ordered, non-empty remote list, with the comma-separated `ovn-nbctl --db` parsing
+   - `OVSDBReconnectPolicy.swift`: Whether/how a lost session is re-established: doubling backoff, jitter, attempt limit
+   - `OVSDBConnectionState.swift`: The observable lifecycle (`connectionStates()`) and its `Mutex`-backed broadcaster
+   - `OVSDBServerStatus.swift`: The `_Server`.`Database` columns leader discovery reads, and the parsing of them
    - `OVSDBJSONFrameDecoder.swift`: Brace-depth framer, emits one `ByteBuffer` per top-level JSON object
    - `JSONRPCFrameEnvelope.swift`: Scans a frame's `method`/`id` for routing without parsing the payload
    - `JSONRPCNotificationHub.swift`: Bounded fan-out of server notifications, with drop reporting
@@ -133,6 +137,48 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Mutations with `OVSDBMutation`
 - Real-time monitoring with `monitor_cond` method
 
+### Clustering and Reconnection
+
+A connection takes an `OVSDBRemotes` list and, by default, keeps itself up:
+`OVSDBConnectionCore.superviseSessions()` is one long-lived task owning the whole
+connect/serve/reconnect cycle. Things that are easy to get wrong there:
+
+- **Rules that exist to stop a loop spinning.** Every reconnect waits at least
+  `initialBackoff`, even when a session had been up (the backoff *reset* is not a
+  licence to retry instantly): a server that accepts a connection and closes it
+  immediately would otherwise be reconnected to in a tight loop, since each such
+  session counts as a success. A session lost to a leadership change counts as a
+  failure for the same reason.
+- **`connect()` does not retry.** It tries each remote once and throws if none
+  answers, so a misconfigured endpoint fails at the call instead of after an hour
+  of silent backoff. Only sessions that were once up are re-established. A
+  `connect()` issued *while* a reconnect is in flight waits for that reconnect
+  rather than starting a second supervisor.
+- **Two promises, deliberately.** `sessionReady` is per session (succeeded when
+  the writer is installed, failed by `tearDown`); `activation` is per `connect()`
+  and only the supervisor completes it. Failing `activation` from `tearDown`
+  would make `connect()` fail on a session the leader check is about to reject,
+  even though a later remote in the same pass would have worked.
+- **Leader-only is best-effort by design.** It is enforced only with more than
+  one remote (with one there is nothing better to switch to), and a remote that
+  cannot answer through `_Server` — including a server old enough to reply with a
+  bare string error, which does not decode as a `JSONRPCError` — is used with a
+  warning. Only an explicit follower/not-connected verdict rejects a remote.
+- **The internal `_Server` monitor is invisible to callers.** Its updates are
+  intercepted in `handleNotification` and never published, or a consumer
+  replicating `Logical_Switch` rows would receive `Database` rows it never asked
+  for.
+- **The notification hub survives a recoverable drop.** `tearDown` only calls
+  `finishAll()` when nothing is going to reconnect; otherwise subscribers stay and
+  get a `.reconnected` event, published between sessions (before any monitor
+  exists on the new one, so no update can overtake it). `OVSDBConnection` restarts
+  its stored monitors when it sees that event; `monitorUpdates()` consumers get
+  `monitorInterrupted`, because the gap cannot be filled until
+  `monitor_cond_since` lands.
+- **A released connection must stop reconnecting.** The supervisor holds the core
+  strongly, so `OVSDBSocketConnection.deinit` spawns a task that shuts the core
+  down and only then shuts down an owned event-loop group.
+
 ### Foundation Imports
 Linux is the primary deployment target, and there full `Foundation` is far more
 than this package needs. Source files therefore import the essentials subset
@@ -198,6 +244,19 @@ zero-copy frame path is deliberate. Re-measure before revisiting either side.
   wait for a thread deadlocks the entire run — it hangs with no failure output.
   This is the one thing that does not survive a mechanical `tearDown` → `deinit`
   translation.
+- **A suite that binds stub servers closes them in `deinit`, before the group.**
+  `ClusterConnectionTests` keeps every stub it started and closes the listener and
+  its client channels first. Leaving registered channels for
+  `shutdownGracefully` to deal with left that suite's event loops running after
+  the whole run had finished, and the test process then never exited — all tests
+  reported as passed and `swift test` hung.
+- **Nothing may wait on a stream without a deadline.** `withDeadline` (in
+  `MessageRoutingTests` and `ClusterConnectionTests`) exists so a stream that
+  stops yielding fails one test instead of hanging the run. Reconnection has no
+  event to await, so the cluster tests poll with a bounded `eventually` helper —
+  and poll the *server's* accepted-connection count rather than the client's
+  state, since a state that has not caught up with a drop yet still reads as
+  connected.
 - `OVNManagerError` is not `Equatable`, so `#expect(throws:)` cannot name a
   specific case. Compare `errorCase` (see `TestSupport.swift`) instead:
   `#expect(error?.errorCase == .timeoutError)`.

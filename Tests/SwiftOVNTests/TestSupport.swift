@@ -23,6 +23,7 @@ extension OVNManagerError {
         case invalidSocket
         case operationFailed
         case notificationsDropped
+        case monitorInterrupted
     }
 
     var errorCase: Case {
@@ -36,6 +37,7 @@ extension OVNManagerError {
         case .invalidSocket: .invalidSocket
         case .operationFailed: .operationFailed
         case .notificationsDropped: .notificationsDropped
+        case .monitorInterrupted: .monitorInterrupted
         }
     }
 }
