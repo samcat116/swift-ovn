@@ -1,0 +1,24 @@
+README.md
+  s_beec96e7b03266::t_c54da2549cfefb 347,349-362
+Sources/SwiftOVN/Protocols/OVSManaging.swift
+  s_beec96e7b03266::t_9ed4b7548fd35b 27-40
+  s_beec96e7b03266::t_ebedead0748b7b 89-91
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_beec96e7b03266::t_d8ba1c0b37d369 471-473
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "57f2181ac76e05809da0e484a0e7159539457427",
+  "prompts": {},
+  "sessions": {
+    "s_beec96e7b03266": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "75c1ba07-79cf-49d9-af0c-8ac442338c62",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
