@@ -1,0 +1,39 @@
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_9e16e42214c7d6::t_6e94d5f78fbb13 149-163
+  s_9e16e42214c7d6::t_7a9fd466c6a57e 216-217
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_9e16e42214c7d6::t_19742ad8de9cdd 80-130
+Sources/SwiftOVN/Models/OVNMeter.swift
+  s_9e16e42214c7d6::t_8841304ec779b8 1-53
+Sources/SwiftOVN/Models/OVNMeterBand.swift
+  s_9e16e42214c7d6::t_a7213f159431b8 1-40
+README.md
+  s_9e16e42214c7d6::t_f348908ac4d38a 166
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_9e16e42214c7d6::t_dbf92f7b0ea0ba 73-74
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_9e16e42214c7d6::t_f37aac730005e3 1276-1454
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_9e16e42214c7d6::t_8724e7cdb5db0a 180-242
+  s_9e16e42214c7d6::t_0a7f04761b57d5 932-1007
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_9e16e42214c7d6::t_873d434ff46bd3 511-550
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_9e16e42214c7d6::t_254b08fa4fb23d 125-155
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "b50ff1b7166777b25bf37745335b3b4a89de74a2",
+  "prompts": {},
+  "sessions": {
+    "s_9e16e42214c7d6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "60810bd3-382a-4223-b4f8-41204a3f8f94",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
