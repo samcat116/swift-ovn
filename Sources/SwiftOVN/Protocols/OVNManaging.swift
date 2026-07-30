@@ -3,140 +3,157 @@ import NIO
 
 // MARK: - OVN Management Protocol
 
+/// Manages an OVN database (northbound or southbound) over OVSDB.
+///
+/// Every throwing requirement is `throws(OVNManagerError)`, so a `catch` binds
+/// that type directly and a `switch` over it needs no `default`. Errors from
+/// the layers underneath — `DecodingError` while decoding a row, NIO channel
+/// and TLS failures from the transport — are wrapped into `decodingError`,
+/// `encodingError` or `connectionFailed` before they reach a caller; nothing
+/// else escapes.
+///
+/// `monitorUpdates()` is the one exception, and only because the standard
+/// library forces it: see that method's documentation.
 public protocol OVNManaging: Sendable {
     // Connection Management
-    func connect() async throws
-    func disconnect() async throws
+    func connect() async throws(OVNManagerError)
+    func disconnect() async throws(OVNManagerError)
     var isConnected: Bool { get async }
     
     // Database Operations
-    func listDatabases() async throws -> [String]
-    func getDatabaseSchema(database: String) async throws -> JSONValue
+    func listDatabases() async throws(OVNManagerError) -> [String]
+    func getDatabaseSchema(database: String) async throws(OVNManagerError) -> JSONValue
     
     // Logical Switch Operations
-    func getLogicalSwitches() async throws -> [OVNLogicalSwitch]
-    func getLogicalSwitch(named name: String) async throws -> OVNLogicalSwitch?
-    func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws -> String
-    func updateLogicalSwitch(uuid: String, _ logicalSwitch: OVNLogicalSwitch) async throws
-    func deleteLogicalSwitch(uuid: String) async throws
-    func deleteLogicalSwitch(named name: String) async throws
+    func getLogicalSwitches() async throws(OVNManagerError) -> [OVNLogicalSwitch]
+    func getLogicalSwitch(named name: String) async throws(OVNManagerError) -> OVNLogicalSwitch?
+    func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws(OVNManagerError) -> String
+    func updateLogicalSwitch(uuid: String, _ logicalSwitch: OVNLogicalSwitch) async throws(OVNManagerError)
+    func deleteLogicalSwitch(uuid: String) async throws(OVNManagerError)
+    func deleteLogicalSwitch(named name: String) async throws(OVNManagerError)
     
     // Logical Switch Port Operations
-    func getLogicalSwitchPorts() async throws -> [OVNLogicalSwitchPort]
-    func getLogicalSwitchPort(named name: String) async throws -> OVNLogicalSwitchPort?
+    func getLogicalSwitchPorts() async throws(OVNManagerError) -> [OVNLogicalSwitchPort]
+    func getLogicalSwitchPort(named name: String) async throws(OVNManagerError) -> OVNLogicalSwitchPort?
     @available(*, deprecated, message: "Creates an orphan row that ovn-northd ignores (no Port_Binding, no dataplane). Use createLogicalSwitchPort(_:onSwitch:) so the port is attached to its switch.")
-    func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws -> String
-    func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws -> String
-    func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws
-    func deleteLogicalSwitchPort(uuid: String) async throws
-    func deleteLogicalSwitchPort(named name: String) async throws
+    func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws(OVNManagerError) -> String
+    func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws(OVNManagerError) -> String
+    func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws(OVNManagerError)
+    func deleteLogicalSwitchPort(uuid: String) async throws(OVNManagerError)
+    func deleteLogicalSwitchPort(named name: String) async throws(OVNManagerError)
     
     // Logical Router Operations
-    func getLogicalRouters() async throws -> [OVNLogicalRouter]
-    func getLogicalRouter(named name: String) async throws -> OVNLogicalRouter?
-    func createLogicalRouter(_ router: OVNLogicalRouter) async throws -> String
-    func updateLogicalRouter(uuid: String, _ router: OVNLogicalRouter) async throws
-    func deleteLogicalRouter(uuid: String) async throws
-    func deleteLogicalRouter(named name: String) async throws
+    func getLogicalRouters() async throws(OVNManagerError) -> [OVNLogicalRouter]
+    func getLogicalRouter(named name: String) async throws(OVNManagerError) -> OVNLogicalRouter?
+    func createLogicalRouter(_ router: OVNLogicalRouter) async throws(OVNManagerError) -> String
+    func updateLogicalRouter(uuid: String, _ router: OVNLogicalRouter) async throws(OVNManagerError)
+    func deleteLogicalRouter(uuid: String) async throws(OVNManagerError)
+    func deleteLogicalRouter(named name: String) async throws(OVNManagerError)
     
     // Logical Router Port Operations
-    func getLogicalRouterPorts() async throws -> [OVNLogicalRouterPort]
-    func getLogicalRouterPort(named name: String) async throws -> OVNLogicalRouterPort?
+    func getLogicalRouterPorts() async throws(OVNManagerError) -> [OVNLogicalRouterPort]
+    func getLogicalRouterPort(named name: String) async throws(OVNManagerError) -> OVNLogicalRouterPort?
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createLogicalRouterPort(_:onRouter:) so the port is attached to its router.")
-    func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws -> String
-    func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws -> String
-    func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws
-    func deleteLogicalRouterPort(uuid: String) async throws
-    func deleteLogicalRouterPort(named name: String) async throws
+    func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws(OVNManagerError) -> String
+    func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws(OVNManagerError) -> String
+    func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws(OVNManagerError)
+    func deleteLogicalRouterPort(uuid: String) async throws(OVNManagerError)
+    func deleteLogicalRouterPort(named name: String) async throws(OVNManagerError)
 
     // Logical Router Static Route Operations
-    func getStaticRoutes() async throws -> [OVNLogicalRouterStaticRoute]
+    func getStaticRoutes() async throws(OVNManagerError) -> [OVNLogicalRouterStaticRoute]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createStaticRoute(_:onRouter:) so the route is attached to its router.")
-    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws -> String
-    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws -> String
-    func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws
-    func deleteStaticRoute(uuid: String) async throws
+    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError) -> String
+    func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws(OVNManagerError) -> String
+    func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError)
+    func deleteStaticRoute(uuid: String) async throws(OVNManagerError)
 
     // Gateway Chassis Operations
-    func getGatewayChassis() async throws -> [OVNGatewayChassis]
+    func getGatewayChassis() async throws(OVNManagerError) -> [OVNGatewayChassis]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
-    func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws -> String
-    func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws -> String
-    func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws
-    func deleteGatewayChassis(uuid: String) async throws
+    func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws(OVNManagerError) -> String
+    func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws(OVNManagerError) -> String
+    func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws(OVNManagerError)
+    func deleteGatewayChassis(uuid: String) async throws(OVNManagerError)
 
     // HA Chassis Group Operations
-    func getHAChassisGroups() async throws -> [OVNHAChassisGroup]
-    func getHAChassisGroup(named name: String) async throws -> OVNHAChassisGroup?
-    func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws -> String
-    func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws
-    func deleteHAChassisGroup(uuid: String) async throws
+    func getHAChassisGroups() async throws(OVNManagerError) -> [OVNHAChassisGroup]
+    func getHAChassisGroup(named name: String) async throws(OVNManagerError) -> OVNHAChassisGroup?
+    func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws(OVNManagerError) -> String
+    func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws(OVNManagerError)
+    func deleteHAChassisGroup(uuid: String) async throws(OVNManagerError)
 
     // HA Chassis Operations
-    func getHAChassis() async throws -> [OVNHAChassis]
+    func getHAChassis() async throws(OVNManagerError) -> [OVNHAChassis]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createHAChassis(_:inGroup:) so the member is attached to its group.")
-    func createHAChassis(_ chassis: OVNHAChassis) async throws -> String
-    func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws -> String
-    func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws
-    func deleteHAChassis(uuid: String) async throws
+    func createHAChassis(_ chassis: OVNHAChassis) async throws(OVNManagerError) -> String
+    func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws(OVNManagerError) -> String
+    func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws(OVNManagerError)
+    func deleteHAChassis(uuid: String) async throws(OVNManagerError)
 
     // ACL Operations
-    func getACLs() async throws -> [OVNACL]
+    func getACLs() async throws(OVNManagerError) -> [OVNACL]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
-    func createACL(_ acl: OVNACL) async throws -> String
-    func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws -> String
-    func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws -> String
-    func updateACL(uuid: String, _ acl: OVNACL) async throws
-    func deleteACL(uuid: String) async throws
+    func createACL(_ acl: OVNACL) async throws(OVNManagerError) -> String
+    func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws(OVNManagerError) -> String
+    func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws(OVNManagerError) -> String
+    func updateACL(uuid: String, _ acl: OVNACL) async throws(OVNManagerError)
+    func deleteACL(uuid: String) async throws(OVNManagerError)
 
     // Port Group Operations
-    func getPortGroups() async throws -> [OVNPortGroup]
-    func getPortGroup(named name: String) async throws -> OVNPortGroup?
-    func createPortGroup(_ portGroup: OVNPortGroup) async throws -> String
-    func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws
-    func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws
-    func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws
-    func deletePortGroup(uuid: String) async throws
-    func deletePortGroup(named name: String) async throws
+    func getPortGroups() async throws(OVNManagerError) -> [OVNPortGroup]
+    func getPortGroup(named name: String) async throws(OVNManagerError) -> OVNPortGroup?
+    func createPortGroup(_ portGroup: OVNPortGroup) async throws(OVNManagerError) -> String
+    func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws(OVNManagerError)
+    func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws(OVNManagerError)
+    func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws(OVNManagerError)
+    func deletePortGroup(uuid: String) async throws(OVNManagerError)
+    func deletePortGroup(named name: String) async throws(OVNManagerError)
 
     // Load Balancer Operations
-    func getLoadBalancers() async throws -> [OVNLoadBalancer]
-    func getLoadBalancer(named name: String) async throws -> OVNLoadBalancer?
-    func createLoadBalancer(_ loadBalancer: OVNLoadBalancer) async throws -> String
-    func updateLoadBalancer(uuid: String, _ loadBalancer: OVNLoadBalancer) async throws
-    func deleteLoadBalancer(uuid: String) async throws
-    func deleteLoadBalancer(named name: String) async throws
-    func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws
-    func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws
-    func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws
-    func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws
+    func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer]
+    func getLoadBalancer(named name: String) async throws(OVNManagerError) -> OVNLoadBalancer?
+    func createLoadBalancer(_ loadBalancer: OVNLoadBalancer) async throws(OVNManagerError) -> String
+    func updateLoadBalancer(uuid: String, _ loadBalancer: OVNLoadBalancer) async throws(OVNManagerError)
+    func deleteLoadBalancer(uuid: String) async throws(OVNManagerError)
+    func deleteLoadBalancer(named name: String) async throws(OVNManagerError)
+    func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws(OVNManagerError)
+    func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws(OVNManagerError)
+    func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError)
+    func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws(OVNManagerError)
 
     // NAT Operations
-    func getNATRules() async throws -> [OVNNAT]
+    func getNATRules() async throws(OVNManagerError) -> [OVNNAT]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNATRule(_:onRouter:) so the rule is attached to its router.")
-    func createNATRule(_ nat: OVNNAT) async throws -> String
-    func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws -> String
-    func updateNATRule(uuid: String, _ nat: OVNNAT) async throws
-    func deleteNATRule(uuid: String) async throws
+    func createNATRule(_ nat: OVNNAT) async throws(OVNManagerError) -> String
+    func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws(OVNManagerError) -> String
+    func updateNATRule(uuid: String, _ nat: OVNNAT) async throws(OVNManagerError)
+    func deleteNATRule(uuid: String) async throws(OVNManagerError)
     
     // DHCP Operations
-    func getDHCPOptions() async throws -> [OVNDHCPOptions]
-    func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws -> String
-    func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws
-    func deleteDHCPOptions(uuid: String) async throws
+    func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions]
+    func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws(OVNManagerError) -> String
+    func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws(OVNManagerError)
+    func deleteDHCPOptions(uuid: String) async throws(OVNManagerError)
     
     // Monitoring
-    func startMonitoring(tables: [String]) async throws -> String
-    func stopMonitoring(monitorId: String) async throws
+    func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String
+    func stopMonitoring(monitorId: String) async throws(OVNManagerError)
+    /// Streams row changes from this manager's monitors.
+    ///
+    /// The failure type is `any Error` rather than `OVNManagerError` — every
+    /// `AsyncThrowingStream` initializer is constrained to
+    /// `Failure == any Error`, so a typed-failure stream cannot be built. Only
+    /// `OVNManagerError` is ever thrown, so match on it in the `catch`.
     nonisolated func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
     
     // Southbound Operations
-    func getChassis() async throws -> [OVNChassis]
-    func getChassisPrivate() async throws -> [OVNChassisPrivate]
-    func getPortBindings() async throws -> [OVNPortBinding]
-    func getLogicalFlows() async throws -> [OVNLogicalFlow]
-    func getAdvertisedRoutes() async throws -> [OVNAdvertisedRoute]
-    func getLearnedRoutes() async throws -> [OVNLearnedRoute]
+    func getChassis() async throws(OVNManagerError) -> [OVNChassis]
+    func getChassisPrivate() async throws(OVNManagerError) -> [OVNChassisPrivate]
+    func getPortBindings() async throws(OVNManagerError) -> [OVNPortBinding]
+    func getLogicalFlows() async throws(OVNManagerError) -> [OVNLogicalFlow]
+    func getAdvertisedRoutes() async throws(OVNManagerError) -> [OVNAdvertisedRoute]
+    func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute]
 }
 
 // MARK: - OVN Database Constants
@@ -178,11 +195,11 @@ public extension OVNManaging {
     /// Connects using the endpoint the manager was constructed with. The
     /// database (northbound/southbound) is fixed at construction time, so
     /// there is no socket path to pass here.
-    func connectToNorthbound() async throws {
+    func connectToNorthbound() async throws(OVNManagerError) {
         try await connect()
     }
 
-    func connectToSouthbound() async throws {
+    func connectToSouthbound() async throws(OVNManagerError) {
         try await connect()
     }
 }

@@ -10,7 +10,7 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
 - 🐧 **Linux-Targeted**: Built for the Linux hosts OVN/OVS run on; builds on macOS for local development
-- 🛡️ **Comprehensive Error Handling**: Detailed error types and proper error propagation
+- 🛡️ **Typed Errors**: The manager APIs are `throws(OVNManagerError)`, so failures are exhaustively handleable
 - 📚 **Feature Complete**: Support for all major OVN and OVS operations
 
 ## Installation
@@ -239,21 +239,39 @@ let flow = ovsManager.flowBuilder()
 
 ## Error Handling
 
-The package provides comprehensive error handling:
+Every throwing operation on `OVNManaging` and `OVSManaging` is declared
+`throws(OVNManagerError)`, so the `catch` binds that type directly — no cast, no
+`as?`, and a `switch` over it can be exhaustive:
 
 ```swift
 do {
-    try await SwiftOVN.connect()
-    let switches = try await SwiftOVN.getLogicalSwitches()
-} catch SwiftOVNError.connectionFailed(let message) {
+    try await ovnManager.connect()
+    let switches = try await ovnManager.getLogicalSwitches()
+} catch .connectionFailed(let message) {
     print("Connection failed: \(message)")
-} catch SwiftOVNError.timeoutError {
+} catch .timeoutError {
     print("Operation timed out")
-} catch SwiftOVNError.rpcError(let rpcError) {
+} catch .rpcError(let rpcError) {
     print("RPC Error: \(rpcError.message)")
 } catch {
-    print("Unexpected error: \(error)")
+    // `error` is an OVNManagerError here, so this is the remaining cases —
+    // not "anything at all".
+    print("OVSDB error: \(error)")
 }
+```
+
+Errors from the layers underneath are wrapped before they reach you rather than
+leaking out: a row that fails to decode arrives as `.decodingError`, a model
+that fails to encode as `.encodingError`, and NIO channel and TLS failures as
+`.connectionFailed`, each carrying the original error.
+
+The one exception is `monitorUpdates()`. Its `AsyncThrowingStream` still has a
+`Failure` of `any Error` because every `AsyncThrowingStream` initializer in the
+standard library is constrained that way; only `OVNManagerError` is ever thrown
+into it, so match on the type in the `catch`:
+
+```swift
+} catch OVNManagerError.notificationsDropped(let count) {
 ```
 
 ## Database Support

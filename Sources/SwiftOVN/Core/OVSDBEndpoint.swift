@@ -34,7 +34,7 @@ public enum OVSDBEndpoint: Sendable, Equatable {
     /// TLS options (CA, client certificate) cannot be expressed in the string
     /// form; parse the endpoint and re-create it with `.ssl(host:port:tls:)`
     /// when they are needed.
-    public init(parsing string: String) throws {
+    public init(parsing string: String) throws(OVNManagerError) {
         guard let colonIndex = string.firstIndex(of: ":") else {
             throw OVNManagerError.connectionFailed("Invalid OVSDB endpoint '\(string)': expected unix:, tcp: or ssl: prefix")
         }
@@ -60,7 +60,7 @@ public enum OVSDBEndpoint: Sendable, Equatable {
         }
     }
 
-    private static func parseHostPort(_ remainder: String, in original: String) throws -> (host: String, port: Int) {
+    private static func parseHostPort(_ remainder: String, in original: String) throws(OVNManagerError) -> (host: String, port: Int) {
         let host: String
         let portString: String
 
