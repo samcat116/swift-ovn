@@ -75,21 +75,29 @@ enum OVSDBRowEncoder {
 
     /// Encodes the model to a row of wire-format column values. The `_uuid`
     /// column is omitted (it is server-assigned and immutable).
-    static func makeRow<T: Encodable>(from object: T, hints: ColumnHints) throws -> OVSDBRow {
-        let encoded = try JSONValueEncoder.encode(object)
-        guard case .object(let columns) = encoded else {
-            throw OVNManagerError.encodingError(
-                NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "A row must encode to a JSON object, got \(encoded)",
-                ])
-            )
-        }
+    ///
+    /// This is the boundary between `JSONValueEncoder` — a general `Encoder`,
+    /// so it throws `EncodingError` — and the typed-throws API above, hence the
+    /// blanket wrap into `encodingError`.
+    static func makeRow<T: Encodable>(from object: T, hints: ColumnHints) throws(OVNManagerError) -> OVSDBRow {
+        do {
+            let encoded = try JSONValueEncoder.encode(object)
+            guard case .object(let columns) = encoded else {
+                throw OVNManagerError.encodingError(
+                    NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
+                        NSLocalizedDescriptionKey: "A row must encode to a JSON object, got \(encoded)",
+                    ])
+                )
+            }
 
-        var row: OVSDBRow = [:]
-        for (column, value) in columns where column != "_uuid" {
-            row[column] = try columnValue(value, column: column, hints: hints)
+            var row: OVSDBRow = [:]
+            for (column, value) in columns where column != "_uuid" {
+                row[column] = try columnValue(value, column: column, hints: hints)
+            }
+            return row
+        } catch {
+            throw OVNManagerError.wrapping(error) { .encodingError($0) }
         }
-        return row
     }
 
     private static func columnValue(_ value: JSONValue, column: String, hints: ColumnHints) throws -> JSONValue {
