@@ -428,6 +428,96 @@ struct OVSDBRowDecoderTests {
         #expect(route.external_ids == [:])
     }
 
+    /// The barrier row as ovsdb-server sends it: the counters are plain
+    /// integers, `connections` a UUID set, `ssl` an optional scalar reference,
+    /// and `options` carries the state ovn-northd generated on first run.
+    @Test("An NB_Global row")
+    func nbGlobalRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("ovn"),
+            "nb_cfg": .number(42),
+            "nb_cfg_timestamp": .number(1_753_812_345_678),
+            "sb_cfg": .number(41),
+            "sb_cfg_timestamp": .number(1_753_812_345_000),
+            "hv_cfg": .number(40),
+            "hv_cfg_timestamp": .number(1_753_812_344_500),
+            "connections": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
+            "ssl": emptySet,
+            "ipsec": .boolean(false),
+            "options": wireStringMap(["mac_prefix": "0a:5c:1f", "northd_probe_interval": "5000"]),
+            "external_ids": wireMap([]),
+        ]
+
+        let global = try OVSDBRowDecoder.decode(OVNNBGlobal.self, from: row)
+
+        #expect(global.uuid == uuidA)
+        #expect(global.name == "ovn")
+        #expect(global.nb_cfg == 42)
+        #expect(global.nb_cfg_timestamp == 1_753_812_345_678)
+        #expect(global.sb_cfg == 41)
+        #expect(global.hv_cfg == 40)
+        #expect(global.hv_cfg_timestamp == 1_753_812_344_500)
+        #expect(global.connections == [uuidB, uuidC])
+        #expect(global.ssl == nil)
+        #expect(global.ipsec == false)
+        #expect(global.options == ["mac_prefix": "0a:5c:1f", "northd_probe_interval": "5000"])
+        #expect(global.external_ids == [:])
+    }
+
+    /// The timestamp columns postdate the counters in the NB schema, so a row
+    /// from an older ovsdb-server has the counters without them. A single
+    /// connection is a one-element set, which arrives as the bare UUID atom.
+    @Test("An NB_Global row without the timestamp columns")
+    func nbGlobalRowWithoutTimestamps() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string(""),
+            "nb_cfg": .number(0),
+            "sb_cfg": .number(0),
+            "hv_cfg": .number(0),
+            "connections": wireUUID(uuidB),
+            "ssl": wireUUID(uuidC),
+            "ipsec": .boolean(true),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let global = try OVSDBRowDecoder.decode(OVNNBGlobal.self, from: row)
+
+        #expect(global.nb_cfg_timestamp == nil)
+        #expect(global.sb_cfg_timestamp == nil)
+        #expect(global.hv_cfg_timestamp == nil)
+        #expect(global.connections == [uuidB])
+        #expect(global.ssl == uuidC)
+        #expect(global.ipsec == true)
+        #expect(global.options == [:])
+    }
+
+    /// SB_Global carries one counter and no name: what ovn-northd published,
+    /// which each chassis copies onwards into its own `nb_cfg`.
+    @Test("An SB_Global row")
+    func sbGlobalRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "nb_cfg": .number(41),
+            "connections": emptySet,
+            "ssl": emptySet,
+            "ipsec": .boolean(true),
+            "options": wireStringMap(["mac_prefix": "0a:5c:1f"]),
+            "external_ids": wireMap([]),
+        ]
+
+        let global = try OVSDBRowDecoder.decode(OVNSBGlobal.self, from: row)
+
+        #expect(global.uuid == uuidA)
+        #expect(global.nb_cfg == 41)
+        #expect(global.connections == nil)
+        #expect(global.ssl == nil)
+        #expect(global.ipsec == true)
+        #expect(global.options == ["mac_prefix": "0a:5c:1f"])
+    }
+
     /// The full column set of the current Southbound schema, including the
     /// `type`/`protocol` columns whose Swift names have to differ.
     @Test("A Service_Monitor row")
