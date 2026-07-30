@@ -336,10 +336,10 @@ final class ClusterConnectionTests {
 
     @Test("A remote that cannot answer for `_Server` is used anyway")
     func remoteThatCannotAnswerForServerIsUsedAnyway() async throws {
-        // ovsdb-server before 2.9 has no `_Server` database, and answers with a
-        // bare-string error that does not even decode as a JSON-RPC error object.
-        // Refusing to connect over a question the server cannot answer would be
-        // worse than talking to a follower.
+        // ovsdb-server before 2.9 has no `_Server` database and answers the
+        // monitor with the JSON-RPC 1.0 error string `unknown database`. Refusing
+        // to connect over a question the server cannot answer would be worse than
+        // talking to a follower.
         let old = try await startServer(answersServerDatabase: false)
         let leader = try await startServer(isLeader: true)
 
@@ -993,8 +993,8 @@ final class ClusterStubServer: @unchecked Sendable {
         }
 
         guard answersServerDatabase else {
-            // The shape an ovsdb-server without `_Server` replies with: a bare
-            // string, not a JSON-RPC error object.
+            // The shape an ovsdb-server without `_Server` replies with: JSON-RPC
+            // 1.0's bare-string error, not an error object.
             write(["id": id, "result": NSNull(), "error": "unknown database"], to: channel)
             return
         }

@@ -523,9 +523,10 @@ actor OVSDBConnectionCore {
         } catch {
             // A session that died mid-check is no use to anyone, so that
             // propagates. Anything else means the remote would not answer the
-            // question — including a server old enough to reply with a bare
-            // string error, which does not decode as a `JSONRPCError` — and an
-            // unanswerable question is not grounds for refusing to connect.
+            // question — a timeout, or a reply this client cannot read — and an
+            // unanswerable question is not grounds for refusing to connect. (A
+            // server that answers with an *error*, as one without `_Server`
+            // does, lands in the `response.error` case below instead.)
             guard isConnected else { throw error }
             logger.warning("\(endpoint) did not answer the _Server monitor (\(error)); using it anyway")
             return

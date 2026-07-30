@@ -190,9 +190,9 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
   even though a later remote in the same pass would have worked.
 - **Leader-only is best-effort by design.** It is enforced only with more than
   one remote (with one there is nothing better to switch to), and a remote that
-  cannot answer through `_Server` — including a server old enough to reply with a
-  bare string error, which does not decode as a `JSONRPCError` — is used with a
-  warning. Only an explicit follower/not-connected verdict rejects a remote.
+  cannot answer through `_Server` — a server predating it answers `unknown
+  database` — is used with a warning. Only an explicit follower/not-connected
+  verdict rejects a remote.
 - **The internal `_Server` monitor is invisible to callers.** Its updates are
   intercepted in `handleNotification` and never published, or a consumer
   replicating `Logical_Switch` rows would receive `Database` rows it never asked
