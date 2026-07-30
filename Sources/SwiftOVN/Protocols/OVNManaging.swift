@@ -392,6 +392,10 @@ public enum OVNTable {
     public static let qos = "QoS"
     public static let bfd = "BFD"
     public static let dns = "DNS"
+    /// Referenced weakly by `Logical_Switch.copp` and `Logical_Router.copp`,
+    /// which is why the guards on those updates need to name it. There is no
+    /// `Copp` model or getter yet.
+    public static let copp = "Copp"
     public static let meter = "Meter"
     public static let meterBand = "Meter_Band"
     /// The singleton northbound configuration row, and the `nb_cfg`/`sb_cfg`/

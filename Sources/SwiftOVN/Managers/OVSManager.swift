@@ -486,11 +486,20 @@ public final class OVSManager: OVSManaging {
         logger.info("Deleted controller: \(uuid)")
     }
 
+    /// Deletes the controller with this target, refusing an ambiguous one.
+    ///
+    /// `Controller.target` is not unique: each bridge has its own row, and
+    /// pointing several bridges at one controller address is the normal
+    /// deployment. Resolving `rows.first` therefore detached *an arbitrary*
+    /// bridge's controller and reported success. Delete by UUID (from
+    /// `getBridge`'s `controller` column) to name a particular one.
     public func deleteController(target: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "target", function: "==", value: .string(target))
-        guard let uuid = try await rowUUID(in: OVSTable.controller, where: condition) else {
-            throw OVNManagerError.operationFailed("Controller not found: \(target)")
-        }
+        let uuid = try await singleRowUUID(
+            in: OVSTable.controller,
+            where: condition,
+            describedAs: "Controller \(target)"
+        )
 
         try await deleteController(uuid: uuid)
 
@@ -709,14 +718,28 @@ public final class OVSManager: OVSManaging {
         logger.info("Updated QoS policy: \(uuid)")
     }
     
+    /// Deletes a QoS policy, first detaching it from any port that references
+    /// it, the way every other delete of a strongly-referenced OVS table here
+    /// does.
+    ///
+    /// `Port.qos` is a strong reference, so a plain delete of an attached policy
+    /// is refused by ovsdb-server for referential integrity — and there was no
+    /// way out of that through this API: `OVSPort.qos` is an optional and
+    /// `OVSDBRowEncoder` omits unset optionals, so `updatePort` with `qos: nil`
+    /// leaves the column exactly as it was rather than clearing it. An attached
+    /// QoS policy was simply undeletable.
     public func deleteQoSPolicy(uuid: String) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let count = try await connection.delete(from: OVSTable.qos, in: database, where: [condition])
-        
+        let count = try await connection.deleteDetaching(
+            from: OVSTable.qos,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVSTable.port, column: "qos")]
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("QoS policy not found: \(uuid)")
         }
-        
+
         logger.info("Deleted QoS policy: \(uuid)")
     }
     
@@ -756,6 +779,14 @@ public final class OVSManager: OVSManaging {
         logger.info("Updated queue: \(uuid)")
     }
     
+    /// Deletes a queue.
+    ///
+    /// Unlike `deleteQoSPolicy`, this cannot detach first: `QoS.queues` is a
+    /// *map* keyed by queue number, and RFC 7047 `mutate`/`delete` on a map
+    /// takes keys, not values, so the key holding this UUID cannot be named
+    /// without reading the QoS row. A queue still referenced by one is therefore
+    /// refused by ovsdb-server for referential integrity — remove its entry with
+    /// `updateQoSPolicy` first.
     public func deleteQueue(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVSTable.queue, in: database, where: [condition])
@@ -770,12 +801,18 @@ public final class OVSManager: OVSManaging {
     // MARK: - Statistics Operations
 
     nonisolated public func getBridgeStatistics(bridge: String) async throws(OVNManagerError) -> StatisticsDictionary {
-        // Bridge statistics are available in the status column
+        // The Bridge table has no statistics column; what is available is the
+        // state ovs-vswitchd publishes in `status` plus the `other_config` that
+        // shapes it.
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(bridge))
         let rows = try await connection.select(from: OVSTable.bridge, in: database, where: [condition], columns: ["status", "other_config"])
 
+        // A missing bridge is an error, not an empty result: returning `[:]` was
+        // indistinguishable from a bridge that exists and has both columns
+        // empty, so a monitoring caller recorded a bridge that was gone as
+        // healthy-but-idle.
         guard let firstRow = rows.first else {
-            return [:]
+            throw OVNManagerError.operationFailed("Bridge not found: \(bridge)")
         }
 
         var result: StatisticsDictionary = [:]
@@ -950,6 +987,35 @@ private extension OVSManager {
     /// Looks up a row's _uuid via a narrow select, avoiding full-row model
     /// decoding (which currently chokes on OVSDB's bare-atom/empty-set
     /// representations for some columns). Returns nil when no row matches.
+    /// The UUID of the *one* row matching `condition`, throwing if none matches
+    /// or if more than one does. Used where resolving an arbitrary match would
+    /// mean deleting or detaching something the caller did not name.
+    func singleRowUUID(
+        in table: String,
+        where condition: OVSDBCondition,
+        describedAs description: String
+    ) async throws(OVNManagerError) -> String {
+        let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
+
+        guard !rows.isEmpty else {
+            throw OVNManagerError.operationFailed("\(description) not found")
+        }
+        guard rows.count == 1 else {
+            throw OVNManagerError.operationFailed(
+                """
+                \(description) is ambiguous: \(rows.count) rows in \(table) match. Use the UUID \
+                variant instead.
+                """
+            )
+        }
+        guard case .array(let uuidArray)? = rows[0]["_uuid"],
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid _uuid in select response")
+        }
+        return uuidValue
+    }
+
     func rowUUID(in table: String, where condition: OVSDBCondition) async throws(OVNManagerError) -> String? {
         let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
 

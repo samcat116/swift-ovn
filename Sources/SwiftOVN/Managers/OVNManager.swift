@@ -157,17 +157,47 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
+    /// Replaces the whole row.
+    ///
+    /// Two things follow from "the whole row" that are easy to be bitten by:
+    ///
+    /// - `ports`, `acls`, `qos_rules` and `forwarding_groups` are **strong**
+    ///   references. Reading a switch, changing one field and writing the model
+    ///   back also rewrites those sets to what they were at the read, so a port
+    ///   another client attached in between loses its only reference and is
+    ///   garbage-collected when this commits — reported as a successful update.
+    ///   Leave those properties nil (unset optionals are omitted from the row
+    ///   entirely) unless you mean to replace the membership.
+    /// - The weak-reference columns are guarded below, so a stale UUID fails
+    ///   the transaction instead of being silently dropped.
     public func updateLogicalSwitch(uuid: String, _ logicalSwitch: OVNLogicalSwitch) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: logicalSwitch)
-        
-        let count = try await connection.update(table: OVNTable.logicalSwitch, in: database, where: [condition], row: row)
-        
+
+        let count = try await updateGuarded(
+            row: row,
+            in: OVNTable.logicalSwitch,
+            uuid: uuid,
+            guardOperations: logicalSwitchWeakReferenceWaitOps(logicalSwitch)
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("Logical switch not found: \(uuid)")
         }
-        
+
         logger.info("Updated logical switch: \(logicalSwitch.name)")
+    }
+
+    /// The existence guards for every weak-reference column an
+    /// `OVNLogicalSwitch` row can carry. ovsdb-server drops a stale UUID from a
+    /// weak column and reports the write as succeeding, so without these a load
+    /// balancer or DNS record deleted since the caller read the switch leaves it
+    /// attached to nothing, silently.
+    private func logicalSwitchWeakReferenceWaitOps(_ logicalSwitch: OVNLogicalSwitch) -> [OVSDBOperation] {
+        var operations = rowExistenceWaitOps(logicalSwitch.dnsRecords ?? [], in: OVNTable.dns)
+        operations += rowExistenceWaitOps(logicalSwitch.loadBalancer ?? [], in: OVNTable.loadBalancer)
+        operations += rowExistenceWaitOps(logicalSwitch.loadBalancerGroup ?? [], in: OVNTable.loadBalancerGroup)
+        operations += rowExistenceWaitOps(logicalSwitch.copp.map { [$0] } ?? [], in: OVNTable.copp)
+        return operations
     }
     
     public func deleteLogicalSwitch(uuid: String) async throws(OVNManagerError) {
@@ -181,14 +211,17 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical switch: \(uuid)")
     }
     
+    /// Deletes the switch with this name, refusing an ambiguous one — see
+    /// `singleRowUUID(in:where:describedAs:)`.
     public func deleteLogicalSwitch(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let count = try await connection.delete(from: OVNTable.logicalSwitch, in: database, where: [condition])
-        
-        if count == 0 {
-            throw OVNManagerError.operationFailed("Logical switch not found: \(name)")
-        }
-        
+        let uuid = try await singleRowUUID(
+            in: OVNTable.logicalSwitch,
+            where: condition,
+            describedAs: "Logical switch \(name)"
+        )
+
+        try await deleteLogicalSwitch(uuid: uuid)
         logger.info("Deleted logical switch: \(name)")
     }
     
@@ -235,31 +268,57 @@ public final class OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
         }
 
-        let uuidValue = try await connection.insertAttached(
-            into: OVNTable.logicalSwitchPort,
-            in: database,
+        // The port's weak references are guarded in the same transaction, as
+        // `createStaticRoute` guards `bfd`: a DHCP_Options row deleted since the
+        // caller looked it up would otherwise be dropped from the insert,
+        // committing a port with no DHCP and no error to show for it.
+        let guardOps = logicalSwitchPortWeakReferenceWaitOps(port)
+        let attachOps = OVSDBReferenceTransactions.insertAttached(
             row: try createRow(from: port),
+            into: OVNTable.logicalSwitchPort,
             uuidName: "new_lsp",
             parentTable: OVNTable.logicalSwitch,
             parentColumn: "ports",
             parentCondition: switchCondition
         )
 
+        let results = try await connection.transact(in: database, operations: guardOps + attachOps)
+
+        // attachOps is wait(switch) → insert → mutate, so the insert's result
+        // sits one past the guards.
+        let uuidValue = try OVSDBConnection.uuid(fromInsertResults: results, at: guardOps.count + 1)
+
         logger.info("Created logical switch port: \(port.name) on switch: \(switchName)")
         return uuidValue
     }
     
     public func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: port)
-        
-        let count = try await connection.update(table: OVNTable.logicalSwitchPort, in: database, where: [condition], row: row)
-        
+
+        let count = try await updateGuarded(
+            row: row,
+            in: OVNTable.logicalSwitchPort,
+            uuid: uuid,
+            guardOperations: logicalSwitchPortWeakReferenceWaitOps(port)
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(uuid)")
         }
-        
+
         logger.info("Updated logical switch port: \(port.name)")
+    }
+
+    /// The existence guards for an `OVNLogicalSwitchPort`'s weak-reference
+    /// columns. Both `dhcpv4_options` and `dhcpv6_options` reference the one
+    /// Northbound `DHCP_Options` table. Without these a port created or updated
+    /// against a DHCP_Options row deleted moments earlier silently ends up with
+    /// no DHCP at all.
+    private func logicalSwitchPortWeakReferenceWaitOps(_ port: OVNLogicalSwitchPort) -> [OVSDBOperation] {
+        let dhcpOptions = [port.dhcpv4_options, port.dhcpv6_options].compactMap { $0 }
+        var operations = rowExistenceWaitOps(dhcpOptions, in: OVNTable.dhcpOptions)
+        operations += rowExistenceWaitOps(port.mirror_rules ?? [], in: OVNTable.mirror)
+        return operations
     }
     
     public func deleteLogicalSwitchPort(uuid: String) async throws(OVNManagerError) {
@@ -304,9 +363,35 @@ public final class OVNManager: OVNManaging {
     }
     
     public func createLogicalRouter(_ router: OVNLogicalRouter) async throws(OVNManagerError) -> String {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(router.name))
+
+        guard try await rowUUID(in: OVNTable.logicalRouter, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Logical router already exists: \(router.name)")
+        }
+
         let row = try createRow(from: router)
-        let result = try await connection.insert(into: OVNTable.logicalRouter, in: database, row: row)
-        
+
+        // `Logical_Router.name` is as unindexed as `Logical_Switch.name`, so the
+        // same guard applies: without it two concurrent creates both succeed and
+        // leave two routers with one name, after which every name-keyed call is
+        // wrong — the attach mutate in `createLogicalRouterPort(_:onRouter:)`
+        // matches both, and `deleteLogicalRouter(named:)` refuses as ambiguous.
+        // `ovn-nbctl lr-add` refuses the duplicate for the same reason.
+        let operations: [OVSDBOperation] = [
+            .wait(
+                OVNTable.logicalRouter,
+                where: [nameCondition],
+                columns: ["name"],
+                rows: [],
+                until: "==",
+                timeout: 0
+            ),
+            .insert(into: OVNTable.logicalRouter, row: row)
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+        let result = results.count > 1 ? results[1] : .null
+
         guard case .object(let resultObject) = result,
               let uuid = resultObject["uuid"],
               case .array(let uuidArray) = uuid,
@@ -319,16 +404,29 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
+    /// Replaces the whole row. The same two hazards as `updateLogicalSwitch`
+    /// apply: `ports`, `static_routes`, `policies` and `nat` are strong
+    /// references and are rewritten from whatever the model carries — leave them
+    /// nil unless replacing the membership is the intent — while the weak
+    /// columns are guarded below.
     public func updateLogicalRouter(uuid: String, _ router: OVNLogicalRouter) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: router)
-        
-        let count = try await connection.update(table: OVNTable.logicalRouter, in: database, where: [condition], row: row)
-        
+
+        var guards = rowExistenceWaitOps(router.load_balancer ?? [], in: OVNTable.loadBalancer)
+        guards += rowExistenceWaitOps(router.load_balancer_group ?? [], in: OVNTable.loadBalancerGroup)
+        guards += rowExistenceWaitOps(router.copp.map { [$0] } ?? [], in: OVNTable.copp)
+
+        let count = try await updateGuarded(
+            row: row,
+            in: OVNTable.logicalRouter,
+            uuid: uuid,
+            guardOperations: guards
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("Logical router not found: \(uuid)")
         }
-        
+
         logger.info("Updated logical router: \(router.name)")
     }
     
@@ -343,14 +441,17 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical router: \(uuid)")
     }
     
+    /// Deletes the router with this name, refusing an ambiguous one — see
+    /// `singleRowUUID(in:where:describedAs:)`.
     public func deleteLogicalRouter(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let count = try await connection.delete(from: OVNTable.logicalRouter, in: database, where: [condition])
-        
-        if count == 0 {
-            throw OVNManagerError.operationFailed("Logical router not found: \(name)")
-        }
-        
+        let uuid = try await singleRowUUID(
+            in: OVNTable.logicalRouter,
+            where: condition,
+            describedAs: "Logical router \(name)"
+        )
+
+        try await deleteLogicalRouter(uuid: uuid)
         logger.info("Deleted logical router: \(name)")
     }
     
@@ -1216,14 +1317,19 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted load balancer: \(uuid)")
     }
     
+    /// Deletes the load balancer with this name, refusing an ambiguous one.
+    /// Two load balancers may legally carry the same name — which is why the
+    /// health-check calls identify theirs by UUID — so this is the one that
+    /// refuses most often in practice.
     public func deleteLoadBalancer(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        let count = try await connection.delete(from: OVNTable.loadBalancer, in: database, where: [condition])
-        
-        if count == 0 {
-            throw OVNManagerError.operationFailed("Load balancer not found: \(name)")
-        }
-        
+        let uuid = try await singleRowUUID(
+            in: OVNTable.loadBalancer,
+            where: condition,
+            describedAs: "Load balancer \(name)"
+        )
+
+        try await deleteLoadBalancer(uuid: uuid)
         logger.info("Deleted load balancer: \(name)")
     }
 
@@ -1502,31 +1608,53 @@ public final class OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
         }
 
-        let uuidValue = try await connection.insertAttached(
-            into: OVNTable.nat,
-            in: database,
+        // Guarded like the static-route create: a stale `gateway_port` would be
+        // dropped from the insert and commit a rule with no gateway port, which
+        // on a router with more than one distributed gateway port changes where
+        // the rule applies.
+        let guardOps = natWeakReferenceWaitOps(nat)
+        let attachOps = OVSDBReferenceTransactions.insertAttached(
             row: try createRow(from: nat),
+            into: OVNTable.nat,
             uuidName: "new_nat",
             parentTable: OVNTable.logicalRouter,
             parentColumn: "nat",
             parentCondition: routerCondition
         )
 
+        let results = try await connection.transact(in: database, operations: guardOps + attachOps)
+        let uuidValue = try OVSDBConnection.uuid(fromInsertResults: results, at: guardOps.count + 1)
+
         logger.info("Created NAT rule on router: \(routerName)")
         return uuidValue
     }
     
     public func updateNATRule(uuid: String, _ nat: OVNNAT) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: nat)
-        
-        let count = try await connection.update(table: OVNTable.nat, in: database, where: [condition], row: row)
-        
+
+        let count = try await updateGuarded(
+            row: row,
+            in: OVNTable.nat,
+            uuid: uuid,
+            guardOperations: natWeakReferenceWaitOps(nat)
+        )
+
         if count == 0 {
             throw OVNManagerError.operationFailed("NAT rule not found: \(uuid)")
         }
-        
+
         logger.info("Updated NAT rule: \(uuid)")
+    }
+
+    /// The existence guards for an `OVNNAT`'s weak-reference columns. A stale
+    /// `gateway_port` is the one that hurts most quietly: dropped, the rule
+    /// commits with no gateway port at all, which on a router with more than one
+    /// distributed gateway port changes where the rule applies.
+    private func natWeakReferenceWaitOps(_ nat: OVNNAT) -> [OVSDBOperation] {
+        let addressSets = [nat.allowed_ext_ips, nat.exempted_ext_ips].compactMap { $0 }
+        var operations = rowExistenceWaitOps(addressSets, in: OVNTable.addressSet)
+        operations += rowExistenceWaitOps(nat.gateway_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
+        return operations
     }
     
     public func deleteNATRule(uuid: String) async throws(OVNManagerError) {
@@ -2865,6 +2993,42 @@ private extension OVNManager {
 
         guard let row = rows.first else { return nil }
         guard case .array(let uuidArray)? = row["_uuid"],
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid _uuid in select response")
+        }
+        return uuidValue
+    }
+
+    /// The UUID of the *one* row matching `condition`, throwing if none matches
+    /// or if more than one does.
+    ///
+    /// The delete-by-name entry points resolve through this rather than issuing
+    /// `delete where name == X` directly. Most Northbound tables do not index
+    /// `name` — this file already relies on that for load balancers, which "may
+    /// legally carry the same name" — and a conditional delete removes *every*
+    /// matching row, reporting the same `count > 0` success for two deletions as
+    /// for one. A caller asking to delete "the" row by name never meant "and any
+    /// namesake"; `ovn-nbctl` refuses an ambiguous name too.
+    func singleRowUUID(
+        in table: String,
+        where condition: OVSDBCondition,
+        describedAs description: String
+    ) async throws(OVNManagerError) -> String {
+        let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
+
+        guard !rows.isEmpty else {
+            throw OVNManagerError.operationFailed("\(description) not found")
+        }
+        guard rows.count == 1 else {
+            throw OVNManagerError.operationFailed(
+                """
+                \(description) is ambiguous: \(rows.count) rows in \(table) match. Delete it by \
+                UUID instead.
+                """
+            )
+        }
+        guard case .array(let uuidArray)? = rows[0]["_uuid"],
               uuidArray.count == 2,
               case .string(let uuidValue) = uuidArray[1] else {
             throw OVNManagerError.invalidResponse("Invalid _uuid in select response")

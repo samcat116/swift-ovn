@@ -70,7 +70,7 @@ struct OVNManagerTests {
 
     @Test("The add mutation builder fills in column, mutator and value")
     func ovsdbMutationCreation() throws {
-        let mutation = OVSDBMutation.add(column: "count", value: 5)
+        let mutation = try OVSDBMutation.add(column: "count", value: 5)
 
         #expect(mutation.column == "count")
         #expect(mutation.mutator == "+=")

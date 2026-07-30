@@ -169,7 +169,11 @@ actor OVSDBConnectionCore {
         // actor, so the teardown can acquire it.
         if let supervisor {
             await supervisor.value
-            self.supervisor = nil
+            // Only if it is still the one that was awaited — see the matching
+            // check in `disconnect()`.
+            if self.supervisor == supervisor {
+                self.supervisor = nil
+            }
         }
 
         isStopping = false
@@ -451,7 +455,18 @@ actor OVSDBConnectionCore {
         // Interrupts a backoff sleep; the supervisor then sees `isStopping`.
         supervisor.cancel()
         await supervisor.value
-        self.supervisor = nil
+        // Cleared only if it is still the supervisor this call awaited. A
+        // `connect()` blocked on the same task resumes first on the same actor,
+        // installs a *new* supervisor and returns; clearing the handle then
+        // dropped the only reference to a running supervisor. Nothing could
+        // stop it afterwards — every later `disconnect()`, including the
+        // `shutdown()` from `OVSDBSocketConnection.deinit`, returns at the
+        // `guard let supervisor` above — so it reconnected forever, holding the
+        // core and its event loops alive, which is exactly what that guarantee
+        // exists to prevent.
+        if self.supervisor == supervisor {
+            self.supervisor = nil
+        }
         logger.info("Successfully disconnected")
     }
 
@@ -528,6 +543,18 @@ actor OVSDBConnectionCore {
             id: requestId
         )
 
+        // Recorded before the request goes out, not after the reply is read.
+        // ovsdb-server can create the monitor and answer late — past the
+        // timeout below — and an id this connection has not recorded is an id
+        // `handleNotification` cannot match, so every `_Server` update for it
+        // was published to the hub and reached callers' monitor streams as
+        // `Database` rows they never asked for. Leaving it unrecorded also cost
+        // the leadership tracking: a later loss of leadership on this session
+        // never reached `handleServerStatusUpdate`, so a leader-only connection
+        // sat on a follower until a write failed. Recording an id for a monitor
+        // the server ends up refusing is harmless — nothing will ever quote it.
+        serverMonitorId = monitorId
+
         let response: JSONRPCResponse<JSONValue>
         do {
             response = try await sendRequest(
@@ -553,11 +580,6 @@ actor OVSDBConnectionCore {
             logger.warning("\(endpoint) cannot report leadership of \(database) (\(detail)); using it anyway")
             return
         }
-        // Recorded only now: before the reply arrives there is nothing to
-        // intercept, and an unrecorded id would leak `_Server` rows into the
-        // caller's monitor stream.
-        serverMonitorId = monitorId
-
         switch OVSDBServerStatus.leadership(ofDatabase: database, in: updates) {
         case .leader:
             logger.debug("\(endpoint) is the leader of \(database)")
@@ -670,10 +692,14 @@ actor OVSDBConnectionCore {
         promise: EventLoopPromise<Response>,
         timeout: TimeAmount
     ) {
-        let timeoutTask = Task.detached { [weak self] in
-            try? await Task.sleep(for: .nanoseconds(max(0, timeout.nanoseconds)))
-            guard !Task.isCancelled else { return }
-            await self?.expire(id)
+        // Scheduled on the event loop the promise already lives on, rather than
+        // a detached task parked in `Task.sleep`. That cost a task allocation, a
+        // clock registration and — on the overwhelmingly common fast path — a
+        // cancellation, for *every* request, including the small transacts a
+        // busy caller issues thousands of times a second. A task is now spawned
+        // only when a request actually times out, to hop back onto the actor.
+        let timeoutTask: Scheduled<Void> = promise.futureResult.eventLoop.scheduleTask(in: timeout) { [weak self] in
+            _ = Task { await self?.expire(id) }
         }
         let request = PendingRequest(
             timeoutTask: timeoutTask,
@@ -810,7 +836,7 @@ actor OVSDBConnectionCore {
 /// so one map can hold requests with differing response types without an
 /// existential wrapper.
 private struct PendingRequest {
-    let timeoutTask: Task<Void, Never>
+    let timeoutTask: Scheduled<Void>
     /// Decodes the response frame and completes the waiter.
     let deliver: (ByteBuffer) -> Void
     let fail: (Error) -> Void
