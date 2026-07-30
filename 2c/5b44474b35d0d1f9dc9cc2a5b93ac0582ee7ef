@@ -1,0 +1,24 @@
+Tests/SwiftOVNTests/ClusterConnectionTests.swift
+  s_1878efc2a618f9::t_753da9546fb5a3 996-997
+  s_1878efc2a618f9::t_54dc2dec08ee80 339-342
+CLAUDE.md
+  s_1878efc2a618f9::t_f5a29c3a462ccc 193-195
+Sources/SwiftOVN/Core/OVSDBConnectionCore.swift
+  s_1878efc2a618f9::t_ff5547d6a9a5b7 526-529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "2c5b44474b35d0d1f9dc9cc2a5b93ac0582ee7ef",
+  "prompts": {},
+  "sessions": {
+    "s_1878efc2a618f9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3fc6db85-9f1c-4c95-ac26-3d8d50b2db44",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
