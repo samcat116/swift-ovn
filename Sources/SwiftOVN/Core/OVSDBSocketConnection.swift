@@ -1,5 +1,17 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import NIO
+import NIOConcurrencyHelpers
 import NIOPosix
 #if TLS
 import NIOSSL
@@ -33,14 +45,14 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
     /// `connect()` calls each bootstrapping their own channel (which would
     /// leak all but the last). All access is under `connectionLock`.
     private var inFlightConnect: EventLoopFuture<Void>?
-    private let connectionLock = NSLock()
+    private let connectionLock = NIOLock()
     private let notificationHub: JSONRPCNotificationHub
     /// Reused across sends: constructing a `JSONEncoder` is not free, and one
     /// per outbound request adds up on the paths that write large transactions
     /// (a port-group update emits a `wait` op per port). Its configuration is
     /// never mutated after this point, so concurrent `encode` calls only read
     /// it — the same reason `JSONRPCResponseRouter` keeps a single decoder.
-    private let encoder = Foundation.JSONEncoder()
+    private let encoder = JSONEncoder()
 
     public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.endpoint = endpoint
@@ -122,7 +134,10 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             notificationHub: notificationHub
         )
 
-        if case .unix(let path) = endpoint, !FileManager.default.fileExists(atPath: path) {
+        // `access(F_OK)` rather than `FileManager.fileExists` — the answer is
+        // advisory either way (the socket can vanish before connect(2)), and
+        // this keeps the file off full Foundation.
+        if case .unix(let path) = endpoint, access(path, F_OK) != 0 {
             logger.error("Socket file does not exist at path: \(path)")
             return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(path)"))
         }
@@ -492,7 +507,7 @@ final class JSONRPCNotificationHub: @unchecked Sendable {
         var pendingDrops: Int = 0
     }
 
-    private let lock = NSLock()
+    private let lock = NIOLock()
     private let bufferSize: Int
     private let logger: Logger
     private var subscribers: [UUID: Subscriber] = [:]
@@ -639,9 +654,12 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
     typealias InboundIn = String
 
     private let logger: Logger
-    private let decoder = Foundation.JSONDecoder()
+    private let decoder = JSONDecoder()
+    /// Only used for echo replies, which are rare, but held for the same reason
+    /// as `decoder`: never reconfigured after init, so concurrent use is reads.
+    private let encoder = JSONEncoder()
     private var pendingRequests: [JSONRPCIdentifier: PendingRequestProtocol] = [:]
-    private let lock = NSLock()
+    private let lock = NIOLock()
     private var eventLoop: EventLoop?
     private let eventLoopGroup: EventLoopGroup
     private let notificationHub: JSONRPCNotificationHub
@@ -660,34 +678,33 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
         let message = unwrapInboundIn(data)
         logger.debug("Received raw message: \(message)")
 
-        guard let messageData = message.data(using: .utf8) else {
-            logger.error("Failed to convert message to UTF-8 data")
-            return
-        }
+        let messageData = Data(message.utf8)
 
-        guard let jsonObject = (try? JSONSerialization.jsonObject(with: messageData, options: [])) as? [String: Any] else {
+        guard let envelope = try? decoder.decode(InboundEnvelope.self, from: messageData) else {
             logger.error("Failed to parse inbound message as a JSON object")
             return
         }
 
-        let idValue = jsonObject["id"]
-        let hasRealId = idValue != nil && !(idValue is NSNull)
+        // A null id and an absent id both mean "not a real id" here, and
+        // `JSONValue` decodes null to `.null`, so both collapse to nil.
+        let idValue: JSONValue? = envelope.id == .null ? nil : envelope.id
 
-        if let method = jsonObject["method"] as? String {
-            if hasRealId {
+        if let method = envelope.method {
+            if let idValue {
                 // Server-to-client request; a reply is expected.
-                handleServerRequest(context: context, method: method, jsonObject: jsonObject)
+                handleServerRequest(context: context, method: method, envelope: envelope, id: idValue)
             } else {
                 // JSON-RPC marks notifications with a null (or absent) id.
-                handleNotification(messageData: messageData, method: method)
+                handleNotification(method: method, params: envelope.params)
             }
-        } else if hasRealId {
-            let responseId: JSONRPCIdentifier
-            if let idNumber = idValue as? Int {
-                responseId = .number(idNumber)
-            } else if let idString = idValue as? String {
-                responseId = .string(idString)
-            } else {
+        } else if let idValue {
+            let candidate: JSONRPCIdentifier? = switch idValue {
+            case .number(let number): Int(exactly: number).map { .number($0) }
+            case .string(let string): .string(string)
+            default: nil
+            }
+
+            guard let responseId = candidate else {
                 logger.debug("Received response with unsupported ID type, ignoring")
                 return
             }
@@ -699,21 +716,22 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
         }
     }
 
-    private func handleServerRequest(context: ChannelHandlerContext, method: String, jsonObject: [String: Any]) {
+    private func handleServerRequest(
+        context: ChannelHandlerContext,
+        method: String,
+        envelope: InboundEnvelope,
+        id: JSONValue
+    ) {
         guard method == "echo" else {
             logger.warning("Received unsupported server-to-client request '\(method)', ignoring")
             return
         }
 
         // RFC 7047 §4.1.11: the echo reply's result mirrors the request params.
-        let reply: [String: Any] = [
-            "id": jsonObject["id"] ?? NSNull(),
-            "result": jsonObject["params"] ?? [Any](),
-            "error": NSNull()
-        ]
+        let reply = EchoReply(id: id, result: envelope.params ?? .array([]))
 
         do {
-            let data = try JSONSerialization.data(withJSONObject: reply)
+            let data = try encoder.encode(reply)
             var buffer = context.channel.allocator.buffer(capacity: data.count + 1)
             buffer.writeBytes(data)
             buffer.writeInteger(UInt8(ascii: "\n"))
@@ -724,14 +742,9 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
         }
     }
 
-    private func handleNotification(messageData: Data, method: String) {
-        do {
-            let inbound = try decoder.decode(InboundNotificationMessage.self, from: messageData)
-            logger.debug("Dispatching notification: \(method)")
-            notificationHub.publish(JSONRPCNotification(method: inbound.method, params: inbound.params))
-        } catch {
-            logger.error("Failed to decode notification '\(method)': \(error)")
-        }
+    private func handleNotification(method: String, params: JSONValue?) {
+        logger.debug("Dispatching notification: \(method)")
+        notificationHub.publish(JSONRPCNotification(method: method, params: params))
     }
 
     private func handleResponse(responseId: JSONRPCIdentifier, messageData: Data) {
@@ -808,9 +821,22 @@ final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandle
     }
 }
 
-private struct InboundNotificationMessage: Decodable {
-    let method: String
+/// The parts of an inbound JSON-RPC message the router needs to classify it.
+///
+/// `id` is kept as a `JSONValue` rather than a `JSONRPCIdentifier` so an echo
+/// request is answered with its id echoed back verbatim, whatever its JSON
+/// type — RFC 7047 does not constrain the ids ovsdb-server picks.
+private struct InboundEnvelope: Decodable {
+    let method: String?
+    let id: JSONValue?
     let params: JSONValue?
+}
+
+/// The reply to a server `echo`. `error` is always JSON null.
+private struct EchoReply: Encodable {
+    let id: JSONValue
+    let result: JSONValue
+    let error: JSONValue = .null
 }
 
 private protocol PendingRequestProtocol {

@@ -50,8 +50,11 @@ let package = Package(
             name: "SwiftOVN",
             dependencies: [
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOFoundationCompat", package: "swift-nio"),
+                // No NIOFoundationCompat: nothing imports it, and it is a
+                // pure-Foundation module, so keeping it would drag Foundation
+                // into the link graph the source files just stopped needing.
                 .product(name: "NIOTLS", package: "swift-nio", condition: .when(traits: ["TLS"])),
                 .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(traits: ["TLS"])),
                 .product(name: "Logging", package: "swift-log"),

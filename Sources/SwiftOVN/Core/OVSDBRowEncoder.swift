@@ -1,4 +1,19 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
+
+/// A value that cannot be expressed in OVSDB's wire format.
+///
+/// `EncodingError` does not fit: nothing here is a `Codable` container failure —
+/// the value encoded fine, it just has no RFC 7047 spelling. This is what
+/// `OVNManagerError.encodingError` carries in that case.
+struct OVSDBRowEncodingError: Error, CustomStringConvertible, LocalizedError {
+    let description: String
+
+    var errorDescription: String? { description }
+}
 
 /// Builds OVSDB wire-format rows (RFC 7047) from `Codable` models.
 ///
@@ -84,9 +99,7 @@ enum OVSDBRowEncoder {
             let encoded = try JSONValueEncoder.encode(object)
             guard case .object(let columns) = encoded else {
                 throw OVNManagerError.encodingError(
-                    NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
-                        NSLocalizedDescriptionKey: "A row must encode to a JSON object, got \(encoded)",
-                    ])
+                    OVSDBRowEncodingError(description: "A row must encode to a JSON object, got \(encoded)")
                 )
             }
 
@@ -144,9 +157,7 @@ enum OVSDBRowEncoder {
             return isUUIDRef ? .array([.string("uuid"), .string(string)]) : value
         case .array, .object:
             throw OVNManagerError.encodingError(
-                NSError(domain: "OVSDBRowEncoder", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "Unsupported atom for OVSDB wire conversion: \(value)",
-                ])
+                OVSDBRowEncodingError(description: "Unsupported atom for OVSDB wire conversion: \(value)")
             )
         }
     }
