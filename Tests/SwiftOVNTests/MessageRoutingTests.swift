@@ -1,34 +1,109 @@
 import XCTest
-import NIO
+import NIOCore
+import NIOEmbedded
+import NIOPosix
 import Logging
 @testable import SwiftOVN
+
+/// Thrown by `withDeadline` when the operation under test never completes.
+private struct DeadlineExceeded: Error {}
 
 /// Tests for the inbound JSON-RPC message routing: notifications (null/absent
 /// id) reach subscribers, server `echo` requests are answered, responses are
 /// matched to pending requests, and connection loss fails everything cleanly.
+///
+/// `OVSDBConnectionCore.consumeInbound` is driven with NIO's testing inbound
+/// stream and outbound writer, so these exercise the same code path a socket
+/// does without needing one.
 final class MessageRoutingTests: XCTestCase {
 
-    private func makeChannel(notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize) -> (channel: EmbeddedChannel, hub: JSONRPCNotificationHub, router: JSONRPCResponseRouter) {
-        let hub = JSONRPCNotificationHub(bufferSize: notificationBufferSize, logger: Logger(label: "test"))
-        let loop = EmbeddedEventLoop()
-        let router = JSONRPCResponseRouter(
-            logger: Logger(label: "test"),
-            eventLoopGroup: loop,
-            notificationHub: hub
-        )
-        let channel = EmbeddedChannel(handler: router, loop: loop)
-        return (channel, hub, router)
+    private var group: MultiThreadedEventLoopGroup!
+
+    override func setUp() {
+        super.setUp()
+        group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    /// Reads the router's next outbound write and parses it as a JSON object.
-    /// The router writes raw bytes — nothing downstream serializes for it — so
-    /// the reply arrives as a `ByteBuffer`.
-    private func readOutboundObject(from channel: EmbeddedChannel) throws -> [String: Any]? {
-        guard var buffer = try channel.readOutbound(as: ByteBuffer.self),
-              let bytes = buffer.readBytes(length: buffer.readableBytes) else {
-            return nil
+    override func tearDown() {
+        try? group.syncShutdownGracefully()
+        group = nil
+        super.tearDown()
+    }
+
+    /// A core driven by a test stream, plus the handles to feed it frames and
+    /// read what it wrote.
+    private struct Harness {
+        let core: OVSDBConnectionCore
+        let source: NIOAsyncChannelInboundStream<ByteBuffer>.TestSource
+        let written: NIOAsyncChannelOutboundWriter<ByteBuffer>.TestSink
+        let loop: Task<Void, Never>
+
+        /// Feeds one framed JSON-RPC message in, exactly as the framer would.
+        func receive(_ json: String) {
+            source.yield(ByteBuffer(string: json))
         }
-        return try JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any]
+
+        /// Ends the connection: cleanly when `error` is nil, otherwise as a
+        /// failure the read loop propagates.
+        func endConnection(throwing error: Error? = nil) async {
+            source.finish(throwing: error)
+            await loop.value
+        }
+    }
+
+    private func makeHarness(notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize) async throws -> Harness {
+        // A stand-in for the socket channel: the core only reads `isActive` off
+        // it, since writes go through the outbound writer.
+        let channel = EmbeddedChannel()
+        try await channel.connect(to: SocketAddress(unixDomainSocketPath: "/tmp/swiftovn-routing-test"))
+
+        let core = OVSDBConnectionCore(
+            endpoint: .unix(path: "/tmp/swiftovn-routing-test"),
+            eventLoopGroup: group,
+            logger: Logger(label: "test"),
+            notificationBufferSize: notificationBufferSize
+        )
+        let (inbound, source) = NIOAsyncChannelInboundStream<ByteBuffer>.makeTestingStream()
+        let (outbound, written) = NIOAsyncChannelOutboundWriter<ByteBuffer>.makeTestingWriter()
+
+        let loop = Task {
+            await core.consumeInbound(channel: channel, inbound: inbound, outbound: outbound)
+        }
+
+        // consumeInbound installs the write side first; wait for that so a test
+        // can send straight away.
+        for _ in 0..<10_000 where !core.isConnected {
+            await Task.yield()
+        }
+        XCTAssertTrue(core.isConnected, "read loop never activated the session")
+
+        return Harness(core: core, source: source, written: written, loop: loop)
+    }
+
+    /// Runs `operation` with a deadline, so a regression that stops a stream
+    /// from ever finishing fails the test instead of hanging the suite.
+    private func withDeadline<T: Sendable>(
+        _ seconds: Double = 2,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw DeadlineExceeded()
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    /// Decodes one message the core wrote.
+    private func nextWritten(
+        _ iterator: inout NIOAsyncChannelOutboundWriter<ByteBuffer>.TestSink.AsyncIterator
+    ) async throws -> [String: Any] {
+        let next = await iterator.next()
+        let frame = try XCTUnwrap(next, "Expected the core to write a frame")
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(buffer: frame)) as? [String: Any])
     }
 
     /// Unwraps a notification event, returning nil for a drop report.
@@ -36,6 +111,389 @@ final class MessageRoutingTests: XCTestCase {
         guard case .notification(let notification)? = event else { return nil }
         return notification
     }
+
+    // MARK: - Notifications
+
+    func testUpdateNotificationWithNullIdIsDispatched() async throws {
+        let harness = try await makeHarness()
+        let stream = harness.core.notificationHub.subscribe()
+
+        // Real ovsdb-server update notifications carry "id": null.
+        harness.receive(#"{"method":"update","params":["mon1",{"Logical_Switch":{"aa-bb":{"new":{"name":"ls0"}}}}],"id":null}"#)
+
+        var iterator = stream.makeAsyncIterator()
+        let notification = notification(await iterator.next())
+
+        XCTAssertEqual(notification?.method, "update")
+        guard let notification,
+              case .array(let params)? = notification.params,
+              params.count == 2,
+              case .string(let monitorId) = params[0] else {
+            XCTFail("Expected array params with monitor ID first")
+            return
+        }
+        XCTAssertEqual(monitorId, "mon1")
+
+        await harness.endConnection()
+    }
+
+    func testNotificationWithoutIdKeyIsDispatched() async throws {
+        let harness = try await makeHarness()
+        let stream = harness.core.notificationHub.subscribe()
+
+        harness.receive(#"{"method":"update","params":["mon2",{}]}"#)
+
+        var iterator = stream.makeAsyncIterator()
+        let received = notification(await iterator.next())
+        XCTAssertEqual(received?.method, "update")
+
+        await harness.endConnection()
+    }
+
+    func testNotificationsAreBufferedBetweenReads() async throws {
+        let harness = try await makeHarness()
+        let stream = harness.core.notificationHub.subscribe()
+
+        // Deliver several notifications before the consumer starts iterating;
+        // none may be dropped.
+        for index in 1...3 {
+            harness.receive(#"{"method":"update","params":["mon\#(index)",{}],"id":null}"#)
+        }
+
+        var received: [String] = []
+        var iterator = stream.makeAsyncIterator()
+        for _ in 1...3 {
+            guard let notification = notification(await iterator.next()),
+                  case .array(let params)? = notification.params,
+                  case .string(let monitorId) = params[0] else {
+                XCTFail("Missing buffered notification")
+                return
+            }
+            received.append(monitorId)
+        }
+        XCTAssertEqual(received, ["mon1", "mon2", "mon3"])
+
+        await harness.endConnection()
+    }
+
+    func testEverySubscriberReceivesEachNotification() async throws {
+        let harness = try await makeHarness()
+        let first = harness.core.notificationHub.subscribe()
+        let second = harness.core.notificationHub.subscribe()
+
+        harness.receive(#"{"method":"update","params":["mon1",{}],"id":null}"#)
+
+        var firstIterator = first.makeAsyncIterator()
+        var secondIterator = second.makeAsyncIterator()
+        let fromFirst = notification(await firstIterator.next())
+        let fromSecond = notification(await secondIterator.next())
+        XCTAssertEqual(fromFirst?.method, "update")
+        XCTAssertEqual(fromSecond?.method, "update")
+
+        await harness.endConnection()
+    }
+
+    func testLaggingSubscriberIsBoundedAndToldAboutTheGap() async throws {
+        // The point of the bounded buffer: a consumer that stops reading must
+        // not make the process grow, and must be told it lost updates rather
+        // than silently receiving an incomplete picture.
+        let harness = try await makeHarness(notificationBufferSize: 2)
+        let stream = harness.core.notificationHub.subscribe()
+
+        for index in 1...6 {
+            harness.receive(#"{"method":"update","params":["mon\#(index)",{}],"id":null}"#)
+        }
+
+        // The consumer must not read anything until the buffer has overflowed,
+        // or it would keep up and there would be nothing to report. The read
+        // loop is strictly sequential, so an echo reply arriving proves all six
+        // updates were published first.
+        harness.receive(#"{"method":"echo","params":[],"id":99}"#)
+        var writtenIterator = harness.written.makeAsyncIterator()
+        let reply = try await nextWritten(&writtenIterator)
+        XCTAssertEqual(reply["id"] as? Int, 99)
+
+        await harness.endConnection()
+
+        let (delivered, dropped) = try await withDeadline { () -> (Int, Int) in
+            var delivered = 0
+            var dropped = 0
+            for await event in stream {
+                switch event {
+                case .notification:
+                    delivered += 1
+                case .dropped(let count):
+                    dropped += count
+                }
+            }
+            return (delivered, dropped)
+        }
+
+        XCTAssertLessThanOrEqual(delivered, 2, "Buffer must not grow past its bound")
+        XCTAssertGreaterThan(dropped, 0, "The consumer fell behind, so drops must be reported")
+        XCTAssertLessThanOrEqual(delivered + dropped, 6)
+    }
+
+    func testSubscribingAfterTheConnectionEndedYieldsAFinishedStream() async throws {
+        // Previously the hub kept no record of being closed, so a late
+        // subscriber got a stream that never finished and hung its consumer.
+        let harness = try await makeHarness()
+        await harness.endConnection()
+
+        let stream = harness.core.notificationHub.subscribe()
+        // Deadlined deliberately: the bug this guards against is a hang, so a
+        // regression has to fail the test rather than stall the suite.
+        let event = try await withDeadline { () -> JSONRPCNotificationEvent? in
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        XCTAssertNil(event, "A stream created after the close must be finished")
+    }
+
+    func testConnectionEndFinishesNotificationStreams() async throws {
+        let harness = try await makeHarness()
+        let stream = harness.core.notificationHub.subscribe()
+
+        await harness.endConnection()
+
+        let event = try await withDeadline { () -> JSONRPCNotificationEvent? in
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
+        }
+        XCTAssertNil(event, "Stream should finish when the connection closes")
+    }
+
+    func testResubscribingWorksAfterAReconnect() async throws {
+        // A dropped connection closes the hub; a new session has to reopen it,
+        // or every subscriber after the first reconnect would get a finished
+        // stream.
+        let harness = try await makeHarness()
+        await harness.endConnection()
+
+        let channel = EmbeddedChannel()
+        try await channel.connect(to: SocketAddress(unixDomainSocketPath: "/tmp/swiftovn-routing-test"))
+        let (inbound, source) = NIOAsyncChannelInboundStream<ByteBuffer>.makeTestingStream()
+        let (outbound, _) = NIOAsyncChannelOutboundWriter<ByteBuffer>.makeTestingWriter()
+        let loop = Task {
+            await harness.core.consumeInbound(channel: channel, inbound: inbound, outbound: outbound)
+        }
+        for _ in 0..<10_000 where !harness.core.isConnected {
+            await Task.yield()
+        }
+
+        let stream = harness.core.notificationHub.subscribe()
+        source.yield(ByteBuffer(string: #"{"method":"update","params":["mon9",{}],"id":null}"#))
+
+        var iterator = stream.makeAsyncIterator()
+        let received = notification(await iterator.next())
+        XCTAssertEqual(received?.method, "update")
+
+        source.finish()
+        await loop.value
+    }
+
+    // MARK: - Server echo requests
+
+    func testServerEchoRequestGetsReply() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        harness.receive(#"{"method":"echo","params":["ping"],"id":42}"#)
+
+        let reply = try await nextWritten(&iterator)
+        XCTAssertEqual(reply["id"] as? Int, 42)
+        XCTAssertEqual(reply["result"] as? [String], ["ping"])
+        XCTAssertTrue(reply["error"] is NSNull)
+
+        await harness.endConnection()
+    }
+
+    func testServerEchoReplyPreservesStringId() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        harness.receive(#"{"method":"echo","params":[],"id":"echo-7"}"#)
+
+        let reply = try await nextWritten(&iterator)
+        XCTAssertEqual(reply["id"] as? String, "echo-7")
+        XCTAssertEqual((reply["result"] as? [Any])?.count, 0)
+
+        await harness.endConnection()
+    }
+
+    func testUnknownServerRequestProducesNoReply() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        // Nothing may be written for the unknown method: the next frame the
+        // core writes has to be the reply to the echo that follows it.
+        harness.receive(#"{"method":"frobnicate","params":[],"id":9}"#)
+        harness.receive(#"{"method":"echo","params":[],"id":10}"#)
+
+        let reply = try await nextWritten(&iterator)
+        XCTAssertEqual(reply["id"] as? Int, 10)
+
+        await harness.endConnection()
+    }
+
+    // MARK: - Responses
+
+    func testResponseIsRoutedToPendingRequest() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        let response = Task {
+            try await harness.core.sendRequest(
+                JSONRPCRequest(method: "list_dbs", params: nil, id: .number(7)),
+                id: .number(7),
+                responseType: JSONRPCResponse<[String]>.self,
+                timeout: .seconds(30)
+            )
+        }
+
+        // The request has to be on the wire before the reply is fed back, so the
+        // ordering matches a real server's. That the reply is never missed even
+        // when it arrives the instant the request is read is structural:
+        // `sendRequest` registers the pending entry and writes inside one
+        // actor-isolated stretch, with the registration first.
+        let request = try await nextWritten(&iterator)
+        XCTAssertEqual(request["method"] as? String, "list_dbs")
+
+        harness.receive(#"{"id":7,"result":["OVN_Northbound"],"error":null}"#)
+
+        let value = try await response.value
+        XCTAssertEqual(value.result, ["OVN_Northbound"])
+        XCTAssertNil(value.error)
+
+        await harness.endConnection()
+    }
+
+    func testTimedOutRequestFailsAndLateResponseIsIgnored() async throws {
+        let harness = try await makeHarness()
+
+        do {
+            _ = try await harness.core.sendRequest(
+                JSONRPCRequest(method: "list_dbs", params: nil, id: .number(1)),
+                id: .number(1),
+                responseType: JSONRPCResponse<JSONValue>.self,
+                timeout: .milliseconds(50)
+            )
+            XCTFail("Expected the request to time out")
+        } catch {
+            guard case OVNManagerError.timeoutError = error else {
+                XCTFail("Expected timeoutError, got \(error)")
+                return
+            }
+        }
+
+        // A response arriving after the timeout must be ignored gracefully, not
+        // fulfil the already-failed promise (which would crash).
+        harness.receive(#"{"id":1,"result":{},"error":null}"#)
+        harness.receive(#"{"method":"echo","params":[],"id":2}"#)
+        var iterator = harness.written.makeAsyncIterator()
+        // The request frame, then the echo reply that proves the core survived.
+        _ = try await nextWritten(&iterator)
+        let reply = try await nextWritten(&iterator)
+        XCTAssertEqual(reply["id"] as? Int, 2)
+
+        await harness.endConnection()
+    }
+
+    func testResponseWithUnsupportedIdIsIgnored() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        // No request this library issues carries a fractional id, so there is
+        // nothing to correlate and the core must simply keep going.
+        harness.receive(#"{"id":1.5,"result":{},"error":null}"#)
+        harness.receive(#"{"method":"echo","params":[],"id":3}"#)
+
+        let reply = try await nextWritten(&iterator)
+        XCTAssertEqual(reply["id"] as? Int, 3)
+
+        await harness.endConnection()
+    }
+
+    // MARK: - Connection loss
+
+    func testConnectionEndFailsPendingRequests() async throws {
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        let response = Task {
+            try await harness.core.sendRequest(
+                JSONRPCRequest(method: "list_dbs", params: nil, id: .number(3)),
+                id: .number(3),
+                responseType: JSONRPCResponse<JSONValue>.self,
+                timeout: .seconds(30)
+            )
+        }
+        _ = try await nextWritten(&iterator)
+
+        await harness.endConnection()
+
+        do {
+            _ = try await response.value
+            XCTFail("Expected the in-flight request to fail")
+        } catch {
+            guard case OVNManagerError.connectionFailed = error else {
+                XCTFail("Expected connectionFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testConnectionFailureFailsPendingRequests() async throws {
+        struct SocketDied: Error {}
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        let response = Task {
+            try await harness.core.sendRequest(
+                JSONRPCRequest(method: "list_dbs", params: nil, id: .number(4)),
+                id: .number(4),
+                responseType: JSONRPCResponse<JSONValue>.self,
+                timeout: .seconds(30)
+            )
+        }
+        _ = try await nextWritten(&iterator)
+
+        await harness.endConnection(throwing: SocketDied())
+
+        do {
+            _ = try await response.value
+            XCTFail("Expected the read failure to fail the in-flight request")
+        } catch {
+            XCTAssertTrue(error is SocketDied, "Got \(error)")
+        }
+    }
+
+    func testSendingWithoutAConnectionFails() async throws {
+        let core = OVSDBConnectionCore(
+            endpoint: .unix(path: "/tmp/swiftovn-never-connected"),
+            eventLoopGroup: group,
+            logger: Logger(label: "test")
+        )
+        XCTAssertFalse(core.isConnected)
+
+        do {
+            try await core.send(JSONRPCRequest(method: "echo", params: nil, id: nil))
+            XCTFail("Expected send to fail without a connection")
+        } catch {
+            guard case OVNManagerError.connectionFailed = error else {
+                XCTFail("Expected connectionFailed, got \(error)")
+                return
+            }
+        }
+    }
+}
+
+// MARK: - Notification Hub
+
+/// The hub's buffering and drop accounting, driven directly: it is what keeps a
+/// stalled consumer from growing the process without limit, and what tells that
+/// consumer its view has a hole.
+final class JSONRPCNotificationHubTests: XCTestCase {
 
     private enum StreamOutcome {
         case event(JSONRPCNotificationEvent)
@@ -53,7 +511,7 @@ final class MessageRoutingTests: XCTestCase {
                 return .event(event)
             }
             group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(for: .seconds(2))
                 return .timedOut
             }
             let outcome = await group.next() ?? .timedOut
@@ -61,89 +519,6 @@ final class MessageRoutingTests: XCTestCase {
             return outcome
         }
     }
-
-    // MARK: - Notifications
-
-    func testUpdateNotificationWithNullIdIsDispatched() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let stream = hub.subscribe()
-
-        // Real ovsdb-server update notifications carry "id": null.
-        try channel.writeInbound(#"{"method":"update","params":["mon1",{"Logical_Switch":{"aa-bb":{"new":{"name":"ls0"}}}}],"id":null}"#)
-
-        var iterator = stream.makeAsyncIterator()
-        let notification = notification(await iterator.next())
-
-        XCTAssertEqual(notification?.method, "update")
-        guard let notification,
-              case .array(let params)? = notification.params,
-              params.count == 2,
-              case .string(let monitorId) = params[0] else {
-            XCTFail("Expected array params with monitor ID first")
-            return
-        }
-        XCTAssertEqual(monitorId, "mon1")
-    }
-
-    func testNotificationWithoutIdKeyIsDispatched() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let stream = hub.subscribe()
-
-        try channel.writeInbound(#"{"method":"update","params":["mon2",{}]}"#)
-
-        var iterator = stream.makeAsyncIterator()
-        let notification = notification(await iterator.next())
-        XCTAssertEqual(notification?.method, "update")
-    }
-
-    func testNotificationsAreBufferedBetweenReads() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let stream = hub.subscribe()
-
-        // Deliver several notifications before the consumer starts iterating;
-        // none may be dropped.
-        for index in 1...3 {
-            try channel.writeInbound(#"{"method":"update","params":["mon\#(index)",{}],"id":null}"#)
-        }
-
-        var received: [String] = []
-        var iterator = stream.makeAsyncIterator()
-        for _ in 1...3 {
-            guard let notification = notification(await iterator.next()),
-                  case .array(let params)? = notification.params,
-                  case .string(let monitorId) = params[0] else {
-                XCTFail("Missing buffered notification")
-                return
-            }
-            received.append(monitorId)
-        }
-        XCTAssertEqual(received, ["mon1", "mon2", "mon3"])
-    }
-
-    func testEverySubscriberReceivesEachNotification() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let first = hub.subscribe()
-        let second = hub.subscribe()
-
-        try channel.writeInbound(#"{"method":"update","params":["mon1",{}],"id":null}"#)
-
-        var firstIterator = first.makeAsyncIterator()
-        var secondIterator = second.makeAsyncIterator()
-        let fromFirst = notification(await firstIterator.next())
-        let fromSecond = notification(await secondIterator.next())
-        XCTAssertEqual(fromFirst?.method, "update")
-        XCTAssertEqual(fromSecond?.method, "update")
-    }
-
-    // MARK: - Bounded buffering
 
     func testSlowSubscriberBufferIsBoundedAndDropsAreReported() async throws {
         let bufferSize = 4
@@ -239,13 +614,9 @@ final class MessageRoutingTests: XCTestCase {
         }
     }
 
-    // MARK: - Subscribing after close
-
     func testSubscribingAfterCloseReturnsAFinishedStream() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        channel.pipeline.fireChannelInactive()
+        let hub = JSONRPCNotificationHub(logger: Logger(label: "test"))
+        hub.finishAll()
 
         // Before the hub tracked being closed, this stream's continuation was
         // never finished and the consumer's `for await` hung forever.
@@ -272,124 +643,6 @@ final class MessageRoutingTests: XCTestCase {
             return
         }
         XCTAssertEqual(payload, "after-reconnect")
-    }
-
-    // MARK: - Server echo requests
-
-    func testServerEchoRequestGetsReply() throws {
-        let (channel, _, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        try channel.writeInbound(#"{"method":"echo","params":["ping"],"id":42}"#)
-
-        let replyObject = try XCTUnwrap(
-            readOutboundObject(from: channel),
-            "Expected an echo reply to be written"
-        )
-        XCTAssertEqual(replyObject["id"] as? Int, 42)
-        XCTAssertEqual(replyObject["result"] as? [String], ["ping"])
-        XCTAssertTrue(replyObject["error"] is NSNull)
-    }
-
-    func testServerEchoReplyPreservesStringId() throws {
-        let (channel, _, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        try channel.writeInbound(#"{"method":"echo","params":[],"id":"echo-7"}"#)
-
-        let replyObject = try XCTUnwrap(
-            readOutboundObject(from: channel),
-            "Expected an echo reply to be written"
-        )
-        XCTAssertEqual(replyObject["id"] as? String, "echo-7")
-        XCTAssertEqual((replyObject["result"] as? [Any])?.count, 0)
-    }
-
-    func testUnknownServerRequestProducesNoReply() throws {
-        let (channel, _, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        try channel.writeInbound(#"{"method":"frobnicate","params":[],"id":9}"#)
-
-        XCTAssertNil(try channel.readOutbound(as: ByteBuffer.self))
-    }
-
-    // MARK: - Responses
-
-    func testResponseIsRoutedToPendingRequest() throws {
-        let (channel, _, router) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let future = router.waitForResponse(
-            requestId: .number(7),
-            type: JSONRPCResponse<[String]>.self,
-            timeout: .seconds(30)
-        )
-
-        try channel.writeInbound(#"{"id":7,"result":["OVN_Northbound"],"error":null}"#)
-
-        let response = try future.wait()
-        XCTAssertEqual(response.result, ["OVN_Northbound"])
-        XCTAssertNil(response.error)
-    }
-
-    func testTimedOutRequestIsRemovedAndLateResponseIsIgnored() throws {
-        let (channel, _, router) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let future = router.waitForResponse(
-            requestId: .number(1),
-            type: JSONRPCResponse<JSONValue>.self,
-            timeout: .seconds(5)
-        )
-
-        channel.embeddedEventLoop.advanceTime(by: .seconds(5))
-
-        XCTAssertThrowsError(try future.wait()) { error in
-            guard case OVNManagerError.timeoutError = error else {
-                XCTFail("Expected timeoutError, got \(error)")
-                return
-            }
-        }
-
-        // A response arriving after the timeout must be ignored gracefully,
-        // not fulfill the already-failed promise (which would crash).
-        XCTAssertNoThrow(try channel.writeInbound(#"{"id":1,"result":{},"error":null}"#))
-    }
-
-    // MARK: - Connection loss
-
-    func testChannelInactiveFailsPendingRequests() throws {
-        let (channel, _, router) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let future = router.waitForResponse(
-            requestId: .number(3),
-            type: JSONRPCResponse<JSONValue>.self,
-            timeout: .seconds(30)
-        )
-
-        channel.pipeline.fireChannelInactive()
-
-        XCTAssertThrowsError(try future.wait()) { error in
-            guard case OVNManagerError.connectionFailed = error else {
-                XCTFail("Expected connectionFailed, got \(error)")
-                return
-            }
-        }
-    }
-
-    func testChannelInactiveFinishesNotificationStreams() async throws {
-        let (channel, hub, _) = makeChannel()
-        defer { _ = try? channel.finish() }
-
-        let stream = hub.subscribe()
-
-        channel.pipeline.fireChannelInactive()
-
-        var iterator = stream.makeAsyncIterator()
-        let value = await iterator.next()
-        XCTAssertNil(value, "Stream should finish when the connection closes")
     }
 }
 
@@ -434,14 +687,18 @@ final class MonitorStreamDropTests: XCTestCase {
 /// operation is unsupported.
 private struct StubNotificationTransport: OVSDBTransport {
     let events: [JSONRPCNotificationEvent]
-    private let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
-    func connect() -> EventLoopFuture<Void> { group.next().makeSucceededFuture(()) }
-    func disconnect() -> EventLoopFuture<Void> { group.next().makeSucceededFuture(()) }
-    func send<T: Codable>(_ message: T) -> EventLoopFuture<Void> { group.next().makeSucceededFuture(()) }
+    func connect() async throws {}
+    func disconnect() async throws {}
+    func send<T: Codable & Sendable>(_ message: T) async throws {}
 
-    func receive<T: Codable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount) -> EventLoopFuture<T> {
-        return group.next().makeFailedFuture(OVNManagerError.invalidResponse("stub"))
+    func sendRequest<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ request: Request,
+        id: JSONRPCIdentifier,
+        responseType: Response.Type,
+        timeout: TimeAmount
+    ) async throws -> Response {
+        throw OVNManagerError.invalidResponse("stub")
     }
 
     func notifications() -> AsyncStream<JSONRPCNotification> {
