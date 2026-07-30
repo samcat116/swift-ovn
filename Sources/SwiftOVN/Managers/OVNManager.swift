@@ -1125,8 +1125,71 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted NAT rule: \(uuid)")
     }
     
+    // MARK: - QoS Operations
+
+    /// Rows of the Northbound `QoS` table. Unrelated to `OVSManager`'s
+    /// `getQoSPolicies()`, which reads the Open_vSwitch table of the same name.
+    public func getQoSRules() async throws(OVNManagerError) -> [OVNQoS] {
+        let rows = try await connection.selectAll(from: OVNTable.qos, in: database)
+        return try parseRows(rows, as: OVNQoS.self)
+    }
+
+    /// Creates a QoS rule and attaches it to the named logical switch
+    /// (Logical_Switch.qos_rules) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl qos-add`. QoS is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits — there is deliberately
+    /// no unattached create.
+    public func createQoSRule(_ qos: OVNQoS, onSwitch switchName: String) async throws(OVNManagerError) -> String {
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.qos,
+            in: database,
+            row: try createRow(from: qos),
+            uuidName: "new_qos",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "qos_rules",
+            parentCondition: switchCondition
+        )
+
+        logger.info("Created QoS rule on switch: \(switchName)")
+        return uuidValue
+    }
+
+    public func updateQoSRule(uuid: String, _ qos: OVNQoS) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: qos)
+
+        let count = try await connection.update(table: OVNTable.qos, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("QoS rule not found: \(uuid)")
+        }
+
+        logger.info("Updated QoS rule: \(uuid)")
+    }
+
+    public func deleteQoSRule(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.qos,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalSwitch, column: "qos_rules")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("QoS rule not found: \(uuid)")
+        }
+
+        logger.info("Deleted QoS rule: \(uuid)")
+    }
+
     // MARK: - DHCP Operations
-    
+
     public func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions] {
         let rows = try await connection.selectAll(from: OVNTable.dhcpOptions, in: database)
         return try parseRows(rows, as: OVNDHCPOptions.self)

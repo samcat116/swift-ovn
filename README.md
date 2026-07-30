@@ -162,6 +162,7 @@ The package includes comprehensive Swift models for:
 - `OVNPortGroup` - Port groups for scalable security-group ACLs
 - `OVNLoadBalancer` - Load balancing rules
 - `OVNNAT` - Network address translation rules
+- `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNDHCPOptions` - DHCP configuration
 
 #### OVS Models
@@ -171,7 +172,7 @@ The package includes comprehensive Swift models for:
 - `OVSController` - OpenFlow controllers
 - `OVSFlow` - Flow table entries
 - `OVSMirror` - Port mirroring configuration
-- `OVSQoS` - Quality of service policies
+- `OVSQoS` - Quality of service policies (the Open_vSwitch `QoS` table, distinct from `OVNQoS`)
 
 ## Advanced Usage
 
