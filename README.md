@@ -161,6 +161,9 @@ The package includes comprehensive Swift models for:
 - `OVNACL` - Access control lists
 - `OVNPortGroup` - Port groups for scalable security-group ACLs
 - `OVNLoadBalancer` - Load balancing rules
+- `OVNLoadBalancerHealthCheck` - Per-VIP backend health probing
+- `OVNLoadBalancerGroup` - Named sets of load balancers applied to many switches/routers at once
+- `OVNServiceMonitor` - Southbound health probe state, one row per backend
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNDHCPOptions` - DHCP configuration

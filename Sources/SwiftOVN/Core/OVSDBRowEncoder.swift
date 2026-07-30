@@ -52,8 +52,11 @@ enum OVSDBRowEncoder {
         /// — see `ovn(table:)`.
         static let ovn = ColumnHints(
             uuidReferenceColumns: [
-                // Logical_Switch
+                // Logical_Switch (load_balancer is also Logical_Router's and
+                // Load_Balancer_Group's own member column; load_balancer_group
+                // is also Logical_Router's)
                 "ports", "acls", "qos_rules", "dns_records", "load_balancer",
+                "load_balancer_group",
                 // Logical_Switch_Port
                 "dhcpv4_options", "dhcpv6_options",
                 // Logical_Router
