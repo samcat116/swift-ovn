@@ -72,6 +72,12 @@ public protocol OVNManaging: Sendable {
     func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError)
     func deleteStaticRoute(uuid: String) async throws(OVNManagerError)
 
+    // Logical Router Policy Operations
+    func getPolicies() async throws(OVNManagerError) -> [OVNLogicalRouterPolicy]
+    func createPolicy(_ policy: OVNLogicalRouterPolicy, onRouter routerName: String) async throws(OVNManagerError) -> String
+    func updatePolicy(uuid: String, _ policy: OVNLogicalRouterPolicy) async throws(OVNManagerError)
+    func deletePolicy(uuid: String) async throws(OVNManagerError)
+
     // Gateway Chassis Operations
     func getGatewayChassis() async throws(OVNManagerError) -> [OVNGatewayChassis]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
@@ -180,6 +186,7 @@ public enum OVNTable {
     public static let logicalRouter = "Logical_Router"
     public static let logicalRouterPort = "Logical_Router_Port"
     public static let logicalRouterStaticRoute = "Logical_Router_Static_Route"
+    public static let logicalRouterPolicy = "Logical_Router_Policy"
     public static let gatewayChassis = "Gateway_Chassis"
     public static let haChassis = "HA_Chassis"
     public static let haChassisGroup = "HA_Chassis_Group"
