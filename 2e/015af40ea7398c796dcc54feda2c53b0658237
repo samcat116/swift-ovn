@@ -1,0 +1,61 @@
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 48-50,58,60-62,100,109,127-129,134-136,164-169
+Sources/SwiftOVN/Models/JSONRPCIdentifier.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 40-53
+Sources/SwiftOVN/Models/OVSDBOperation.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 7-19,28-35,38,43-57,68-70,72-183
+README.md
+  s_775dc5bcbcd96f::t_3e435e480a9f75 398-437
+  s_4f25afda6334a7::t_4d26b1b2cfd8e2 438
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 350-352,401-402,412-414,428-490
+  s_775dc5bcbcd96f::t_2afb4417fae944 491
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 68-73,77-78,87-88,158-160,163,179-187,195,199-200,203-229,374-477,512-526,595-597
+Sources/SwiftOVN/Models/OVSDBMutation.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 7
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_775dc5bcbcd96f::t_ecc2d4a51c9eb5 2539-2542
+  s_775dc5bcbcd96f::t_428f4137431e6c 2689
+  s_775dc5bcbcd96f::t_3e435e480a9f75 87-90,96,474-476,561-563,2904-2906,2974-2976,3058-3060,3067,3086,3105-3107
+Sources/SwiftOVN/Models/OVSDBOperationType.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 1-17
+Tests/SwiftOVNTests/OVSDBRPCSurfaceTests.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 1-302
+Tests/SwiftOVNTests/JSONValueConversionTests.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 46-48,67-69,100,180
+Sources/SwiftOVN/Core/OVSDBColumnTransactions.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 36-38,41
+Sources/SwiftOVN/Models/OVSDBCondition.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 7
+Sources/SwiftOVN/Models/OVSDBLockNotification.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 1-43
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 89-139,147-160,178-184,285-286,298,335-336,362,390,419
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_775dc5bcbcd96f::t_3e435e480a9f75 190,194-196,202-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "2e015af40ea7398c796dcc54feda2c53b0658237",
+  "prompts": {},
+  "sessions": {
+    "s_4f25afda6334a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b1c32694-306c-4419-a3b7-9bc79021ade4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    },
+    "s_775dc5bcbcd96f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "369feca3-e2ff-4072-9050-bb24f009bfa1",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
