@@ -184,4 +184,71 @@ struct JSONValueConversionTests {
 
         #expect(text.contains("\"timeout\":0"), "expected integral timeout in \(text)")
     }
+
+    /// Regression: the decode side rounded silently while the encode side
+    /// refused, so an int64 column wider than 53 bits — an interface byte
+    /// counter, say — arrived as a different number with no error anywhere.
+    @Test("An integer too wide for a JSON number is refused on the way in")
+    func decodingAnOverwideIntegerThrows() throws {
+        let data = Data("{\"rx_bytes\":9007199254740993}".utf8)
+
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode([String: JSONValue].self, from: data)
+        }
+
+        // The boundary itself still decodes, and exactly.
+        let atBoundary = try JSONDecoder().decode(
+            [String: JSONValue].self,
+            from: Data("{\"rx_bytes\":9007199254740992}".utf8)
+        )
+        #expect(atBoundary["rx_bytes"] == .number(9_007_199_254_740_992))
+    }
+
+    /// Regression: `intValue` used the trapping `Int(_: Double)`, so a value a
+    /// server is free to send took the process down instead of returning nil —
+    /// from a property whose `Int?` result promises the opposite — and quietly
+    /// truncated fractions the rest of the time.
+    @Test("intValue reports failure instead of trapping or truncating", arguments: [
+        (JSONValue.number(1e300), nil as Int?),
+        (JSONValue.number(-1e300), nil),
+        (JSONValue.number(1.9), nil),
+        (JSONValue.string("7"), nil),
+        (JSONValue.number(42), 42),
+        (JSONValue.number(-42), -42),
+    ])
+    func intValueIsExact(value: JSONValue, expected: Int?) {
+        #expect(value.intValue == expected)
+    }
+
+    /// Regression: a one-element set of an unsupported element type encoded as
+    /// the *empty* set, which tells ovsdb-server to clear the column rather than
+    /// set it. The overloads make that a compile error; this pins the wire forms
+    /// they produce.
+    @Test("Set wire forms are exact for every supported element type")
+    func setWireForms() {
+        #expect(JSONValue.set([] as [String]) == .array([.string("set"), .array([])]))
+        #expect(JSONValue.set(["only"]) == .string("only"))
+        #expect(JSONValue.set([true, false]) == .array([
+            .string("set"), .array([.boolean(true), .boolean(false)])
+        ]))
+        #expect(JSONValue.set([1, 2]) == .array([
+            .string("set"), .array([.number(1), .number(2)])
+        ]))
+    }
+
+    /// Regression: the Int-taking builders converted with a bare `Double(_:)`,
+    /// so a condition on a value past 53 bits went out rounded and matched the
+    /// wrong row, or none, without an error.
+    @Test("The integer request builders refuse a value they cannot represent")
+    func integerBuildersRefuseInexactValues() {
+        #expect(throws: OVNManagerError.self) {
+            _ = try OVSDBCondition.equal(column: "tunnel_key", to: (1 << 53) + 1)
+        }
+        #expect(throws: OVNManagerError.self) {
+            _ = try OVSDBMutation.add(column: "priority", value: (1 << 53) + 1)
+        }
+        #expect(throws: Never.self) {
+            _ = try OVSDBCondition.equal(column: "tunnel_key", to: 1 << 53)
+        }
+    }
 }

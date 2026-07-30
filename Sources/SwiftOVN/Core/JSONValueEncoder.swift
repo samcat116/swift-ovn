@@ -113,8 +113,9 @@ private final class JSONValueNode {
 private enum JSONValueScalar {
     /// `JSONValue` carries numbers as `Double`, so an integer outside the
     /// 53-bit exactly-representable range is rejected rather than rounded to a
-    /// different value on the wire. `OVSDBRowDecoder` refuses the same values
-    /// on the way in.
+    /// different value on the wire. `JSONValue.init(from:)` refuses the same
+    /// values on the way in, where they would otherwise have been rounded by
+    /// `JSONDecoder` before any of this package's code saw them.
     static func number<T: BinaryInteger>(_ value: T, codingPath: [CodingKey]) throws -> JSONValue {
         guard let double = Double(exactly: value) else {
             throw EncodingError.invalidValue(value, EncodingError.Context(
