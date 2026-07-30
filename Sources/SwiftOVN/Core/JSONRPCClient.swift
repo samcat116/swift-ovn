@@ -9,9 +9,9 @@ import Logging
 /// Speaks JSON-RPC over an `OVSDBTransport`.
 ///
 /// Every throwing method is `throws(OVNManagerError)`. This is where that
-/// contract starts: the transport below is `EventLoopFuture`-based and surfaces
-/// NIO channel and TLS failures, and `JSONValueEncoder` throws `EncodingError`,
-/// so every `get()` and every parameter encode here is wrapped.
+/// contract starts: the transport below throws untyped — it surfaces NIO channel
+/// and TLS failures — and `JSONValueEncoder` throws `EncodingError`, so every
+/// transport call and every parameter encode here is wrapped.
 public actor JSONRPCClient {
     private let connection: any OVSDBTransport
     private let logger: Logger
@@ -39,7 +39,7 @@ public actor JSONRPCClient {
     public func connect() async throws(OVNManagerError) {
         logger.info("JSONRPCClient: Starting connection process...")
         do {
-            try await connection.connect().get()
+            try await connection.connect()
         } catch {
             throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to connect: \($0)") }
         }
@@ -48,7 +48,7 @@ public actor JSONRPCClient {
 
     public func disconnect() async throws(OVNManagerError) {
         do {
-            try await connection.disconnect().get()
+            try await connection.disconnect()
         } catch {
             throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to disconnect: \($0)") }
         }
@@ -77,27 +77,21 @@ public actor JSONRPCClient {
 
         logger.debug("Connection active before send: \(connection.isConnectionActive)")
 
-        // Set up the response handler before sending to avoid race conditions
-        let responseFuture = connection.receive(
-            as: JSONRPCResponse<T>.self,
-            requestId: id
-        )
-
-        do {
-            try await connection.send(request).get()
-        } catch {
-            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to send '\(method)' request: \($0)") }
-        }
-        logger.debug("Message sent successfully, waiting for response...")
-
+        // One operation: the transport registers its interest in `id` before it
+        // writes, so a reply that arrives immediately cannot be missed.
         let response: JSONRPCResponse<T>
         do {
-            response = try await responseFuture.get()
+            response = try await connection.sendRequest(
+                request,
+                id: id,
+                responseType: JSONRPCResponse<T>.self
+            )
         } catch {
-            // The router already reports its own failures as `OVNManagerError`
-            // (timeout, closed connection, response decoding); anything left is
-            // a channel-level failure it forwarded verbatim.
-            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to receive '\(method)' response: \($0)") }
+            // The transport already reports its own failures as
+            // `OVNManagerError` (timeout, closed connection, response
+            // decoding); anything left is a channel-level failure it forwarded
+            // verbatim.
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to complete '\(method)' request: \($0)") }
         }
 
         logger.debug("Received response for request ID: \(id)")
@@ -120,7 +114,7 @@ public actor JSONRPCClient {
         logger.debug("Sending JSON-RPC notification: \(method)")
 
         do {
-            try await connection.send(request).get()
+            try await connection.send(request)
         } catch {
             throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to send '\(method)' notification: \($0)") }
         }

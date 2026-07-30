@@ -11,14 +11,31 @@ import NIO
 /// TLS; the protocol exists so `JSONRPCClient` can also run over a custom or
 /// mock transport.
 public protocol OVSDBTransport: Sendable {
-    func connect() -> EventLoopFuture<Void>
-    func disconnect() -> EventLoopFuture<Void>
+    func connect() async throws
+    func disconnect() async throws
+    /// Sends a message that expects no reply (a JSON-RPC notification).
+    ///
     /// `Sendable` is required because the message is handed to the channel's
-    /// event loop, and the decoded response is handed back out of it.
-    func send<T: Codable & Sendable>(_ message: T) -> EventLoopFuture<Void>
-    func receive<T: Codable & Sendable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount) -> EventLoopFuture<T>
+    /// write side, and the decoded response is handed back out of it.
+    func send<T: Codable & Sendable>(_ message: T) async throws
+    /// Sends `request` and waits for the response carrying `id`.
+    ///
+    /// Sending and awaiting are one operation because the two cannot be
+    /// separated safely: the response may already be on the wire before `send`
+    /// returns, so an implementation must register interest in `id` *before* the
+    /// request is written.
+    func sendRequest<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ request: Request,
+        id: JSONRPCIdentifier,
+        responseType: Response.Type,
+        timeout: TimeAmount
+    ) async throws -> Response
     /// See `OVSDBSocketConnection.notifications()`: the returned stream must
-    /// buffer from creation time and finish when the connection closes.
+    /// buffer from creation time, finish when the connection closes, and be
+    /// already finished if the connection has closed.
+    ///
+    /// Deliberately synchronous, so a caller can be sure its subscription is in
+    /// place before it issues the request that triggers the notifications.
     func notifications() -> AsyncStream<JSONRPCNotification>
     /// See `OVSDBSocketConnection.notificationEvents()`: as `notifications()`,
     /// but reporting notifications discarded because the consumer fell behind.
@@ -31,8 +48,12 @@ public protocol OVSDBTransport: Sendable {
 }
 
 public extension OVSDBTransport {
-    func receive<T: Codable & Sendable>(as type: T.Type, requestId: JSONRPCIdentifier) -> EventLoopFuture<T> {
-        return receive(as: type, requestId: requestId, timeout: .seconds(30))
+    func sendRequest<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ request: Request,
+        id: JSONRPCIdentifier,
+        responseType: Response.Type
+    ) async throws -> Response {
+        return try await sendRequest(request, id: id, responseType: responseType, timeout: .seconds(30))
     }
 
     func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {

@@ -53,7 +53,11 @@ The codebase follows a clean architecture with clear separation of concerns:
 
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
-   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
+   - `OVSDBSocketConnection.swift`: Public transport facade and channel bootstrap over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
+   - `OVSDBConnectionCore.swift`: The `NIOAsyncChannel` state machine — session, in-flight requests, inbound routing. Every piece of mutable transport state lives here, as actor state or behind a `Mutex`; there is no `@unchecked Sendable` in the transport
+   - `OVSDBJSONFrameDecoder.swift`: Brace-depth framer, emits one `ByteBuffer` per top-level JSON object
+   - `JSONRPCFrameEnvelope.swift`: Scans a frame's `method`/`id` for routing without parsing the payload
+   - `JSONRPCNotificationHub.swift`: Bounded fan-out of server notifications, with drop reporting
    - `OVSDBConnection.swift`: OVSDB protocol with real-time monitoring via AsyncSequence
 
 2. **High-level managers** (`/Sources/SwiftOVN/Managers/`):
@@ -147,21 +151,31 @@ where the `#else` branch keeps things building. New files should follow the same
 pattern — or import nothing at all, since most models only need stdlib
 `Codable`.
 
-Three files genuinely need full Foundation and keep a plain `import Foundation`:
-- `Core/OVSDBSocketConnection.swift` — `FileManager`, `JSONSerialization`, `NSNull`, `NSLock`
-- `Core/OVSDBRowEncoder.swift` — `NSError`
-- `Core/OVSDBRowDecoder.swift` — `NSNull`, in `plainObject(from:)`
+No source file imports full Foundation any more. `OVSDBJSONFrameDecoder.swift`
+and `JSONRPCFrameEnvelope.swift` import neither — they work on `ByteBuffer` and
+need nothing from Foundation at all, which is the better end state where it is
+reachable. Keeping it that way means preferring:
+
+- `access(path, F_OK)` over `FileManager.fileExists` (see
+  `OVSDBChannelBootstrap.connect`)
+- `Mutex` / actor state over `NSLock`
+- a `Decodable` envelope over `JSONSerialization` plus `as?` casts
+- a plain `Error` type over `NSError` with `NSLocalizedDescriptionKey` (see
+  `OVSDBRowEncodingError`)
 
 Tests keep `import Foundation`; XCTest links Foundation regardless, so there is
 nothing to gain there.
 
-Measured on Linux (Swift 6.2, release), the subset import buys nothing *yet*:
-object code and the linked `BasicUsage` binary are both within 0.01% of the
-all-Foundation build, and recompile time is inside run-to-run noise. That is
-expected — as long as those three files import Foundation, the module links the
-whole framework, and on Linux Foundation re-exports FoundationEssentials
-anyway. The payoff only arrives if the last three imports go, so re-measure
-before assuming this saves anything.
+**Foundation is still linked, via `NIOFoundationCompat`.** That dependency is
+what lets `OVSDBConnectionCore` code JSON straight into a `ByteBuffer` instead
+of round-tripping through `Data`, and it imports Foundation itself, so the
+subset imports above currently buy no binary-size win — measured on Linux
+(Swift 6.2, release) they are within 0.7% of the all-Foundation build, and
+recompile time is inside run-to-run noise. The size argument only cashes out if
+`NIOFoundationCompat` goes too: a build with no Foundation anywhere in the graph
+linked a `--static-swift-stdlib` `BasicUsage` at 55.8 MB against 104.1 MB, a 46%
+cut. That trade — one `Data` copy per frame against half the static binary — has
+not been taken. Re-measure before assuming either side of it.
 
 ### Testing Approach
 - Uses XCTest framework
