@@ -17,13 +17,39 @@ public actor JSONRPCClient {
     private let logger: Logger
     private var requestId: Int = 0
 
-    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    /// See `OVSDBSocketConnection.init(remotes:reconnect:leaderOnlyDatabase:…)`
+    /// for what the cluster parameters mean.
+    public init(
+        remotes: OVSDBRemotes,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
         self.connection = OVSDBSocketConnection(
-            endpoint: endpoint,
+            remotes: remotes,
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.logger = logger ?? Logger(label: "ovn-manager.jsonrpc-client")
+    }
+
+    public init(
+        endpoint: OVSDBEndpoint,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
+        )
     }
 
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
@@ -56,6 +82,26 @@ public actor JSONRPCClient {
     
     nonisolated public var isConnected: Bool {
         return connection.isConnectionActive
+    }
+
+    /// See `OVSDBSocketConnection.connectionState`.
+    nonisolated public var connectionState: OVSDBConnectionState {
+        return connection.connectionState
+    }
+
+    /// See `OVSDBSocketConnection.connectionStates()`.
+    nonisolated public func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        return connection.connectionStates()
+    }
+
+    /// The transport's raw notification events, including the `.reconnected`
+    /// event that says server-side monitor state was lost.
+    ///
+    /// `monitorUpdates()` is the typed view of the same stream; this is here for
+    /// callers that track monitors themselves and have to re-create them after a
+    /// reconnect — which is exactly what `OVSDBConnection` does with it.
+    nonisolated public func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {
+        return connection.notificationEvents()
     }
     
     private func nextRequestId() -> Int {
@@ -493,6 +539,12 @@ public actor JSONRPCClient {
     /// `OVNManagerError.notificationsDropped`: updates were lost, and the only
     /// correct recovery is to restart the monitor for a fresh snapshot.
     ///
+    /// The stream also throws `OVNManagerError.monitorInterrupted` when the
+    /// transport reconnects, because monitors live in the server's
+    /// per-connection state and did not survive it. This client does not track
+    /// monitors, so re-creating them is the caller's job; `OVSDBConnection` does
+    /// it for you.
+    ///
     /// Everything this stream can fail with is an `OVNManagerError`, but the
     /// failure type stays `any Error`: every `AsyncThrowingStream` initializer
     /// is constrained to `Failure == any Error`, so a typed-failure stream
@@ -575,8 +627,9 @@ public actor JSONRPCClient {
     ///
     /// The gap handling is the point of sharing this: a `dropped` event and a
     /// rejected `yield` both have to finish the stream with
-    /// `notificationsDropped`, so that every public monitor stream fails the same
-    /// way rather than each re-deriving it.
+    /// `notificationsDropped`, and a reconnect with `monitorInterrupted`, so that
+    /// every public monitor stream fails the same way rather than each
+    /// re-deriving it.
     private nonisolated func notificationStream<Element: Sendable>(
         _ transform: @escaping @Sendable (JSONRPCNotification) -> Element?
     ) -> AsyncThrowingStream<Element, Error> {
@@ -586,18 +639,26 @@ public actor JSONRPCClient {
         ) { continuation in
             let task = Task {
                 for await event in events {
-                    guard case .notification(let notification) = event else {
-                        guard case .dropped(let count) = event else { continue }
+                    switch event {
+                    case .dropped(let count):
                         continuation.finish(throwing: OVNManagerError.notificationsDropped(count: count))
                         return
-                    }
-                    guard let element = transform(notification) else { continue }
-                    // `.bufferingOldest` keeps the elements already buffered and
-                    // rejects this one, so the consumer sees an unbroken run
-                    // followed by the error rather than a silent gap.
-                    if case .dropped = continuation.yield(element) {
-                        continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                    case .reconnected:
+                        // The monitors of the previous session are gone, so this
+                        // stream's view has a hole no later notification fills —
+                        // the same situation as a drop, reported separately
+                        // because the recovery differs (see `monitorInterrupted`).
+                        continuation.finish(throwing: OVNManagerError.monitorInterrupted)
                         return
+                    case .notification(let notification):
+                        guard let element = transform(notification) else { continue }
+                        // `.bufferingOldest` keeps the elements already buffered
+                        // and rejects this one, so the consumer sees an unbroken
+                        // run followed by the error rather than a silent gap.
+                        if case .dropped = continuation.yield(element) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
                     }
                 }
                 continuation.finish()

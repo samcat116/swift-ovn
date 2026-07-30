@@ -43,7 +43,15 @@ public protocol OVSManaging: Sendable {
     func connect() async throws(OVNManagerError)
     func disconnect() async throws(OVNManagerError)
     var isConnected: Bool { get async }
-    
+    /// Where the connection is in its lifecycle, which with automatic
+    /// reconnection says more than `isConnected` can. See
+    /// `OVSDBConnectionState`.
+    nonisolated var connectionState: OVSDBConnectionState { get }
+    /// Every connection-state transition, starting with the current state, so a
+    /// caller can observe up/down transitions instead of inferring them from a
+    /// thrown error.
+    nonisolated func connectionStates() -> AsyncStream<OVSDBConnectionState>
+
     // Database Operations
     func listDatabases() async throws(OVNManagerError) -> [String]
     func getDatabaseSchema(database: String) async throws(OVNManagerError) -> JSONValue

@@ -27,6 +27,14 @@ public enum OVNManagerError: Error, Sendable {
     /// stream it was reading no longer describes every change. Restart the
     /// monitor to get a fresh snapshot.
     case notificationsDropped(count: Int)
+    /// The connection dropped and was re-established, so the monitor whose
+    /// updates were being streamed no longer exists on the server and the
+    /// changes made while the connection was down went unreported.
+    ///
+    /// `OVSDBConnection` restarts its monitors automatically, so recovering means
+    /// re-reading the rows (the gap cannot be filled) and taking a new
+    /// `monitorUpdates()` stream — not calling `startMonitoring` again.
+    case monitorInterrupted
 }
 
 extension OVNManagerError {
@@ -80,6 +88,8 @@ extension OVNManagerError: LocalizedError {
             return message
         case .notificationsDropped(let count):
             return "Dropped \(count) OVSDB notification(s) because the consumer fell behind; the monitor's view is incomplete and the monitor must be restarted"
+        case .monitorInterrupted:
+            return "The OVSDB connection was re-established; the monitor was restarted, so its view is incomplete and the rows must be re-read"
         }
     }
 }

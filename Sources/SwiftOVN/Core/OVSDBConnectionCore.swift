@@ -8,8 +8,9 @@ import NIOCore
 import NIOFoundationCompat
 import Synchronization
 
-/// The state machine behind `OVSDBSocketConnection`: the live channel and its
-/// write side, the in-flight request map, and inbound message routing.
+/// The state machine behind `OVSDBSocketConnection`: the supervisor that keeps a
+/// session up across the remotes it was given, the live channel and its write
+/// side, the in-flight request map, and inbound message routing.
 ///
 /// This used to be three separate `NSLock`-guarded types, each carrying
 /// `@unchecked Sendable` — thread safety asserted rather than checked, with
@@ -18,8 +19,22 @@ import Synchronization
 /// ordering comes from actor isolation and reads are demand-driven: when the
 /// consumer falls behind, the async channel stops issuing reads and the socket
 /// applies real backpressure instead of buffering without limit.
+///
+/// Above that sits one long-lived `supervisor` task (`runSupervisor`), which owns
+/// the whole connect/serve/reconnect cycle: it walks the remote list, vets each
+/// session against `_Server` when leader-only mode is on, publishes every
+/// transition to `stateHub`, and backs off between failed passes. Everything a
+/// session owns — the writer, the pending requests, the internal `_Server`
+/// monitor — is scoped to one iteration of that loop, so a reconnect starts from
+/// a clean slate by construction.
 actor OVSDBConnectionCore {
-    private let endpoint: OVSDBEndpoint
+    private let remotes: OVSDBRemotes
+    private let reconnectPolicy: OVSDBReconnectPolicy
+    /// The database whose RAFT leader this connection insists on, or nil to use
+    /// whichever remote answers. Enforced only when there is more than one
+    /// remote: with a single one there is nothing better to switch to, so
+    /// rejecting a follower would just refuse to work at all.
+    private let leaderOnlyDatabase: String?
     private let eventLoopGroup: EventLoopGroup
     nonisolated let logger: Logger
     private let decoder = JSONDecoder()
@@ -42,17 +57,58 @@ actor OVSDBConnectionCore {
     /// than as isolated state.
     private nonisolated let liveSession = Mutex<Session?>(nil)
     nonisolated let notificationHub: JSONRPCNotificationHub
+    nonisolated let stateHub = OVSDBConnectionStateHub()
 
     /// The in-flight `connect()`, so concurrent callers share one attempt
-    /// instead of each bootstrapping — and leaking — their own channel.
+    /// instead of each starting — and leaking — their own supervisor.
     private var connectTask: Task<Void, Error>?
+    /// The connect/serve/reconnect loop. Alive from the first `connect()` until
+    /// it gives up or `disconnect()` stops it.
+    private var supervisor: Task<Void, Never>?
+    private var isSupervising = false
     private var readLoop: Task<Void, Never>?
+    /// Completed by the supervisor once a session is up *and* vetted, or failed
+    /// when it gives up. This is how `connect()` waits: it must not return on a
+    /// session that the leader check is about to reject.
+    private var activation: EventLoopPromise<Void>?
     /// Completed by `activate` once the read loop is running, or failed by
-    /// `tearDown` if the connection dies first. This is how `connect()` waits
+    /// `tearDown` if the connection dies first. This is how the supervisor waits
     /// for the write side, which only exists inside the read loop's
     /// `executeThenClose` scope.
-    private var activation: EventLoopPromise<Void>?
+    private var sessionReady: EventLoopPromise<Void>?
     private var pendingRequests: [JSONRPCIdentifier: PendingRequest] = [:]
+    /// Set by `disconnect()`: the supervisor must stop rather than reconnect.
+    private var isStopping = false
+    /// The remote the current (or most recent) session belongs to.
+    private var currentEndpoint: OVSDBEndpoint
+    /// The `monitor` id of this session's internal `_Server` monitor, when one
+    /// is in place. Updates carrying it are consumed here and never published,
+    /// so a caller's monitor stream sees only the caller's own monitors.
+    private var serverMonitorId: String?
+    /// Set when the current session's remote reported that it stopped being the
+    /// leader, so the supervisor can tell an election apart from a plain drop.
+    private var hasLostLeadership = false
+    /// Serial number for the ids of requests this layer issues itself. String
+    /// ids cannot collide with `JSONRPCClient`'s numeric ones, so an internal
+    /// request can never displace a caller's.
+    private var internalRequestCount = 0
+
+    init(
+        remotes: OVSDBRemotes,
+        eventLoopGroup: EventLoopGroup,
+        logger: Logger,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize
+    ) {
+        self.remotes = remotes
+        self.currentEndpoint = remotes.first
+        self.reconnectPolicy = reconnect
+        self.leaderOnlyDatabase = leaderOnlyDatabase
+        self.eventLoopGroup = eventLoopGroup
+        self.logger = logger
+        self.notificationHub = JSONRPCNotificationHub(bufferSize: notificationBufferSize, logger: logger)
+    }
 
     init(
         endpoint: OVSDBEndpoint,
@@ -60,10 +116,12 @@ actor OVSDBConnectionCore {
         logger: Logger,
         notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize
     ) {
-        self.endpoint = endpoint
-        self.eventLoopGroup = eventLoopGroup
-        self.logger = logger
-        self.notificationHub = JSONRPCNotificationHub(bufferSize: notificationBufferSize, logger: logger)
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            eventLoopGroup: eventLoopGroup,
+            logger: logger,
+            notificationBufferSize: notificationBufferSize
+        )
     }
 
     // MARK: - Lifecycle
@@ -74,11 +132,11 @@ actor OVSDBConnectionCore {
 
     func connect() async throws {
         if isConnected {
-            logger.debug("Already connected to \(endpoint)")
+            logger.debug("Already connected to \(currentEndpoint)")
             return
         }
         if let connectTask {
-            logger.debug("connect() already in progress for \(endpoint), reusing it")
+            logger.debug("connect() already in progress, reusing it")
             return try await connectTask.value
         }
 
@@ -87,38 +145,199 @@ actor OVSDBConnectionCore {
             // reconnect starts fresh and cannot clear the slot of an attempt
             // that began after this one finished.
             defer { self.connectTask = nil }
-            try await self.performConnect()
+            try await self.startSupervisor()
         }
         connectTask = task
         try await task.value
     }
 
-    private func performConnect() async throws {
-        // A previous session whose channel has already gone inactive may still
-        // be inside `tearDown`. Letting it finish first is what stops its
-        // teardown from clearing the session this call is about to install —
-        // the exact sequence a reconnect-on-failure loop produces. Awaiting
-        // releases this actor, so the teardown can acquire it.
-        if let readLoop {
-            await readLoop.value
+    private func startSupervisor() async throws {
+        // A supervisor that is already reconnecting must not be joined by a
+        // second one: wait for the session it is working on instead. This is the
+        // `connect()`-while-backing-off case, which is easy to reach because
+        // `isConnected` is false for the whole backoff window.
+        if isSupervising && !isStopping {
+            logger.debug("A reconnect is already in progress; waiting for it")
+            let promise = activation ?? eventLoopGroup.any().makePromise(of: Void.self)
+            activation = promise
+            return try await promise.futureResult.get()
         }
 
-        logger.info("Connecting to OVSDB endpoint: \(endpoint)")
+        // A supervisor from a previous connect/disconnect cycle may still be
+        // unwinding. Letting it finish first is what stops its teardown from
+        // closing the session this call is about to open. Awaiting releases this
+        // actor, so the teardown can acquire it.
+        if let supervisor {
+            await supervisor.value
+            self.supervisor = nil
+        }
 
+        isStopping = false
+        let activation = eventLoopGroup.any().makePromise(of: Void.self)
+        self.activation = activation
+        isSupervising = true
+        supervisor = Task.detached { [self] in
+            await runSupervisor()
+        }
+        try await activation.futureResult.get()
+    }
+
+    /// Keeps a session up for as long as the policy allows, then closes
+    /// everything down exactly once.
+    private func runSupervisor() async {
+        let reason = await superviseSessions()
+        isSupervising = false
+        logger.info("OVSDB connection closed: \(reason)")
+        // A `connect()` still waiting when the supervisor gives up has to fail
+        // rather than hang. A no-op once activation succeeded.
+        failActivation(OVNManagerError.connectionFailed(reason))
+        notificationHub.finishAll()
+        stateHub.publish(.closed(reason: reason))
+    }
+
+    /// The connect/serve/reconnect loop. Returns why it stopped.
+    ///
+    /// One iteration is one *pass*: each remote is tried in turn until one gives
+    /// a usable session, that session is served until it ends, and then the next
+    /// pass begins at the remote after it — an election means the remote that
+    /// just dropped is the least likely to be the new leader.
+    ///
+    /// A pass in which no remote worked increments the failure count, which
+    /// drives the backoff, and so does a session lost to a leadership change — a
+    /// remote that keeps handing leadership back is a reason to slow down. A
+    /// session that simply dropped resets the count, but never skips the wait:
+    /// see `waitBeforeRetry`.
+    private func superviseSessions() async -> String {
+        var failures = 0
+        var next = 0
+        var sessionsThisRun = 0
+        var lastFailure: Error?
+
+        while true {
+            if let stop = stoppingReason() { return stop }
+
+            var servedIndex: Int?
+            for offset in 0..<remotes.count {
+                if let stop = stoppingReason() { return stop }
+                let index = (next + offset) % remotes.count
+                let endpoint = remotes[index]
+                stateHub.publish(.connecting(endpoint: endpoint, attempt: failures + 1))
+                do {
+                    try await openSession(to: endpoint)
+                    servedIndex = index
+                    break
+                } catch {
+                    lastFailure = error
+                    logger.warning("Cannot use OVSDB remote \(endpoint): \(error)")
+                    await endSession()
+                }
+            }
+
+            guard let servedIndex else {
+                // Nothing in the whole list answered.
+                if sessionsThisRun == 0 {
+                    // The very first connect fails rather than retrying: an
+                    // unreachable or misconfigured remote must surface at the
+                    // `connect()` call, not after an hour of silent backoff.
+                    let failure = lastFailure ?? OVNManagerError.connectionFailed(
+                        "No OVSDB remote in \(remotes) could be reached"
+                    )
+                    failActivation(failure)
+                    return "no remote in \(remotes) could be reached: \(failure)"
+                }
+                failures += 1
+                if let exhausted = exhaustedReason(failures: failures) { return exhausted }
+                guard await waitBeforeRetry(failures: failures) else {
+                    return stoppingReason() ?? "disconnected while waiting to reconnect"
+                }
+                continue
+            }
+
+            // A session is up, and vetted if leader-only mode asked for it.
+            sessionsThisRun += 1
+            next = (servedIndex + 1) % remotes.count
+            if sessionsThisRun > 1 {
+                // Server-side monitor state did not survive the drop. Told to
+                // subscribers before anything from the new session reaches them:
+                // no monitor exists on it yet, so no update can overtake this.
+                notificationHub.publishReconnected()
+            }
+            stateHub.publish(.connected(endpoint: remotes[servedIndex]))
+            succeedActivation()
+
+            await awaitSessionEnd()
+
+            if let stop = stoppingReason() { return stop }
+            if !reconnectPolicy.isEnabled {
+                return "the connection to \(remotes[servedIndex]) was lost and automatic reconnection is disabled"
+            }
+
+            if hasLostLeadership {
+                // Counted as a failure: a remote that hands leadership back the
+                // moment we arrive would otherwise never let the delay grow.
+                hasLostLeadership = false
+                failures += 1
+                if let exhausted = exhaustedReason(failures: failures) { return exhausted }
+            } else {
+                // A session that was up resets the backoff, so recovery from a
+                // genuine drop starts at `initialBackoff` however long the
+                // connection had been flapping before it.
+                failures = 0
+            }
+            // Waited even with the backoff reset, and this is load-bearing: a
+            // server that accepts a connection and closes it immediately (a
+            // half-open middlebox, a server shutting down) would otherwise be
+            // reconnected to in a tight loop, with every session counting as a
+            // success.
+            guard await waitBeforeRetry(failures: max(1, failures)) else {
+                return stoppingReason() ?? "disconnected while waiting to reconnect"
+            }
+        }
+    }
+
+    /// Bootstraps a channel to `endpoint`, starts its read loop and vets the
+    /// resulting session. Throws if any of that fails, leaving the caller to
+    /// clean up with `endSession()` and move on to the next remote.
+    private func openSession(to endpoint: OVSDBEndpoint) async throws {
+        logger.info("Connecting to OVSDB endpoint: \(endpoint)")
         let asyncChannel = try await OVSDBChannelBootstrap.connect(
             endpoint: endpoint,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
 
-        let activation = eventLoopGroup.any().makePromise(of: Void.self)
-        self.activation = activation
+        currentEndpoint = endpoint
+        serverMonitorId = nil
+        hasLostLeadership = false
+
+        let ready = eventLoopGroup.any().makePromise(of: Void.self)
+        sessionReady = ready
         readLoop = Task.detached { [self] in
             await runReadLoop(asyncChannel)
         }
+        try await ready.futureResult.get()
 
-        try await activation.futureResult.get()
+        if let leaderOnlyDatabase, remotes.count > 1 {
+            try await requireLeadership(of: leaderOnlyDatabase, at: endpoint)
+        }
+
         logger.info("Successfully connected to \(endpoint)")
+    }
+
+    /// Closes the current session, if any, and waits for its read loop to
+    /// finish, so the next attempt cannot race the previous teardown.
+    private func endSession() async {
+        if let session = liveSession.withLock({ $0 }) {
+            session.channel.close(promise: nil)
+        }
+        await awaitSessionEnd()
+    }
+
+    private func awaitSessionEnd() async {
+        guard let readLoop else { return }
+        // Awaiting releases this actor, so the read loop can acquire it to run
+        // its teardown.
+        await readLoop.value
     }
 
     /// Runs `consumeInbound` for the lifetime of the connection.
@@ -131,7 +350,7 @@ actor OVSDBConnectionCore {
             }
         } catch {
             // The loop handles its own errors; this is a failure to close.
-            logger.debug("Closing the channel to \(endpoint) failed: \(error)")
+            logger.debug("Closing the channel to \(currentEndpoint) failed: \(error)")
         }
     }
 
@@ -153,7 +372,7 @@ actor OVSDBConnectionCore {
             }
             tearDown(error: nil)
         } catch {
-            logger.error("Connection to \(endpoint) ended with an error: \(error)")
+            logger.error("Connection to \(currentEndpoint) ended with an error: \(error)")
             tearDown(error: error)
         }
     }
@@ -161,8 +380,8 @@ actor OVSDBConnectionCore {
     private func activate(channel: Channel, writer: NIOAsyncChannelOutboundWriter<ByteBuffer>) {
         liveSession.withLock { $0 = Session(channel: channel, writer: writer) }
         notificationHub.reopen()
-        activation?.succeed(())
-        activation = nil
+        sessionReady?.succeed(())
+        sessionReady = nil
         logger.debug("Channel active: \(channel.isActive), writable: \(channel.isWritable)")
     }
 
@@ -171,14 +390,18 @@ actor OVSDBConnectionCore {
     private func tearDown(error: Error?) {
         liveSession.withLock { $0 = nil }
         readLoop = nil
+        serverMonitorId = nil
 
         let failure = error ?? OVNManagerError.connectionFailed("Connection closed")
-        if let activation {
-            self.activation = nil
-            activation.fail(failure)
+        if let sessionReady {
+            self.sessionReady = nil
+            sessionReady.fail(failure)
         }
 
         if !pendingRequests.isEmpty {
+            // In-flight requests always fail on a drop, reconnection or not:
+            // their responses died with the session, and re-sending them is not
+            // this layer's call to make (a `transact` may have been applied).
             logger.info("Connection ended, failing \(pendingRequests.count) in-flight request(s)")
         }
         let pending = pendingRequests
@@ -187,23 +410,181 @@ actor OVSDBConnectionCore {
             request.settle(with: failure)
         }
 
-        // Finishes every subscription and marks the hub closed, so a
-        // `notifications()` call after the connection is gone gets a finished
-        // stream instead of one that hangs.
-        notificationHub.finishAll()
+        // Finishing every subscription and marking the hub closed is what makes
+        // a `notifications()` call after the connection is gone return a
+        // finished stream instead of one that hangs. Skipped while a supervisor
+        // is going to reconnect: there, subscriptions outlive the session and
+        // are told about the gap with a `.reconnected` event instead.
+        if isStopping || !isSupervising || !reconnectPolicy.isEnabled {
+            notificationHub.finishAll()
+        }
     }
 
     func disconnect() async {
-        guard let session = liveSession.withLock({ $0 }), let readLoop else {
+        isStopping = true
+        guard let supervisor else {
+            // Never connected, or already closed for good.
             return
         }
-        logger.info("Disconnecting from \(endpoint)")
-        // Closing the channel ends the inbound sequence, which returns the read
-        // loop and runs `tearDown`. Awaiting the loop releases this actor so
-        // that teardown can acquire it.
-        session.channel.close(promise: nil)
-        await readLoop.value
-        logger.info("Successfully disconnected from \(endpoint)")
+        logger.info("Disconnecting from \(currentEndpoint)")
+        if let session = liveSession.withLock({ $0 }) {
+            // Closing the channel ends the inbound sequence, which returns the
+            // read loop and runs `tearDown`.
+            session.channel.close(promise: nil)
+        }
+        // Interrupts a backoff sleep; the supervisor then sees `isStopping`.
+        supervisor.cancel()
+        await supervisor.value
+        self.supervisor = nil
+        logger.info("Successfully disconnected")
+    }
+
+    /// Disconnects and closes the state stream. Called when the owning
+    /// `OVSDBSocketConnection` is released: a reconnecting supervisor holds this
+    /// actor strongly and would otherwise keep re-establishing a session that
+    /// nobody can use any more.
+    func shutdown() async {
+        await disconnect()
+        stateHub.finish(reason: "the connection was released")
+    }
+
+    // MARK: - Supervisor helpers
+
+    private func stoppingReason() -> String? {
+        if isStopping { return "disconnected by request" }
+        if Task.isCancelled { return "the connection task was cancelled" }
+        return nil
+    }
+
+    private func exhaustedReason(failures: Int) -> String? {
+        guard let limit = reconnectPolicy.maximumAttempts, failures >= limit else { return nil }
+        return "gave up reconnecting after \(failures) failed attempt(s)"
+    }
+
+    /// Sleeps out the policy's backoff. Returns false when the wait was
+    /// interrupted by a `disconnect()` or cancellation.
+    private func waitBeforeRetry(failures: Int) async -> Bool {
+        var generator = SystemRandomNumberGenerator()
+        let delay = reconnectPolicy.backoff(forAttempt: failures, using: &generator)
+        stateHub.publish(.waiting(retryIn: delay, attempt: failures))
+        logger.info("Reconnecting to OVSDB in \(delay.nanoseconds / 1_000_000)ms (attempt \(failures + 1))")
+        if delay.nanoseconds > 0 {
+            do {
+                try await Task.sleep(for: .nanoseconds(delay.nanoseconds))
+            } catch {
+                return false
+            }
+        }
+        return stoppingReason() == nil
+    }
+
+    private func succeedActivation() {
+        activation?.succeed(())
+        activation = nil
+    }
+
+    private func failActivation(_ error: Error) {
+        activation?.fail(error)
+        activation = nil
+    }
+
+    // MARK: - Leader discovery
+
+    /// Asks the remote, through the `_Server` database, whether it is the leader
+    /// of `database`, and rejects the session if it is not.
+    ///
+    /// The monitor stays in place for the life of the session, so a *later*
+    /// leadership change arrives as an update (see `handleServerStatusUpdate`)
+    /// rather than as a failed write. A remote that cannot answer — `_Server`
+    /// predates neither OVN nor every ovsdb-server in the field — is accepted
+    /// with a warning; refusing to connect over a question we could not ask
+    /// would be worse than talking to a follower.
+    private func requireLeadership(of database: String, at endpoint: OVSDBEndpoint) async throws {
+        let monitorId = nextInternalIdentifier("server-monitor")
+        let requestId = JSONRPCIdentifier.string(nextInternalIdentifier("request"))
+        let request = JSONRPCRequest(
+            method: "monitor",
+            params: .array([
+                .string(OVSDBServerStatus.database),
+                .string(monitorId),
+                OVSDBServerStatus.monitorRequests
+            ]),
+            id: requestId
+        )
+
+        let response: JSONRPCResponse<JSONValue>
+        do {
+            response = try await sendRequest(
+                request,
+                id: requestId,
+                responseType: JSONRPCResponse<JSONValue>.self,
+                timeout: .seconds(10)
+            )
+        } catch {
+            // A session that died mid-check is no use to anyone, so that
+            // propagates. Anything else means the remote would not answer the
+            // question — a timeout, or a reply this client cannot read — and an
+            // unanswerable question is not grounds for refusing to connect. (A
+            // server that answers with an *error*, as one without `_Server`
+            // does, lands in the `response.error` case below instead.)
+            guard isConnected else { throw error }
+            logger.warning("\(endpoint) did not answer the _Server monitor (\(error)); using it anyway")
+            return
+        }
+
+        guard response.error == nil, let updates = response.result else {
+            let detail = response.error?.message ?? "no result"
+            logger.warning("\(endpoint) cannot report leadership of \(database) (\(detail)); using it anyway")
+            return
+        }
+        // Recorded only now: before the reply arrives there is nothing to
+        // intercept, and an unrecorded id would leak `_Server` rows into the
+        // caller's monitor stream.
+        serverMonitorId = monitorId
+
+        switch OVSDBServerStatus.leadership(ofDatabase: database, in: updates) {
+        case .leader:
+            logger.debug("\(endpoint) is the leader of \(database)")
+        case .follower:
+            throw OVNManagerError.connectionFailed(
+                "\(endpoint) is not the leader of \(database)"
+            )
+        case .notConnected:
+            throw OVNManagerError.connectionFailed(
+                "\(endpoint) is not currently serving \(database)"
+            )
+        case .unknown:
+            logger.warning("\(endpoint) did not report a \(database) row in _Server; using it anyway")
+        }
+    }
+
+    /// Handles an update on this session's internal `_Server` monitor. A remote
+    /// that has stopped leading is abandoned: the channel is closed, and the
+    /// supervisor's next pass starts at the following remote.
+    private func handleServerStatusUpdate(_ params: JSONValue?) {
+        guard let database = leaderOnlyDatabase,
+              let tableUpdates = params?.arrayValue?.dropFirst().first else {
+            return
+        }
+
+        switch OVSDBServerStatus.leadership(ofDatabase: database, in: tableUpdates) {
+        case .leader, .unknown:
+            return
+        case .follower:
+            logger.notice("\(currentEndpoint) is no longer the leader of \(database); reconnecting")
+        case .notConnected:
+            logger.notice("\(currentEndpoint) stopped serving \(database); reconnecting")
+        }
+
+        hasLostLeadership = true
+        if let session = liveSession.withLock({ $0 }) {
+            session.channel.close(promise: nil)
+        }
+    }
+
+    private func nextInternalIdentifier(_ kind: String) -> String {
+        internalRequestCount += 1
+        return "swiftovn-\(kind)-\(internalRequestCount)"
     }
 
     // MARK: - Sending
@@ -241,7 +622,7 @@ actor OVSDBConnectionCore {
 
     private func requireWriter() throws -> NIOAsyncChannelOutboundWriter<ByteBuffer> {
         guard let session = liveSession.withLock({ $0 }), session.channel.isActive else {
-            throw OVNManagerError.connectionFailed("Not connected to \(endpoint)")
+            throw OVNManagerError.connectionFailed("Not connected to \(currentEndpoint)")
         }
         return session.writer
     }
@@ -294,8 +675,9 @@ actor OVSDBConnectionCore {
 
         if let displaced = pendingRequests.updateValue(request, forKey: id) {
             // Only reachable if a caller reuses an id (JSONRPCClient's are
-            // monotonic). Failing the displaced request turns what would
-            // otherwise be a caller waiting forever into an error.
+            // monotonic, and this layer's own are strings). Failing the
+            // displaced request turns what would otherwise be a caller waiting
+            // forever into an error.
             logger.error("Request ID \(id) was reused; failing the earlier request")
             displaced.settle(with: OVNManagerError.operationFailed("Request ID \(id) was reused"))
         }
@@ -366,6 +748,17 @@ actor OVSDBConnectionCore {
             logger.error("Failed to decode notification '\(method)': \(error)")
             return
         }
+
+        // The internal `_Server` monitor is this layer's business, not the
+        // caller's: consumed here so a `monitorUpdates()` consumer never sees
+        // `Database` rows it did not ask for.
+        if inbound.method == "update",
+           let serverMonitorId,
+           inbound.params?.arrayValue?.first?.stringValue == serverMonitorId {
+            handleServerStatusUpdate(inbound.params)
+            return
+        }
+
         logger.debug("Dispatching notification: \(inbound.method)")
         notificationHub.publish(JSONRPCNotification(method: inbound.method, params: inbound.params))
     }

@@ -45,6 +45,20 @@ public protocol OVSDBTransport: Sendable {
     /// this directly so consumers can tell that their view is incomplete.
     func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent>
     var isConnectionActive: Bool { get }
+    /// See `OVSDBSocketConnection.connectionState`: where the transport is in
+    /// its lifecycle, which with automatic reconnection says more than
+    /// `isConnectionActive` can.
+    ///
+    /// The default implementation derives what it can from
+    /// `isConnectionActive`, so a transport that does not reconnect (or does not
+    /// track remotes) needs no extra code.
+    var connectionState: OVSDBConnectionState { get }
+    /// See `OVSDBSocketConnection.connectionStates()`: the transitions of
+    /// `connectionState`, starting with the current value.
+    ///
+    /// The default implementation reports the current state and finishes, which
+    /// is all a transport without a lifecycle of its own has to say.
+    func connectionStates() -> AsyncStream<OVSDBConnectionState>
 }
 
 public extension OVSDBTransport {
@@ -66,6 +80,20 @@ public extension OVSDBTransport {
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    var connectionState: OVSDBConnectionState {
+        // No remote to name and no reconnect cycle to report on: a transport
+        // that wants either implements this itself.
+        return isConnectionActive ? .connected(endpoint: nil) : .closed(reason: nil)
+    }
+
+    func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        let state = connectionState
+        return AsyncStream { continuation in
+            continuation.yield(state)
+            continuation.finish()
         }
     }
 }
