@@ -120,6 +120,16 @@ public protocol OVNManaging: Sendable {
     func deletePortGroup(uuid: String) async throws(OVNManagerError)
     func deletePortGroup(named name: String) async throws(OVNManagerError)
 
+    // Address Set Operations
+    func getAddressSets() async throws(OVNManagerError) -> [OVNAddressSet]
+    func getAddressSet(named name: String) async throws(OVNManagerError) -> OVNAddressSet?
+    func createAddressSet(_ addressSet: OVNAddressSet) async throws(OVNManagerError) -> String
+    func updateAddressSet(uuid: String, _ addressSet: OVNAddressSet) async throws(OVNManagerError)
+    func addAddresses(_ addresses: [String], toAddressSet name: String) async throws(OVNManagerError)
+    func removeAddresses(_ addresses: [String], fromAddressSet name: String) async throws(OVNManagerError)
+    func deleteAddressSet(uuid: String) async throws(OVNManagerError)
+    func deleteAddressSet(named name: String) async throws(OVNManagerError)
+
     // Load Balancer Operations
     func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer]
     func getLoadBalancer(named name: String) async throws(OVNManagerError) -> OVNLoadBalancer?
@@ -207,6 +217,7 @@ public enum OVNTable {
     public static let haChassisGroup = "HA_Chassis_Group"
     public static let acl = "ACL"
     public static let portGroup = "Port_Group"
+    public static let addressSet = "Address_Set"
     public static let loadBalancer = "Load_Balancer"
     public static let nat = "NAT"
     public static let dhcpOptions = "DHCP_Options"
