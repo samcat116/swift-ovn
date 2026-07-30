@@ -1,0 +1,42 @@
+Sources/SwiftOVN/Models/OVNPortBinding.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 19-47,51,55-57
+Sources/SwiftOVN/Models/OVNLogicalSwitchPort.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 13-20,22-24,27-33,39,43-45,49-50,56-57,59,62-64
+Sources/SwiftOVN/Models/OVNLogicalRouterPort.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 17-25,32,35,47-50,54,64-66
+Sources/SwiftOVN/Models/OVNLogicalSwitch.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 19-24,37-38,43,52-53
+  s_3f09ac638d4170::t_298381edc4df10 15,57
+Sources/SwiftOVN/Models/OVNLogicalFlow.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 18-20,22,26
+Sources/SwiftOVN/Models/OVNLogicalRouter.swift
+  s_3f09ac638d4170::t_89de375206a263 15
+  s_3f09ac638d4170::t_5c6839d7a95792 19-21,28-29,32,43-45,49,58
+Sources/SwiftOVN/Models/OVNDynamicRouting.swift
+  s_3f09ac638d4170::t_4e9ebf2ee77d9f 83-85
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 59-65,73-74,82-84
+Sources/SwiftOVN/Models/OVNNAT.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 17-26,29,33,36-37,47-49
+Sources/SwiftOVN/Models/OVNACL.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 17-30,32,36,38-39,49-54
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_3f09ac638d4170::t_5c6839d7a95792 108-155,509-602,787-1121
+  s_3f09ac638d4170::t_b9be28958f0d55 1122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "edd1c1dd6fd5259d84e1a9e65b9e8c93f1a059fb",
+  "prompts": {},
+  "sessions": {
+    "s_3f09ac638d4170": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58fecd4d-cd27-46f1-8515-34d08e634b5b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
