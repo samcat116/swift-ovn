@@ -2193,7 +2193,9 @@ public final class OVNManager: OVNManaging {
     /// Streams row changes a notification at a time, keeping one transaction's
     /// rows together and carrying the transaction id to resume a
     /// `monitor_cond_since` monitor from. The stream to use with
-    /// `startConditionalMonitoring`.
+    /// `startConditionalMonitoring`, and the one to use across a reconnect: each
+    /// batch's `origin` says whether it continues the consumer's rows or replaces
+    /// them (see `OVSDBConnection.monitorTableUpdates(monitorId:)`).
     ///
     /// Buffering and failure behave as `monitorUpdates()`'.
     nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {

@@ -30,10 +30,37 @@ public actor OVSDBConnection {
     /// reconnect that may have landed on a different member of a clustered
     /// database.
     private var negotiatedMethod: OVSDBMonitorMethod?
-    /// Watches for the transport reconnecting and re-establishes `monitors` on
-    /// the new session. One task per connection, not per monitor stream, so the
-    /// monitors are re-created once however many consumers there are.
-    private var monitorRecovery: Task<Void, Never>?
+    /// The single fan-out every monitor stream this connection hands out reads
+    /// from, fed by `pipelineTask`. See `OVSDBMonitorBroadcaster` for why the
+    /// streams go through here rather than subscribing to the transport directly.
+    private nonisolated let broadcaster: OVSDBMonitorBroadcaster
+    /// The one task consuming the transport's notification events: it parses
+    /// notifications into the broadcaster, and on a reconnect re-establishes the
+    /// monitors and publishes their replies before the updates buffered behind
+    /// them.
+    ///
+    /// Started by `connect()` and stopped by `disconnect()`, which is what keeps
+    /// it in ordinary actor state. Starting it lazily from `monitorTableUpdates()`
+    /// instead — that being `nonisolated` — would take a lock, and a lock held
+    /// across the transport subscription is a cooperative thread that can be
+    /// blocked; this package has learned that lesson before (see the note on
+    /// `deinit` in the testing section of CLAUDE.md). Nothing is missed by
+    /// deferring to `connect()`: a stream may be taken before it, but no monitor
+    /// notification can exist before there is a session to carry it.
+    private var pipelineTask: Task<Void, Never>?
+    /// Bumped per pipeline started, so that a task which unwinds *after* a
+    /// disconnect/reconnect cycle has replaced it cannot clear its successor's
+    /// handle or finish the streams the new one is feeding.
+    private var pipelineGeneration = 0
+    /// Set by `disconnect()` so a re-establishment already in flight cannot put a
+    /// monitor back on a connection that is going away.
+    ///
+    /// `disconnect()` waited for `pipelineTask` instead, which is a wait on
+    /// another task's progress — and one that a request parked on a dying session
+    /// can hold for its whole timeout. Nothing a caller asking to disconnect
+    /// should have to sit through, and the flag settles the same question without
+    /// a join.
+    private var isDisconnecting = false
 
     /// See `OVSDBSocketConnection.init(remotes:reconnect:leaderOnlyDatabase:…)`
     /// for what the cluster parameters mean.
@@ -52,6 +79,7 @@ public actor OVSDBConnection {
             logger: logger
         )
         self.logger = logger ?? Logger(label: "ovn-manager.ovsdb-connection")
+        self.broadcaster = OVSDBMonitorBroadcaster(logger: logger)
     }
 
     public init(
@@ -79,9 +107,16 @@ public actor OVSDBConnection {
     public init(transport: any OVSDBTransport, logger: Logger? = nil) {
         self.client = JSONRPCClient(transport: transport, logger: logger)
         self.logger = logger ?? Logger(label: "ovn-manager.ovsdb-connection")
+        self.broadcaster = OVSDBMonitorBroadcaster(logger: logger)
     }
 
     public func connect() async throws(OVNManagerError) {
+        isDisconnecting = false
+        // Reopened before the transport is: a connect after a previous one
+        // closed for good has to hand out live streams again, not the finished
+        // ones a closed broadcaster gives.
+        broadcaster.reopen()
+
         try await client.connect()
 
         // Send initial echo request to establish OVSDB connection
@@ -93,12 +128,18 @@ public actor OVSDBConnection {
             throw error
         }
 
-        startMonitorRecovery()
+        // The pipeline of a previous connect ended with that connection's
+        // notification hub, so this one needs its own. Started after the session
+        // is up, which misses nothing: no monitor exists on a new session yet.
+        startPipeline()
     }
 
     public func disconnect() async throws(OVNManagerError) {
-        monitorRecovery?.cancel()
-        monitorRecovery = nil
+        // Set before anything is awaited, so a re-establishment in flight stops
+        // rather than putting a monitor back on the session being torn down.
+        isDisconnecting = true
+        pipelineTask?.cancel()
+        pipelineTask = nil
 
         // Cancel all active monitors
         for monitorId in monitors.keys {
@@ -108,6 +149,7 @@ public actor OVSDBConnection {
         negotiatedMethod = nil
 
         try await client.disconnect()
+        broadcaster.finishAll()
         logger.info("Disconnected from OVSDB")
     }
 
@@ -130,69 +172,191 @@ public actor OVSDBConnection {
         return client.connectionStates()
     }
 
-    // MARK: - Monitor recovery
+    // MARK: - The monitor pipeline
 
-    /// Starts the task that re-creates this connection's monitors whenever the
-    /// transport reconnects.
-    private func startMonitorRecovery() {
-        guard monitorRecovery == nil else { return }
+    /// Starts the task that turns the transport's notification events into this
+    /// connection's monitor pipeline, unless one is already running.
+    ///
+    /// The transport subscription is taken here, synchronously, before the task
+    /// exists: a caller that takes a stream and then immediately starts a monitor
+    /// must not have that monitor's first notification arrive with nothing
+    /// subscribed to see it.
+    private func startPipeline() {
+        guard pipelineTask == nil else { return }
+        pipelineGeneration += 1
+        let generation = pipelineGeneration
         let events = client.notificationEvents()
-        monitorRecovery = Task { [weak self] in
+        // `self` weakly, the broadcaster strongly: a connection nobody holds any
+        // more must not be kept alive by its own pipeline, but its consumers
+        // still have to be finished rather than left waiting.
+        pipelineTask = Task { [weak self, broadcaster] in
             for await event in events {
-                guard case .reconnected = event else { continue }
-                await self?.reestablishMonitors()
+                guard let self else { break }
+                await self.consume(event)
             }
+            guard let self else {
+                // The connection was released, so nothing can revive it and there
+                // is no state left to check this against.
+                broadcaster.finishAll()
+                return
+            }
+            await self.pipelineDidEnd(generation: generation)
+        }
+    }
+
+    /// Retires a pipeline whose event stream has ended: the transport's hub
+    /// finished for good, so nothing more can reach these streams and a
+    /// subscription taken from here on has to come back finished.
+    ///
+    /// A no-op for a pipeline that has already been replaced — a disconnect and a
+    /// fresh `connect()` can both happen before a cancelled task gets to unwind,
+    /// and finishing the broadcaster then would kill the new pipeline's streams.
+    private func pipelineDidEnd(generation: Int) {
+        guard generation == pipelineGeneration else { return }
+        pipelineTask = nil
+        broadcaster.finishAll()
+    }
+
+    /// Handles one transport notification event.
+    ///
+    /// The whole pipeline runs here, one event at a time, and that serialization
+    /// is the point: while a reconnect's monitor requests are in flight this is
+    /// not draining the transport's hub, so the updates of the new monitors pile
+    /// up in the hub's bounded per-subscriber buffer and are published *after*
+    /// the replies they belong behind. (If they pile up past the bound the hub
+    /// reports it, and the gap surfaces as `notificationsDropped` exactly as a
+    /// slow consumer's would.)
+    private func consume(_ event: JSONRPCNotificationEvent) async {
+        switch event {
+        case .notification(let notification):
+            guard let monitorNotification = OVSDBMonitorNotification(notification) else { return }
+            let batch = OVSDBTableUpdates(
+                monitorId: monitorNotification.monitorId,
+                method: monitorNotification.method,
+                lastTransactionId: monitorNotification.lastTransactionId,
+                updates: Self.parseTableUpdates(
+                    monitorNotification.tableUpdates,
+                    method: monitorNotification.method
+                )
+            )
+            // Recorded before the publish, so this connection's idea of where a
+            // monitor has got to never runs behind what it has handed out.
+            if let transactionId = batch.lastTransactionId {
+                record(transactionId: transactionId, forMonitor: batch.monitorId)
+            }
+            broadcaster.publish(.updates(batch))
+        case .dropped(let count):
+            broadcaster.publish(.dropped(count: count))
+        case .reconnected:
+            await reestablishMonitors()
         }
     }
 
     /// Re-establishes every monitor on the session that just came up, under the
     /// same IDs, resuming from the last transaction id delivered where the
-    /// monitor's method allows it.
+    /// monitor's method allows it, and publishes what each replies with.
     ///
-    /// The updates the re-established monitors reply with are deliberately
-    /// dropped, and consumers are told the stream has a hole
-    /// (`OVNManagerError.monitorInterrupted`) instead. Handing a snapshot — or a
-    /// `monitor_cond_since` delta — to a stream from here would race the live
-    /// updates already flowing on the new monitor, since the two would reach a
-    /// consumer by different paths; ordering them means routing every consumer's
-    /// updates through this connection rather than straight from the transport.
-    /// Resuming still pays for itself even discarded: it is the difference
-    /// between the server sending what changed and re-sending a whole Southbound
-    /// database.
+    /// Those replies are what a consumer replicating rows needs to carry on: a
+    /// resumed `monitor_cond_since` reply is exactly the changes it missed, and
+    /// any other reply is a fresh snapshot that replaces what it had. Which one
+    /// it got is on the batch (`OVSDBTableUpdates.Origin`), because merging a
+    /// snapshot instead of replacing would leave rows deleted during the outage
+    /// in place forever.
+    ///
+    /// Publishing them here, from the same task that drains the transport, is
+    /// what makes them safe to deliver at all: the reply and the new monitor's
+    /// live updates reach a consumer by two different paths, and this is the one
+    /// place that sees both.
     private func reestablishMonitors() async {
         let existing = monitors
-        guard !existing.isEmpty else { return }
+        guard !existing.isEmpty, !isDisconnecting else { return }
         // The new session may be a different member of the cluster, which need
         // not implement the method the previous one did.
         negotiatedMethod = nil
         logger.info("Connection re-established; restarting \(existing.count) monitor(s)")
 
         for (monitorId, state) in existing {
+            if isDisconnecting { return }
             do {
-                switch state.method {
-                case .monitor:
-                    // Nothing to resume from: plain `monitor` reports no
-                    // transaction ids.
-                    _ = try await startMonitoring(
-                        database: state.database,
-                        tables: state.tables,
-                        monitorId: monitorId
-                    )
-                case .monitorCond, .monitorCondSince:
-                    let session = try await startConditionalMonitoring(
-                        database: state.database,
-                        tables: state.tables,
-                        monitorId: monitorId,
-                        since: state.lastTransactionId
-                    )
-                    let outcome = session.resumed ? "resumed" : "from a full snapshot"
-                    logger.info("Restarted monitor \(monitorId) on \(state.database) \(outcome)")
+                let session = try await restartMonitor(monitorId, state: state)
+                guard !isDisconnecting else {
+                    // `disconnect()` ran while this request was in flight, and has
+                    // already emptied the monitor table; this registration must
+                    // not outlive it.
+                    monitors.removeValue(forKey: monitorId)
+                    return
                 }
+                logger.info(
+                    """
+                    Restarted monitor \(monitorId) on \(state.database) \
+                    \(session.resumed ? "resumed" : "from a full snapshot") \
+                    (\(session.initialUpdates.count) row(s))
+                    """
+                )
+                // Published even when it carries no rows: an empty snapshot says
+                // every row the consumer held is gone, and an empty delta says it
+                // is back in sync — neither is nothing.
+                broadcaster.publish(.updates(OVSDBTableUpdates(
+                    monitorId: monitorId,
+                    method: session.method,
+                    origin: session.resumed ? .resumed : .snapshot,
+                    lastTransactionId: session.lastTransactionId,
+                    updates: session.initialUpdates
+                )))
             } catch {
-                // The new session may itself have died already; the next
-                // reconnect runs this again, so there is nothing to retry here.
                 logger.error("Failed to restart monitor \(monitorId) on \(state.database): \(error)")
+                guard client.isConnected else {
+                    // The new session died while its monitors were being put
+                    // back. The supervisor is already on its way to another one
+                    // and will run this again, so reporting a failure now would
+                    // end streams that are about to start working.
+                    logger.info("Monitor \(monitorId) will be restarted on the next session")
+                    continue
+                }
+                // The session is fine and the server refused, so this monitor is
+                // not coming back on its own. Forgotten rather than left
+                // registered: every later reconnect would otherwise retry
+                // something that has already failed against a working session,
+                // and `stopMonitoring` would cancel a monitor no server has.
+                monitors.removeValue(forKey: monitorId)
+                broadcaster.publish(.interrupted(
+                    monitorId: monitorId,
+                    reason: """
+                    Monitor \(monitorId) on \(state.database) could not be re-established after the \
+                    connection came back and has been abandoned: \(error). Start a new monitor and \
+                    re-read the rows.
+                    """
+                ))
             }
+        }
+    }
+
+    /// Puts one monitor back on the current session, the way it was established.
+    private func restartMonitor(
+        _ monitorId: String,
+        state: MonitorState
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession {
+        switch state.method {
+        case .monitor:
+            // Nothing to resume from: plain `monitor` reports no transaction ids,
+            // so its reply is always a fresh snapshot.
+            let restarted = try await startMonitoring(
+                database: state.database,
+                tables: state.tables,
+                monitorId: monitorId
+            )
+            return OVSDBMonitorSession(
+                monitorId: monitorId,
+                method: .monitor,
+                initialUpdates: restarted.initialUpdates
+            )
+        case .monitorCond, .monitorCondSince:
+            return try await startConditionalMonitoring(
+                database: state.database,
+                tables: state.tables,
+                monitorId: monitorId,
+                since: state.lastTransactionId
+            )
         }
     }
 
@@ -570,8 +734,9 @@ public actor OVSDBConnection {
     ///
     /// The monitor is remembered, so a reconnect re-creates it on the new session
     /// under the same ID and `stopMonitoring(monitorId:)` keeps working across
-    /// one. What a reconnect cannot do is replay what happened while the
-    /// connection was down — see `monitorUpdates()`.
+    /// one. The re-created monitor's reply is a fresh snapshot — plain `monitor`
+    /// cannot resume — and is delivered to the update streams as a batch with
+    /// `origin == .snapshot`, which replaces whatever a consumer had.
     public func startMonitoring(
         database: String,
         tables: [String: OVSDBMonitorRequest],
@@ -641,6 +806,10 @@ public actor OVSDBConnection {
             throw Self.conditionsUnsupported(database: database)
         }
 
+        // What is registered under this id before any attempt overwrites it, so
+        // a failure can put it back (see the `catch` below).
+        let previous = monitors[id]
+
         while true {
             // Registered *before* the request goes out. ovsdb-server can put the
             // first `update3` on the wire immediately behind its reply, and the
@@ -682,20 +851,33 @@ public actor OVSDBConnection {
                 )
                 return session
             } catch {
-                // The monitor never started, so it must not be left registered —
-                // `disconnect()` would try to cancel it.
+                // This attempt started no monitor, so it must not be left
+                // registered — `disconnect()` would try to cancel it. What goes
+                // back is whatever was registered before, which is not nothing
+                // when a reconnect is re-establishing a monitor that is already
+                // known: forgetting it here would mean no later session restores
+                // it either. A `stopMonitoring` that ran while the request was in
+                // flight has already emptied the slot, and that decision is the
+                // newer one, so it stands.
                 guard error.indicatesUnknownMethod, let next = method.fallback else {
-                    monitors.removeValue(forKey: id)
+                    restore(previous, forMonitor: id)
                     throw error
                 }
                 if isFiltered, next == .monitor {
-                    monitors.removeValue(forKey: id)
+                    restore(previous, forMonitor: id)
                     throw Self.conditionsUnsupported(database: database)
                 }
                 logger.info("Server does not implement \(method); falling back to \(next)")
                 method = next
             }
         }
+    }
+
+    /// Undoes a failed attempt's registration, unless the slot has been emptied
+    /// meanwhile — see the call sites in `startConditionalMonitoring`.
+    private func restore(_ previous: MonitorState?, forMonitor id: String) {
+        guard monitors[id] != nil else { return }
+        monitors[id] = previous
     }
 
     /// Issues one monitor request with the given method and parses its reply.
@@ -791,17 +973,19 @@ public actor OVSDBConnection {
     /// Nil for a monitor established with `monitor_cond` or `monitor`, neither of
     /// which reports transaction ids.
     ///
-    /// This tracks what was handed to the stream, not what a consumer finished
-    /// with, and with several concurrent streams it follows whichever is furthest
-    /// along. A consumer whose processing can fail — and which therefore must not
-    /// resume past a batch it did not finish — should keep the
-    /// `lastTransactionId` of the batch it last processed instead.
+    /// This tracks what this connection published to its streams, not what a
+    /// consumer finished with. A consumer whose processing can fail — and which
+    /// therefore must not resume past a batch it did not finish — should keep the
+    /// `lastTransactionId` of the batch it last processed instead. It is also
+    /// what a reconnect resumes from, so this is the point after which changes
+    /// are guaranteed to have been *delivered*, not the point up to which they
+    /// were handled.
     public func lastTransactionId(forMonitor monitorId: String) -> String? {
         return monitors[monitorId]?.lastTransactionId
     }
 
     /// Records the transaction id an `update3` reported for a monitor. Called by
-    /// `monitorTableUpdates()` as it delivers each batch.
+    /// the pipeline as it publishes each batch.
     func record(transactionId: String, forMonitor monitorId: String) {
         monitors[monitorId]?.lastTransactionId = transactionId
     }
@@ -838,9 +1022,9 @@ public actor OVSDBConnection {
     ///
     /// Changes from a conditional monitor are included, one row at a time like
     /// the rest — but a `modify` from one reports its changed columns in `diff`
-    /// with `old` and `new` nil (see `OVSDBUpdate`), and the transaction id
-    /// needed to resume the monitor is not per-row and so is not here. Use
-    /// `monitorTableUpdates()` for either.
+    /// with `old` and `new` nil (see `OVSDBUpdate`), and neither the transaction
+    /// id needed to resume the monitor nor the batch's `origin` is per-row, so
+    /// neither is here. Use `monitorTableUpdates()` for any of them.
     ///
     /// Create the stream *before* calling `startMonitoring` so no update is
     /// missed; updates are buffered while the consumer is between iterations.
@@ -852,12 +1036,10 @@ public actor OVSDBConnection {
     /// lost, so restart the monitor to resynchronize from a fresh snapshot
     /// instead of continuing from an incomplete view.
     ///
-    /// A reconnect ends the stream with `OVNManagerError.monitorInterrupted` for
-    /// the same reason: the monitors have been re-created on the new session
-    /// automatically, but the changes made while the connection was down were
-    /// never sent to anyone. Recover by re-reading the rows and taking a new
-    /// stream — do not call `startMonitoring` again, or the monitor will be
-    /// duplicated.
+    /// A reconnect does not end the stream — the monitors are re-established and
+    /// their rows arrive here — but a consumer replicating rows cannot tell a
+    /// resumed delta from a replacement snapshot at this granularity, which is a
+    /// reason to prefer `monitorTableUpdates()` for that job.
     ///
     /// Everything this stream can fail with is an `OVNManagerError`, but the
     /// failure type stays `any Error`: every `AsyncThrowingStream` initializer
@@ -910,58 +1092,59 @@ public actor OVSDBConnection {
     /// `monitor_cond_since` and the last transaction id this consumer processed,
     /// restarting no longer means re-downloading the database.
     ///
-    /// A reconnect ends the stream with `OVNManagerError.monitorInterrupted`. The
-    /// monitor itself has already been re-established on the new session (resumed
-    /// from the last transaction id this connection delivered, where its method
-    /// allows), but the changes made while the connection was down reached nobody:
-    /// take a new stream, and re-read whatever rows this consumer replicates —
-    /// or resume from the last transaction id *it* processed, with
-    /// `startConditionalMonitoring(since:)` under a new monitor id.
+    /// A reconnect does **not** end the stream. The monitors are re-established
+    /// on the new session and what they reply with arrives here first, ahead of
+    /// that session's live updates: a `monitor_cond_since` monitor resumed from
+    /// the transaction id this connection last delivered yields a batch with
+    /// `origin == .resumed`, holding exactly the changes made while the
+    /// connection was down, and anything that could not be resumed yields
+    /// `origin == .snapshot`, which **replaces** the consumer's rows rather than
+    /// adding to them (see `OVSDBTableUpdates.Origin`). A consumer that ignores
+    /// `origin` and merges everything will keep rows that were deleted during the
+    /// outage.
+    ///
+    /// The one reconnect that does end the stream is a monitor the new server
+    /// refuses: it has been abandoned, and rather than wait for updates that will
+    /// never come the stream fails with `OVNManagerError.monitorInterrupted`. A
+    /// stream filtered to a different monitor carries on.
     ///
     /// Everything this stream can fail with is an `OVNManagerError`, but the
     /// failure type stays `any Error`: every `AsyncThrowingStream` initializer is
     /// constrained to `Failure == any Error`, so a typed-failure stream cannot be
     /// built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {
-        let notifications = client.monitorNotifications()
+        // Synchronous, so the subscription is in place by the time this returns
+        // and a monitor started on the caller's next line cannot out-run it. The
+        // pipeline feeding the broadcaster has been running since `init`.
+        let events = broadcaster.subscribe()
+
         return AsyncThrowingStream(
             bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
         ) { continuation in
             let task = Task {
-                do {
-                    for try await notification in notifications {
-                        if let monitorId, monitorId != notification.monitorId {
-                            continue
-                        }
-
-                        let batch = OVSDBTableUpdates(
-                            monitorId: notification.monitorId,
-                            method: notification.method,
-                            lastTransactionId: notification.lastTransactionId,
-                            updates: Self.parseTableUpdates(
-                                notification.tableUpdates,
-                                method: notification.method
-                            )
-                        )
-
-                        // Recorded before the yield, so that the connection's
-                        // idea of where the monitor has got to never runs ahead
-                        // of what it handed out.
-                        if let transactionId = notification.lastTransactionId {
-                            await self.record(transactionId: transactionId, forMonitor: notification.monitorId)
-                        }
-
+                for await event in events {
+                    switch event {
+                    case .updates(let batch):
+                        if let monitorId, monitorId != batch.monitorId { continue }
+                        // `.bufferingOldest` keeps what is already buffered and
+                        // rejects this batch, so the consumer sees an unbroken
+                        // run followed by the error rather than a silent gap.
                         if case .dropped = continuation.yield(batch) {
                             continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
                             return
                         }
+                    case .dropped(let count):
+                        continuation.finish(throwing: OVNManagerError.notificationsDropped(count: count))
+                        return
+                    case .interrupted(let interrupted, let reason):
+                        // A stream following one monitor is unaffected by another
+                        // one being abandoned.
+                        guard monitorId == nil || monitorId == interrupted else { continue }
+                        continuation.finish(throwing: OVNManagerError.monitorInterrupted(reason))
+                        return
                     }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
-                        .connectionFailed("Monitor stream failed: \($0)")
-                    })
                 }
+                continuation.finish()
             }
             continuation.onTermination = { _ in
                 task.cancel()

@@ -213,6 +213,18 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
   of silent backoff. Only sessions that were once up are re-established. A
   `connect()` issued *while* a reconnect is in flight waits for that reconnect
   rather than starting a second supervisor.
+- **A session opened while stopping has to be closed by the supervisor.**
+  `disconnect()` closes the *live* session, and `activate` only installs one
+  part-way through `openSession`; a disconnect landing in that window finds
+  nothing to close, and cancelling the supervisor does not reach it either
+  (`openSession` waits on an `EventLoopPromise`, and `EventLoopFuture.get()`
+  ignores cancellation). Without the `stoppingReason()` check that follows a
+  successful `openSession`, the supervisor went on to serve that session, parked
+  in `awaitSessionEnd()` on a channel nobody would ever close, while
+  `disconnect()` waited on the supervisor — both forever, with no failure
+  output. It presents as the whole test run hanging with unrelated tests left
+  unfinished, and it needs a loaded machine to hit: `swift test` under two CPUs
+  reproduced it in roughly a third of runs where an idle machine never did.
 - **Two promises, deliberately.** `sessionReady` is per session (succeeded when
   the writer is installed, failed by `tearDown`); `activation` is per `connect()`
   and only the supervisor completes it. Failing `activation` from `tearDown`
@@ -230,16 +242,48 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
 - **The notification hub survives a recoverable drop.** `tearDown` only calls
   `finishAll()` when nothing is going to reconnect; otherwise subscribers stay and
   get a `.reconnected` event, published between sessions (before any monitor
-  exists on the new one, so no update can overtake it). `OVSDBConnection` restarts
-  its stored monitors when it sees that event — resuming a `monitor_cond_since`
-  one from the transaction id it last delivered — while the update streams get
-  `monitorInterrupted`.
-  The re-established monitor's own reply (a resumed delta or a fresh snapshot) is
-  discarded rather than delivered: it and the new monitor's live updates would
-  reach a consumer by two different paths, with no ordering between them.
-  Delivering it means routing every consumer's updates through `OVSDBConnection`
-  instead of straight from the transport, so that one place can interleave them —
-  worth doing, and the reason `monitorInterrupted` exists in the meantime.
+  exists on the new one, so no update can overtake it).
+- **One pipeline per connection, and it is what makes a reconnect invisible.**
+  `OVSDBConnection` does not let its `monitorTableUpdates()` /`monitorUpdates()`
+  streams subscribe to the transport. A single task (`startPipeline`) consumes
+  the hub's events, parses them, and re-publishes into a connection-owned
+  `OVSDBMonitorBroadcaster` the streams subscribe to instead. On `.reconnected`
+  that same task re-establishes every stored monitor — resuming a
+  `monitor_cond_since` one from the transaction id last delivered — and publishes
+  each reply *before* the live updates of the new session, which are meanwhile
+  piling up unread in the hub's bounded buffer behind it. That ordering is the
+  whole reason the pipeline exists: a reply is the answer to a request and the
+  live updates come from the hub, so only a place that sees both can interleave
+  them. Things that follow from it:
+  - **`origin` is not decoration.** A resumed reply is a delta to apply, a
+    non-resumed one is a snapshot that *replaces* the consumer's rows — merging
+    it leaves rows deleted during the outage in place forever. That is why the
+    reply is published even when it carries no rows.
+  - **A re-establishment that fails is only terminal if the session is up.** A
+    server that refuses the monitor means it is never coming back, so it is
+    forgotten and its streams get `monitorInterrupted`; a session that died
+    mid-recovery means the supervisor is already fetching another one that will
+    run the same recovery, so reporting then would kill streams about to work.
+  - **The pipeline task is plain actor state, started by `connect()`.** It could
+    instead start lazily from `monitorTableUpdates()`, but that is `nonisolated`,
+    so it would need a lock — and a lock held across the transport subscription
+    is a cooperative thread that can be blocked, which in this package's test
+    suite means the whole run hangs with no failure output (the same trap as the
+    `deinit` note under Testing Approach). Deferring to `connect()` misses
+    nothing: a stream may be taken earlier, but no monitor notification exists
+    before there is a session to carry it. It does mean a connection driven by a
+    mock transport has no pipeline until `connect()` succeeds, which is why
+    `MonitorStubTransport` answers `echo`.
+  - **`disconnect()` does not wait for the pipeline**, only cancels it and sets
+    `isDisconnecting`. A join there is a wait on another task's progress, and a
+    re-establishment parked on a monitor request can hold it for the request's
+    whole timeout — NIO's `EventLoopFuture.get()` ignores cancellation, so
+    cancelling does not free it. The flag settles the only question the join
+    answered: a recovery in flight must not re-register a monitor behind
+    `monitors.removeAll()`.
+  - **`JSONRPCClient`'s own streams still end on a reconnect.** That layer does
+    not track monitors, so it cannot put anything back — `monitorInterrupted`
+    there means what it always did.
 - **A released connection must stop reconnecting.** The supervisor holds the core
   strongly, so `OVSDBSocketConnection.deinit` spawns a task that shuts the core
   down and only then shuts down an owned event-loop group.
