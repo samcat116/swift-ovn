@@ -38,3 +38,16 @@ public enum JSONRPCIdentifier: Codable, Hashable, Sendable {
         }
     }
 }
+
+public extension JSONRPCIdentifier {
+    /// The identifier as a plain JSON value, for the messages that carry
+    /// another message's id as a *parameter* rather than as their own —
+    /// `cancel` is the one this library sends (RFC 7047 §4.1.4).
+    var jsonValue: JSONValue {
+        switch self {
+        case .string(let value): .string(value)
+        case .number(let value): .number(Double(value))
+        case .null: .null
+        }
+    }
+}
