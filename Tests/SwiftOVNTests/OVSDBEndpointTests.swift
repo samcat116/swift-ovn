@@ -25,10 +25,23 @@ final class OVSDBEndpointTests: XCTestCase {
         XCTAssertEqual(endpoint, .tcp(host: "2001:db8::1", port: 6641))
     }
 
+    #if TLS
     func testParsesSSLEndpointWithDefaultTLSConfiguration() throws {
         let endpoint = try OVSDBEndpoint(parsing: "ssl:central.example.com:6642")
         XCTAssertEqual(endpoint, .ssl(host: "central.example.com", port: 6642, tls: OVSDBTLSConfiguration()))
     }
+    #else
+    /// With the `TLS` trait off, `ssl:` cannot be a compile error here (the
+    /// string is only known at runtime), so it must be a clear throw instead.
+    func testRejectsSSLEndpointWhenTLSTraitDisabled() {
+        XCTAssertThrowsError(try OVSDBEndpoint(parsing: "ssl:central.example.com:6642")) { error in
+            XCTAssertTrue(
+                "\(error)".contains("TLS"),
+                "Error should name the TLS trait, got: \(error)"
+            )
+        }
+    }
+    #endif
 
     func testRejectsUnknownScheme() {
         XCTAssertThrowsError(try OVSDBEndpoint(parsing: "udp:host:6641"))
@@ -60,12 +73,14 @@ final class OVSDBEndpointTests: XCTestCase {
     // MARK: - Description round trip
 
     func testDescriptionRoundTrips() throws {
-        let strings = [
+        var strings = [
             "unix:/var/run/ovn/ovnnb_db.sock",
             "tcp:central.example.com:6641",
-            "tcp:[2001:db8::1]:6641",
-            "ssl:central.example.com:6642"
+            "tcp:[2001:db8::1]:6641"
         ]
+        #if TLS
+        strings.append("ssl:central.example.com:6642")
+        #endif
         for string in strings {
             let endpoint = try OVSDBEndpoint(parsing: string)
             XCTAssertEqual(endpoint.description, string)
@@ -80,10 +95,12 @@ final class OVSDBEndpointTests: XCTestCase {
         XCTAssertEqual(OVSDBEndpoint.defaultSouthboundPort, 6642)
     }
 
+    #if TLS
     func testSSLConvenienceUsesDefaultTLSConfiguration() {
         XCTAssertEqual(
             OVSDBEndpoint.ssl(host: "h", port: 6642),
             .ssl(host: "h", port: 6642, tls: OVSDBTLSConfiguration())
         )
     }
+    #endif
 }

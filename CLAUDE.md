@@ -16,6 +16,11 @@ swift build
 # Run tests
 swift test
 
+# Build/test with the TLS trait off (the other configuration CI covers).
+# Both must pass — see Package Traits below.
+swift build --disable-default-traits
+swift test --disable-default-traits
+
 # Build in release mode
 swift build -c release
 
@@ -48,7 +53,7 @@ The codebase follows a clean architecture with clear separation of concerns:
 
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
-   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias)
+   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
    - `OVSDBConnection.swift`: OVSDB protocol with real-time monitoring via AsyncSequence
 
 2. **High-level managers** (`/Sources/SwiftOVN/Managers/`):
@@ -80,6 +85,36 @@ The codebase uses a comprehensive `SwiftOVNError` enum with specific cases:
 - `decodingError`
 
 ## Important Implementation Details
+
+### Package Traits
+
+The package declares one trait, `TLS`, in the default trait set. It gates the
+`swift-nio-ssl` (and `NIOTLS`) dependency so consumers that only use `unix:` or
+`tcp:` endpoints do not compile BoringSSL.
+
+When touching TLS code, keep both configurations building:
+
+- Guard TLS-only code with `#if TLS`. That includes the `NIOSSL`/`NIOTLS`
+  imports, `TLSSetup`/`makeTLSSetup()`/`makeSSLContext`/`isIPAddressLiteral`,
+  and `TLSHandshakeWaitHandler` in `OVSDBSocketConnection.swift`.
+- Any `switch` over `OVSDBEndpoint` needs its `case .ssl` inside `#if TLS`,
+  because with the trait off that case is `@available(*, unavailable)` and is
+  excluded from exhaustiveness checking.
+- `OVSDBEndpoint.ssl` (both the case and the `ssl(host:port:)` convenience) is
+  declared twice — once normally, once as `@available(*, unavailable, message:)`
+  — so a trait-off build reports *why* it is missing rather than "type has no
+  member 'ssl'". Keep the two messages in sync.
+- `OVSDBTLSConfiguration` stays available in both configurations; it is inert
+  data, and the unavailable `ssl` case still has to name its payload type.
+- `OVSDBEndpoint(parsing:)` cannot fail at compile time for an `ssl:` string, so
+  with the trait off it throws instead.
+- New TLS-only tests go behind `#if TLS`; `TLSTransportTests.swift` wraps the
+  whole file.
+
+Note that a `--disable-default-traits` build rewrites `Package.resolved` to drop
+the now-unused `swift-nio-ssl` pin. That is SwiftPM pruning, not a real change —
+`git checkout Package.resolved` after building that way, and keep the pin in the
+committed lockfile so the default configuration resolves offline.
 
 ### Socket Paths
 Default Unix socket paths used in examples:

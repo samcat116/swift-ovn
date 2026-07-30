@@ -10,16 +10,27 @@ on:
 
 jobs:
   test:
-    name: Build and Test
+    # The TLS trait is on by default, so `traits: default` is the configuration
+    # consumers get; `traits: none` guards the `#if TLS` fallbacks, which
+    # nothing else compiles.
+    name: Build and Test (traits: ${{ matrix.traits }})
     runs-on: ubuntu-latest
     container:
       image: swift:6.2
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - traits: default
+            flags: ""
+          - traits: none
+            flags: "--disable-default-traits"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Build
-        run: swift build
+        run: swift build ${{ matrix.flags }}
 
       - name: Run tests
-        run: swift test
+        run: swift test ${{ matrix.flags }}

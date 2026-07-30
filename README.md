@@ -6,7 +6,7 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 
 - 🚀 **Type-Safe Swift Models**: Strongly typed, Codable structs for all OVN and OVS database schemas
 - ⚡ **High Performance**: SwiftNIO-based asynchronous socket communication
-- 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL)
+- 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL, behind an opt-out [`TLS` trait](#the-tls-trait))
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
 - 🐧 **Linux-Targeted**: Built for the Linux hosts OVN/OVS run on; builds on macOS for local development
@@ -22,6 +22,27 @@ dependencies: [
     .package(url: "https://github.com/samcat116/SwiftOVN.git", from: "1.0.0")
 ]
 ```
+
+### The `TLS` trait
+
+TLS support is a [package trait](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0450-swiftpm-package-traits.md)
+named `TLS`, **enabled by default** — the dependency above gets `ssl:` support
+and needs no changes.
+
+If you only ever talk to a local `unix:` socket (the common case for an agent on
+an OVN host) or a cleartext `tcp:` one, opt out with `traits: []`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/samcat116/SwiftOVN.git", from: "1.0.0", traits: [])
+]
+```
+
+That drops the swift-nio-ssl dependency, so your build never compiles
+BoringSSL — a large C target that otherwise dominates this package's cold build
+time (roughly halved on our measurements). In exchange, `OVSDBEndpoint.ssl` is
+unavailable (referring to it is a compile error naming the trait) and
+`OVSDBEndpoint(parsing:)` rejects `ssl:` strings at runtime.
 
 ## Quick Start
 
@@ -182,6 +203,9 @@ let endpoint = try OVSDBEndpoint(parsing: "tcp:ovn-central.example.com:6641")
 The existing `socketPath:` initializers are unchanged and equivalent to
 `.unix(path:)`.
 
+The `.ssl` endpoint requires the [`TLS` trait](#the-tls-trait), which is enabled
+by default. `.unix` and `.tcp` work either way.
+
 ### Custom Connection Configuration
 
 ```swift
@@ -286,7 +310,8 @@ into it, so match on the type in the `catch`:
 ## Requirements
 
 - Swift 6.2+
-- SwiftNIO 2.98.0+, swift-nio-ssl 2.37.1+
+- SwiftNIO 2.98.0+, and swift-nio-ssl 2.37.1+ when the [`TLS` trait](#the-tls-trait)
+  is enabled (the default)
 - **Linux** for deployment — OVN/OVS run there, and that is where this library
   is meant to run. macOS 26+ builds for local development and testing only;
   there is no OVSDB server to connect to on Apple platforms, so the floor is
