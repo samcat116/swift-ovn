@@ -6,11 +6,11 @@ A comprehensive Swift package for managing OVN (Open Virtual Network) and OVS (O
 
 - 🚀 **Type-Safe Swift Models**: Strongly typed, Codable structs for all OVN and OVS database schemas
 - ⚡ **High Performance**: SwiftNIO-based asynchronous socket communication
-- 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL)
+- 🔌 **Flexible Transport**: Local Unix sockets or remote databases over `tcp:`/`ssl:` (NIOSSL, behind an opt-out [`TLS` trait](#the-tls-trait))
 - 🔄 **Modern Concurrency**: Built with Swift's async/await and AsyncSequence
 - 📡 **Real-time Monitoring**: Monitor database changes in real-time using AsyncSequence
 - 🐧 **Linux-Targeted**: Built for the Linux hosts OVN/OVS run on; builds on macOS for local development
-- 🛡️ **Comprehensive Error Handling**: Detailed error types and proper error propagation
+- 🛡️ **Typed Errors**: The manager APIs are `throws(OVNManagerError)`, so failures are exhaustively handleable
 - 📚 **Feature Complete**: Support for all major OVN and OVS operations
 
 ## Installation
@@ -22,6 +22,27 @@ dependencies: [
     .package(url: "https://github.com/samcat116/SwiftOVN.git", from: "1.0.0")
 ]
 ```
+
+### The `TLS` trait
+
+TLS support is a [package trait](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0450-swiftpm-package-traits.md)
+named `TLS`, **enabled by default** — the dependency above gets `ssl:` support
+and needs no changes.
+
+If you only ever talk to a local `unix:` socket (the common case for an agent on
+an OVN host) or a cleartext `tcp:` one, opt out with `traits: []`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/samcat116/SwiftOVN.git", from: "1.0.0", traits: [])
+]
+```
+
+That drops the swift-nio-ssl dependency, so your build never compiles
+BoringSSL — a large C target that otherwise dominates this package's cold build
+time (roughly halved on our measurements). In exchange, `OVSDBEndpoint.ssl` is
+unavailable (referring to it is a compile error naming the trait) and
+`OVSDBEndpoint(parsing:)` rejects `ssl:` strings at runtime.
 
 ## Quick Start
 
@@ -90,18 +111,32 @@ print("Bridge statistics: \(stats)")
 let monitorId = try await SwiftOVN.startMonitoring(tables: ["Logical_Switch", "Logical_Switch_Port"])
 
 // Process updates in real-time
-for try await update in SwiftOVN.monitorUpdates() {
-    if let newRow = update.new {
-        print("Row updated: \(newRow)")
+do {
+    for try await update in SwiftOVN.monitorUpdates() {
+        if let newRow = update.new {
+            print("Row updated: \(newRow)")
+        }
+        if let oldRow = update.old {
+            print("Previous row: \(oldRow)")
+        }
     }
-    if let oldRow = update.old {
-        print("Previous row: \(oldRow)")
-    }
+} catch OVNManagerError.notificationsDropped(let count) {
+    // The consumer fell behind and `count` updates were discarded, so this
+    // view is now incomplete. Restart the monitor for a fresh snapshot.
+    print("Missed \(count) updates, resynchronizing")
 }
 
 // Stop monitoring when done
 try await SwiftOVN.stopMonitoring(monitorId: monitorId)
 ```
+
+Update streams buffer a bounded number of updates per consumer
+(`OVSDBSocketConnection.notificationBufferSize`). A consumer that stops
+draining — easy to do on a Southbound `Logical_Flow` monitor, where updates are
+large and frequent — gets `OVNManagerError.notificationsDropped` instead of
+growing the buffer until the process runs out of memory. Work that can lag
+behind the stream should hand updates to its own queue, and re-monitor when a
+drop is reported.
 
 ## Architecture
 
@@ -168,6 +203,9 @@ let endpoint = try OVSDBEndpoint(parsing: "tcp:ovn-central.example.com:6641")
 The existing `socketPath:` initializers are unchanged and equivalent to
 `.unix(path:)`.
 
+The `.ssl` endpoint requires the [`TLS` trait](#the-tls-trait), which is enabled
+by default. `.unix` and `.tcp` work either way.
+
 ### Custom Connection Configuration
 
 ```swift
@@ -225,21 +263,39 @@ let flow = ovsManager.flowBuilder()
 
 ## Error Handling
 
-The package provides comprehensive error handling:
+Every throwing operation on `OVNManaging` and `OVSManaging` is declared
+`throws(OVNManagerError)`, so the `catch` binds that type directly — no cast, no
+`as?`, and a `switch` over it can be exhaustive:
 
 ```swift
 do {
-    try await SwiftOVN.connect()
-    let switches = try await SwiftOVN.getLogicalSwitches()
-} catch SwiftOVNError.connectionFailed(let message) {
+    try await ovnManager.connect()
+    let switches = try await ovnManager.getLogicalSwitches()
+} catch .connectionFailed(let message) {
     print("Connection failed: \(message)")
-} catch SwiftOVNError.timeoutError {
+} catch .timeoutError {
     print("Operation timed out")
-} catch SwiftOVNError.rpcError(let rpcError) {
+} catch .rpcError(let rpcError) {
     print("RPC Error: \(rpcError.message)")
 } catch {
-    print("Unexpected error: \(error)")
+    // `error` is an OVNManagerError here, so this is the remaining cases —
+    // not "anything at all".
+    print("OVSDB error: \(error)")
 }
+```
+
+Errors from the layers underneath are wrapped before they reach you rather than
+leaking out: a row that fails to decode arrives as `.decodingError`, a model
+that fails to encode as `.encodingError`, and NIO channel and TLS failures as
+`.connectionFailed`, each carrying the original error.
+
+The one exception is `monitorUpdates()`. Its `AsyncThrowingStream` still has a
+`Failure` of `any Error` because every `AsyncThrowingStream` initializer in the
+standard library is constrained that way; only `OVNManagerError` is ever thrown
+into it, so match on the type in the `catch`:
+
+```swift
+} catch OVNManagerError.notificationsDropped(let count) {
 ```
 
 ## Database Support
@@ -254,7 +310,8 @@ do {
 ## Requirements
 
 - Swift 6.2+
-- SwiftNIO 2.98.0+, swift-nio-ssl 2.37.1+
+- SwiftNIO 2.98.0+, and swift-nio-ssl 2.37.1+ when the [`TLS` trait](#the-tls-trait)
+  is enabled (the default)
 - **Linux** for deployment — OVN/OVS run there, and that is where this library
   is meant to run. macOS 26+ builds for local development and testing only;
   there is no OVSDB server to connect to on Apple platforms, so the floor is

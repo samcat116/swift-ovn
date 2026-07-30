@@ -20,9 +20,9 @@ public actor OVSDBConnection {
         self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
     }
     
-    public func connect() async throws {
+    public func connect() async throws(OVNManagerError) {
         try await client.connect()
-        
+
         // Send initial echo request to establish OVSDB connection
         do {
             _ = try await client.echo()
@@ -32,8 +32,8 @@ public actor OVSDBConnection {
             throw error
         }
     }
-    
-    public func disconnect() async throws {
+
+    public func disconnect() async throws(OVNManagerError) {
         // Cancel all active monitors
         let monitors = activeMonitors
         for monitorId in monitors {
@@ -53,12 +53,12 @@ public actor OVSDBConnection {
     
     // MARK: - Database Operations
     
-    public func listDatabases() async throws -> [String] {
+    public func listDatabases() async throws(OVNManagerError) -> [String] {
         logger.debug("Listing databases")
         return try await client.listDatabases()
     }
-    
-    public func getDatabaseSchema(database: String) async throws -> JSONValue {
+
+    public func getDatabaseSchema(database: String) async throws(OVNManagerError) -> JSONValue {
         logger.debug("Getting schema for database: \(database)")
         return try await client.getSchema(database: database)
     }
@@ -70,7 +70,7 @@ public actor OVSDBConnection {
     /// ovsdb-server returns operation errors inside a successful JSON-RPC
     /// response (RFC 7047 §4.1.3), so callers cannot rely on the RPC layer
     /// alone to detect a failed/aborted transaction.
-    public func transact(in database: String, operations: [OVSDBOperation]) async throws -> [JSONValue] {
+    public func transact(in database: String, operations: [OVSDBOperation]) async throws(OVNManagerError) -> [JSONValue] {
         let results = try await client.transact(database: database, operations: operations)
 
         for (index, result) in results.enumerated() {
@@ -101,7 +101,7 @@ public actor OVSDBConnection {
         parentTable: String,
         parentColumn: String,
         parentCondition: OVSDBCondition?
-    ) async throws -> String {
+    ) async throws(OVNManagerError) -> String {
         let operations = OVSDBReferenceTransactions.insertAttached(
             row: row,
             into: table,
@@ -128,7 +128,7 @@ public actor OVSDBConnection {
         in database: String,
         uuid: String,
         parentReferences: [OVSDBParentReference]
-    ) async throws -> Int {
+    ) async throws(OVNManagerError) -> Int {
         let operations = OVSDBReferenceTransactions.deleteDetaching(
             uuid: uuid,
             from: table,
@@ -146,7 +146,7 @@ public actor OVSDBConnection {
 
     /// Extracts the new row's UUID from the result of an insert operation at
     /// the given index within a transaction's results.
-    static func uuid(fromInsertResults results: [JSONValue], at index: Int) throws -> String {
+    static func uuid(fromInsertResults results: [JSONValue], at index: Int) throws(OVNManagerError) -> String {
         guard results.count > index,
               case .object(let insertResult) = results[index],
               case .array(let uuidArray)? = insertResult["uuid"],
@@ -157,78 +157,66 @@ public actor OVSDBConnection {
         return uuidValue
     }
 
-    public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws -> [OVSDBRow] {
+    public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws(OVNManagerError) -> [OVSDBRow] {
         let operation = OVSDBOperation(
             op: "select",
             table: table,
             whereConditions: [],  // Empty where clause to select all rows
             columns: columns
         )
-        
+
         let results = try await client.transact(database: database, operations: [operation])
-        
-        guard let firstResult = results.first,
-              case .object(let resultObject) = firstResult else {
-            throw OVNManagerError.invalidResponse("Invalid select response format")
-        }
-        
-        // Check if there's an error in the response
-        if let error = resultObject["error"], case .string(let errorMessage) = error {
-            throw OVNManagerError.operationFailed("Select operation failed: \(errorMessage)")
-        }
-        
-        guard let rows = resultObject["rows"],
-              case .array(let rowsArray) = rows else {
-            throw OVNManagerError.invalidResponse("Invalid select response format: missing rows field")
-        }
-        
-        return try rowsArray.map { jsonValue in
-            guard case .object(let rowObject) = jsonValue else {
-                throw OVNManagerError.invalidResponse("Invalid row format")
-            }
-            return rowObject
-        }
+        return try Self.rows(fromSelectResults: results)
     }
-    
+
     public func select(
         from table: String,
         in database: String,
         where conditions: [OVSDBCondition],
         columns: [String]? = nil
-    ) async throws -> [OVSDBRow] {
+    ) async throws(OVNManagerError) -> [OVSDBRow] {
         let operation = OVSDBOperation(
             op: "select",
             table: table,
             whereConditions: conditions,
             columns: columns
         )
-        
+
         let results = try await client.transact(database: database, operations: [operation])
-        
+        return try Self.rows(fromSelectResults: results)
+    }
+
+    /// Extracts the rows from a single-`select` transaction's results.
+    private static func rows(fromSelectResults results: [JSONValue]) throws(OVNManagerError) -> [OVSDBRow] {
         guard let firstResult = results.first,
               case .object(let resultObject) = firstResult else {
             throw OVNManagerError.invalidResponse("Invalid select response format")
         }
-        
+
         // Check if there's an error in the response
         if let error = resultObject["error"], case .string(let errorMessage) = error {
             throw OVNManagerError.operationFailed("Select operation failed: \(errorMessage)")
         }
-        
+
         guard let rows = resultObject["rows"],
               case .array(let rowsArray) = rows else {
             throw OVNManagerError.invalidResponse("Invalid select response format: missing rows field")
         }
-        
-        return try rowsArray.map { jsonValue in
+
+        // A loop rather than `map`: `Sequence.map` is `rethrows`, which erases a
+        // typed throw back to `any Error`.
+        var rowObjects: [OVSDBRow] = []
+        rowObjects.reserveCapacity(rowsArray.count)
+        for jsonValue in rowsArray {
             guard case .object(let rowObject) = jsonValue else {
                 throw OVNManagerError.invalidResponse("Invalid row format")
             }
-            return rowObject
+            rowObjects.append(rowObject)
         }
+        return rowObjects
     }
-    
-    public func insert(into table: String, in database: String, row: OVSDBRow) async throws -> JSONValue {
+
+    public func insert(into table: String, in database: String, row: OVSDBRow) async throws(OVNManagerError) -> JSONValue {
         let operation = OVSDBOperation(
             op: "insert",
             table: table,
@@ -259,7 +247,7 @@ public actor OVSDBConnection {
         in database: String,
         where conditions: [OVSDBCondition],
         row: OVSDBRow
-    ) async throws -> Int {
+    ) async throws(OVNManagerError) -> Int {
         let operation = OVSDBOperation(
             op: "update",
             table: table,
@@ -292,7 +280,7 @@ public actor OVSDBConnection {
         from table: String,
         in database: String,
         where conditions: [OVSDBCondition]
-    ) async throws -> Int {
+    ) async throws(OVNManagerError) -> Int {
         let operation = OVSDBOperation(
             op: "delete",
             table: table,
@@ -325,7 +313,7 @@ public actor OVSDBConnection {
         in database: String,
         where conditions: [OVSDBCondition],
         mutations: [OVSDBMutation]
-    ) async throws -> Int {
+    ) async throws(OVNManagerError) -> Int {
         let operation = OVSDBOperation(
             op: "mutate",
             table: table,
@@ -365,7 +353,7 @@ public actor OVSDBConnection {
         database: String,
         tables: [String: OVSDBMonitorRequest],
         monitorId: String? = nil
-    ) async throws -> (monitorId: String, initialUpdates: [OVSDBUpdate]) {
+    ) async throws(OVNManagerError) -> (monitorId: String, initialUpdates: [OVSDBUpdate]) {
         let id = monitorId ?? UUID().uuidString
 
         let initialState = try await client.monitor(
@@ -383,7 +371,7 @@ public actor OVSDBConnection {
         return (monitorId: id, initialUpdates: initialUpdates)
     }
     
-    public func stopMonitoring(monitorId: String) async throws {
+    public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
         try await client.cancelMonitor(monitorId: monitorId)
 
         activeMonitors.remove(monitorId)
@@ -397,9 +385,22 @@ public actor OVSDBConnection {
     /// Create the stream *before* calling `startMonitoring` so no update is
     /// missed; updates are buffered while the consumer is between iterations.
     /// The stream lives until the connection closes or the consumer cancels.
+    ///
+    /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`) so
+    /// a consumer that stops draining cannot exhaust memory. One that falls
+    /// that far behind gets `OVNManagerError.notificationsDropped`: rows were
+    /// lost, so restart the monitor to resynchronize from a fresh snapshot
+    /// instead of continuing from an incomplete view.
+    ///
+    /// Everything this stream can fail with is an `OVNManagerError`, but the
+    /// failure type stays `any Error`: every `AsyncThrowingStream` initializer
+    /// is constrained to `Failure == any Error`, so a typed-failure stream
+    /// cannot be built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBUpdate, Error> {
         let clientStream = client.monitorUpdates()
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
             let task = Task {
                 do {
                     for try await (id, tableUpdates) in clientStream {
@@ -407,12 +408,17 @@ public actor OVSDBConnection {
                             continue
                         }
                         for update in Self.parseTableUpdates(tableUpdates) {
-                            continuation.yield(update)
+                            if case .dropped = continuation.yield(update) {
+                                continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                                return
+                            }
                         }
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
+                        .connectionFailed("Monitor stream failed: \($0)")
+                    })
                 }
             }
             continuation.onTermination = { _ in

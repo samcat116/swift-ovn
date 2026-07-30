@@ -1,8 +1,10 @@
 import Foundation
 import NIO
 import NIOPosix
+#if TLS
 import NIOSSL
 import NIOTLS
+#endif
 import Logging
 
 /// Preserved name from when the connection was Unix-socket only.
@@ -11,12 +13,18 @@ public typealias UnixSocketConnection = OVSDBSocketConnection
 /// A JSON-RPC transport to an OVSDB server over a Unix domain socket, TCP or
 /// TLS.
 ///
-/// All mutable state lives in `OVSDBConnectionCore`, an actor, so this type is
-/// `Sendable` by inspection rather than by assertion: every stored property is
-/// an immutable `let` holding a `Sendable` value.
+/// All mutable state lives in `OVSDBConnectionCore`, so this type is `Sendable`
+/// by inspection rather than by assertion: every stored property is an immutable
+/// `let` holding a `Sendable` value.
 public final class OVSDBSocketConnection: OVSDBTransport {
-    /// Default bound on how far a `notifications()` consumer may fall behind.
-    public static let defaultNotificationBufferSize = 1024
+    /// Notifications buffered per notification-stream consumer before the
+    /// oldest are discarded.
+    ///
+    /// Large enough to ride out a consumer that is briefly busy, small enough
+    /// that a consumer which stops draining altogether cannot exhaust memory
+    /// on a high-volume monitor (Southbound `Logical_Flow`). Applies at every
+    /// layer that re-buffers notifications, including `monitorUpdates()`.
+    public static let notificationBufferSize = 256
 
     private let core: OVSDBConnectionCore
     private let eventLoopGroup: EventLoopGroup
@@ -24,16 +32,7 @@ public final class OVSDBSocketConnection: OVSDBTransport {
     /// responsible for shutting it down; false when the caller injected one.
     private let ownsEventLoopGroup: Bool
 
-    /// - Parameter notificationBufferSize: How many notifications may queue up
-    ///   for one `notifications()` consumer before its stream is terminated with
-    ///   `OVNManagerError.notificationsDropped`. Raise it for consumers that do
-    ///   slow work per update; lowering it surfaces a lagging consumer sooner.
-    public init(
-        endpoint: OVSDBEndpoint,
-        eventLoopGroup: EventLoopGroup? = nil,
-        logger: Logger? = nil,
-        notificationBufferSize: Int = OVSDBSocketConnection.defaultNotificationBufferSize
-    ) {
+    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         if let eventLoopGroup {
             self.eventLoopGroup = eventLoopGroup
             self.ownsEventLoopGroup = false
@@ -44,8 +43,7 @@ public final class OVSDBSocketConnection: OVSDBTransport {
         self.core = OVSDBConnectionCore(
             endpoint: endpoint,
             eventLoopGroup: self.eventLoopGroup,
-            logger: logger ?? Logger(label: "ovn-manager.socket"),
-            notificationBufferSize: notificationBufferSize
+            logger: logger ?? Logger(label: "ovn-manager.socket")
         )
     }
 
@@ -89,18 +87,51 @@ public final class OVSDBSocketConnection: OVSDBTransport {
     /// Returns a buffered stream of server-initiated JSON-RPC notifications
     /// (messages with a `method` and a null or absent `id`, e.g. `update`).
     ///
-    /// The stream buffers notifications from the moment this call returns, so
+    /// The stream buffers notifications from the moment it is created, so
     /// subscribe *before* issuing the request that triggers them (e.g.
-    /// `monitor`) and no notification is lost while the consumer is busy.
-    /// Subscribing is valid before `connect()`, and multiple subscribers each
-    /// receive every notification.
+    /// `monitor`) and no notification is lost while the consumer is busy —
+    /// up to `notificationBufferSize` of them. A consumer that falls further
+    /// behind has its oldest notifications discarded (with a warning logged);
+    /// use `notificationEvents()` to observe those gaps in-stream.
     ///
-    /// The stream finishes when the connection closes, and throws
-    /// `OVNManagerError.notificationsDropped` if the consumer falls further than
-    /// this connection's notification buffer behind. A subscription taken out
-    /// after the connection has closed is returned already finished.
-    public func notifications() -> AsyncThrowingStream<JSONRPCNotification, Error> {
-        return core.notifications.subscribe()
+    /// The stream finishes when the connection closes, and a stream created
+    /// after the connection has closed is already finished. Subscribing is
+    /// valid before `connect()` and multiple subscribers each receive every
+    /// notification.
+    public func notifications() -> AsyncStream<JSONRPCNotification> {
+        let events = core.notificationHub.subscribe()
+        let logger = core.logger
+        return AsyncStream(bufferingPolicy: .bufferingNewest(Self.notificationBufferSize)) { continuation in
+            let task = Task {
+                var isOverflowing = false
+                for await event in events {
+                    switch event {
+                    case .notification(let notification):
+                        if case .dropped = continuation.yield(notification) {
+                            if !isOverflowing {
+                                isOverflowing = true
+                                logger.warning("Notification buffer full (\(Self.notificationBufferSize)); the consumer of notifications() is not keeping up. Use notificationEvents() to see how many were discarded.")
+                            }
+                        } else {
+                            isOverflowing = false
+                        }
+                    case .dropped(let count):
+                        logger.warning("Discarded \(count) notification(s): the consumer of notifications() is not keeping up. Use notificationEvents() to observe this in-stream.")
+                    }
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Like `notifications()`, but reports discarded notifications in-stream as
+    /// `.dropped(count:)` events instead of only logging them.
+    ///
+    /// Prefer this when a gap matters — a monitor consumer, for instance, must
+    /// re-take a snapshot rather than continue from an incomplete view.
+    public func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {
+        return core.notificationHub.subscribe()
     }
 
     public var isConnectionActive: Bool {
@@ -121,62 +152,54 @@ enum OVSDBChannelBootstrap {
         eventLoopGroup: EventLoopGroup,
         logger: Logger
     ) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-        let tls: (context: NIOSSLContext, serverHostname: String?)?
-
-        switch endpoint {
-        case .unix(let path):
-            guard FileManager.default.fileExists(atPath: path) else {
-                logger.error("Socket file does not exist at path: \(path)")
-                throw OVNManagerError.connectionFailed("Socket file not found: \(path)")
-            }
-            tls = nil
-        case .tcp:
-            tls = nil
-        case .ssl(let host, _, let configuration):
-            let context: NIOSSLContext
-            do {
-                context = try makeSSLContext(configuration)
-            } catch {
-                logger.error("Failed to build TLS context: \(error)")
-                throw OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)")
-            }
-            // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
-            // nil for them. This does not weaken verification: under
-            // .fullVerification NIOSSL still validates identity with a nil
-            // hostname by matching the connection's remote address against
-            // the certificate's IP SANs (NIOSSLHandler.validateHostname →
-            // validIdentityForService), and fails the handshake on no match.
-            let hostname = configuration.serverHostname ?? host
-            tls = (context, isIPAddressLiteral(hostname) ? nil : hostname)
+        if case .unix(let path) = endpoint, !FileManager.default.fileExists(atPath: path) {
+            logger.error("Socket file does not exist at path: \(path)")
+            throw OVNManagerError.connectionFailed("Socket file not found: \(path)")
         }
 
-        // The handshake promise is created outside the pipeline so the handler
-        // itself holds no state that has to cross a concurrency domain.
-        let handshake = tls == nil ? nil : eventLoopGroup.any().makePromise(of: Void.self)
+        #if TLS
+        // TLS state that must exist before the pipeline is built. nil for the
+        // cleartext endpoints.
+        let tlsSetup: TLSSetup?
+        do {
+            tlsSetup = try makeTLSSetup(for: endpoint)
+        } catch {
+            logger.error("Failed to build TLS context: \(error)")
+            throw OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)")
+        }
+        // The handshake promise is created here rather than inside the handler,
+        // so the handler owns no state that has to cross a concurrency domain.
+        let handshake = tlsSetup == nil ? nil : eventLoopGroup.any().makePromise(of: Void.self)
+        #endif
 
         let bootstrap = ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
         let initializer: @Sendable (Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> = { channel in
             channel.eventLoop.makeCompletedFuture {
+                logger.debug("Initializing channel pipeline...")
                 let operations = channel.pipeline.syncOperations
-                if let tls, let handshake {
+                #if TLS
+                if let tlsSetup, let handshake {
                     try operations.addHandler(
-                        NIOSSLClientHandler(context: tls.context, serverHostname: tls.serverHostname)
+                        NIOSSLClientHandler(context: tlsSetup.sslContext, serverHostname: tlsSetup.serverHostname)
                     )
                     try operations.addHandler(TLSHandshakeWaitHandler(handshake: handshake))
                 }
-                // No outbound handler: frames are written as ByteBuffers, so
-                // there is nothing left to encode on the way out.
+                #endif
+                // Outbound needs no handler: every write is already a
+                // `ByteBuffer`, which is what the TLS handler (or the socket)
+                // wants.
                 try operations.addHandler(ByteToMessageHandler(OVSDBJSONFrameDecoder()))
                 return try NIOAsyncChannel(
                     wrappingChannelSynchronously: channel,
                     configuration: NIOAsyncChannel.Configuration(
                         // The default watermarks (low 2, high 10) are the
-                        // backpressure the old pipeline had none of: once that
-                        // many framed messages are waiting for the consumer, the
-                        // channel stops issuing reads and the server's socket
-                        // buffer — not this process's memory — holds the backlog.
+                        // backpressure the `EventLoopFuture` pipeline had none
+                        // of: once that many framed messages are waiting for the
+                        // consumer, the channel stops issuing reads and the
+                        // backlog sits in the server's socket buffer rather than
+                        // this process's memory.
                         inboundType: ByteBuffer.self,
                         outboundType: ByteBuffer.self
                     )
@@ -192,21 +215,35 @@ enum OVSDBChannelBootstrap {
                     unixDomainSocketPath: path,
                     channelInitializer: initializer
                 )
-            case .tcp(let host, let port), .ssl(let host, let port, _):
+            case .tcp(let host, let port):
                 asyncChannel = try await bootstrap.connect(
                     host: host,
                     port: port,
                     channelInitializer: initializer
                 )
+            #if TLS
+            case .ssl(let host, let port, _):
+                asyncChannel = try await bootstrap.connect(
+                    host: host,
+                    port: port,
+                    channelInitializer: initializer
+                )
+            #endif
             }
         } catch {
             logger.error("Failed to connect to \(endpoint): \(error)")
+            logger.error("Error type: \(type(of: error))")
             if let ioError = error as? IOError {
                 logger.error("IO error code: \(ioError.errnoCode)")
             }
             throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
         }
 
+        #if TLS
+        // For ssl: endpoints the TCP connect completing is not enough:
+        // certificate verification happens during the TLS handshake, so hold the
+        // connect until the handshake finishes and fail it if verification
+        // fails.
         if let handshake {
             do {
                 try await handshake.futureResult.get()
@@ -216,8 +253,34 @@ enum OVSDBChannelBootstrap {
                 throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
             }
         }
+        #endif
 
+        logger.debug("Channel pipeline initialized successfully")
         return asyncChannel
+    }
+
+    #if TLS
+    /// Everything the channel initializer needs to install the TLS handler.
+    private struct TLSSetup {
+        let sslContext: NIOSSLContext
+        /// SNI/verification hostname, or nil for IP-literal hosts.
+        let serverHostname: String?
+    }
+
+    /// The TLS state for an `ssl:` endpoint, or nil for the cleartext ones.
+    private static func makeTLSSetup(for endpoint: OVSDBEndpoint) throws -> TLSSetup? {
+        guard case .ssl(let host, _, let tls) = endpoint else { return nil }
+        // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
+        // nil for them. This does not weaken verification: under
+        // .fullVerification NIOSSL still validates identity with a nil
+        // hostname by matching the connection's remote address against
+        // the certificate's IP SANs (NIOSSLHandler.validateHostname →
+        // validIdentityForService), and fails the handshake on no match.
+        let hostname = tls.serverHostname ?? host
+        return TLSSetup(
+            sslContext: try makeSSLContext(tls),
+            serverHostname: isIPAddressLiteral(hostname) ? nil : hostname
+        )
     }
 
     private static func makeSSLContext(_ tls: OVSDBTLSConfiguration) throws -> NIOSSLContext {
@@ -244,10 +307,12 @@ enum OVSDBChannelBootstrap {
             inet_pton(AF_INET, pointer, &ipv4) == 1 || inet_pton(AF_INET6, pointer, &ipv6) == 1
         }
     }
+    #endif
 }
 
 // MARK: - TLS Handshake Wait
 
+#if TLS
 /// Surfaces TLS handshake completion on a caller-supplied promise, so
 /// `connect()` on an `ssl:` endpoint succeeds only after certificate
 /// verification instead of at TCP establishment.
@@ -314,3 +379,4 @@ final class TLSHandshakeWaitHandler: ChannelInboundHandler {
         }
     }
 }
+#endif

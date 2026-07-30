@@ -1,5 +1,15 @@
 import Foundation
 
+/// The single error type thrown by every throwing operation on `OVNManaging`,
+/// `OVSManaging`, `OVSDBConnection` and `JSONRPCClient` — those are declared
+/// `throws(OVNManagerError)`, so `catch` binds this type directly and a
+/// `switch` over it can be exhaustive without a `default`.
+///
+/// Layers below that surface throw foreign errors — `DecodingError` from
+/// `OVSDBRowDecoder`, `EncodingError` from `JSONValueEncoder`, NIO channel and
+/// TLS failures from the transport — which are wrapped into `decodingError`,
+/// `encodingError` and `connectionFailed` at the boundary that crosses into the
+/// typed API (see `wrapping(_:in:)`).
 public enum OVNManagerError: Error, Sendable {
     case connectionFailed(String)
     case invalidResponse(String)
@@ -9,11 +19,27 @@ public enum OVNManagerError: Error, Sendable {
     case rpcError(JSONRPCError)
     case invalidSocket(String)
     case operationFailed(String)
-    /// A `notifications()` consumer fell more than `bufferSize` notifications
-    /// behind, so its stream was terminated instead of buffering without bound.
-    /// Whatever the consumer had built from those updates is now incomplete: it
-    /// has to subscribe again and re-issue its monitor to resynchronize.
-    case notificationsDropped(bufferSize: Int)
+    /// Monitor updates were discarded because the consumer fell behind, so the
+    /// stream it was reading no longer describes every change. Restart the
+    /// monitor to get a fresh snapshot.
+    case notificationsDropped(count: Int)
+}
+
+extension OVNManagerError {
+    /// Narrows an untyped error caught at the edge of the typed-throws API.
+    ///
+    /// An error that is already an `OVNManagerError` passes through unchanged —
+    /// the layers below re-throw their own failures a lot, and double-wrapping
+    /// them would bury the case a caller wants to match. Anything else is a
+    /// foreign error (`DecodingError`, `EncodingError`, a NIO channel or TLS
+    /// failure) and is handed to `transform` to be given the case that fits the
+    /// operation that failed.
+    static func wrapping(
+        _ error: any Error,
+        in transform: (any Error) -> OVNManagerError
+    ) -> OVNManagerError {
+        error as? OVNManagerError ?? transform(error)
+    }
 }
 
 // Without an explicit `errorDescription`, bridging to `NSError` discards the
@@ -40,8 +66,8 @@ extension OVNManagerError: LocalizedError {
             return "Invalid OVSDB socket: \(path)"
         case .operationFailed(let message):
             return message
-        case .notificationsDropped(let bufferSize):
-            return "OVSDB notification consumer fell more than \(bufferSize) notifications behind; re-subscribe and re-issue the monitor"
+        case .notificationsDropped(let count):
+            return "Dropped \(count) OVSDB notification(s) because the consumer fell behind; the monitor's view is incomplete and the monitor must be restarted"
         }
     }
 }

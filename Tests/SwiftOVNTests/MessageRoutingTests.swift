@@ -51,7 +51,7 @@ final class MessageRoutingTests: XCTestCase {
         }
     }
 
-    private func makeHarness(notificationBufferSize: Int = 1024) async throws -> Harness {
+    private func makeHarness(notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize) async throws -> Harness {
         // A stand-in for the socket channel: the core only reads `isActive` off
         // it, since writes go through the outbound writer.
         let channel = EmbeddedChannel()
@@ -106,17 +106,23 @@ final class MessageRoutingTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(buffer: frame)) as? [String: Any])
     }
 
+    /// Unwraps a notification event, returning nil for a drop report.
+    private func notification(_ event: JSONRPCNotificationEvent?) -> JSONRPCNotification? {
+        guard case .notification(let notification)? = event else { return nil }
+        return notification
+    }
+
     // MARK: - Notifications
 
     func testUpdateNotificationWithNullIdIsDispatched() async throws {
         let harness = try await makeHarness()
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
 
         // Real ovsdb-server update notifications carry "id": null.
         harness.receive(#"{"method":"update","params":["mon1",{"Logical_Switch":{"aa-bb":{"new":{"name":"ls0"}}}}],"id":null}"#)
 
         var iterator = stream.makeAsyncIterator()
-        let notification = try await iterator.next()
+        let notification = notification(await iterator.next())
 
         XCTAssertEqual(notification?.method, "update")
         guard let notification,
@@ -133,20 +139,20 @@ final class MessageRoutingTests: XCTestCase {
 
     func testNotificationWithoutIdKeyIsDispatched() async throws {
         let harness = try await makeHarness()
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
 
         harness.receive(#"{"method":"update","params":["mon2",{}]}"#)
 
         var iterator = stream.makeAsyncIterator()
-        let notification = try await iterator.next()
-        XCTAssertEqual(notification?.method, "update")
+        let received = notification(await iterator.next())
+        XCTAssertEqual(received?.method, "update")
 
         await harness.endConnection()
     }
 
     func testNotificationsAreBufferedBetweenReads() async throws {
         let harness = try await makeHarness()
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
 
         // Deliver several notifications before the consumer starts iterating;
         // none may be dropped.
@@ -157,7 +163,7 @@ final class MessageRoutingTests: XCTestCase {
         var received: [String] = []
         var iterator = stream.makeAsyncIterator()
         for _ in 1...3 {
-            guard let notification = try await iterator.next(),
+            guard let notification = notification(await iterator.next()),
                   case .array(let params)? = notification.params,
                   case .string(let monitorId) = params[0] else {
                 XCTFail("Missing buffered notification")
@@ -172,61 +178,60 @@ final class MessageRoutingTests: XCTestCase {
 
     func testEverySubscriberReceivesEachNotification() async throws {
         let harness = try await makeHarness()
-        let first = harness.core.notifications.subscribe()
-        let second = harness.core.notifications.subscribe()
+        let first = harness.core.notificationHub.subscribe()
+        let second = harness.core.notificationHub.subscribe()
 
         harness.receive(#"{"method":"update","params":["mon1",{}],"id":null}"#)
 
         var firstIterator = first.makeAsyncIterator()
         var secondIterator = second.makeAsyncIterator()
-        let fromFirst = try await firstIterator.next()
-        let fromSecond = try await secondIterator.next()
+        let fromFirst = notification(await firstIterator.next())
+        let fromSecond = notification(await secondIterator.next())
         XCTAssertEqual(fromFirst?.method, "update")
         XCTAssertEqual(fromSecond?.method, "update")
 
         await harness.endConnection()
     }
 
-    func testLaggingSubscriberIsTerminatedInsteadOfBufferingWithoutBound() async throws {
-        // The whole point of the bounded buffer: a consumer that stops reading
-        // must not make the process grow, and must be told it lost updates
-        // rather than silently receiving an incomplete picture.
+    func testLaggingSubscriberIsBoundedAndToldAboutTheGap() async throws {
+        // The point of the bounded buffer: a consumer that stops reading must
+        // not make the process grow, and must be told it lost updates rather
+        // than silently receiving an incomplete picture.
         let harness = try await makeHarness(notificationBufferSize: 2)
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
 
-        for index in 1...4 {
+        for index in 1...6 {
             harness.receive(#"{"method":"update","params":["mon\#(index)",{}],"id":null}"#)
         }
 
         // The consumer must not read anything until the buffer has overflowed,
         // or it would keep up and there would be nothing to report. The read
-        // loop is strictly sequential, so an echo reply arriving proves all four
+        // loop is strictly sequential, so an echo reply arriving proves all six
         // updates were published first.
         harness.receive(#"{"method":"echo","params":[],"id":99}"#)
         var writtenIterator = harness.written.makeAsyncIterator()
         let reply = try await nextWritten(&writtenIterator)
         XCTAssertEqual(reply["id"] as? Int, 99)
 
-        let delivered = try await withDeadline { () -> Int in
-            var iterator = stream.makeAsyncIterator()
-            var delivered = 0
-            do {
-                while try await iterator.next() != nil {
-                    delivered += 1
-                }
-                XCTFail("Expected the lagging subscriber's stream to fail, not finish")
-            } catch let error as OVNManagerError {
-                guard case .notificationsDropped(let bufferSize) = error else {
-                    XCTFail("Expected notificationsDropped, got \(error)")
-                    return delivered
-                }
-                XCTAssertEqual(bufferSize, 2)
-            }
-            return delivered
-        }
-        XCTAssertLessThanOrEqual(delivered, 2, "Buffer must not exceed its bound")
-
         await harness.endConnection()
+
+        let (delivered, dropped) = try await withDeadline { () -> (Int, Int) in
+            var delivered = 0
+            var dropped = 0
+            for await event in stream {
+                switch event {
+                case .notification:
+                    delivered += 1
+                case .dropped(let count):
+                    dropped += count
+                }
+            }
+            return (delivered, dropped)
+        }
+
+        XCTAssertLessThanOrEqual(delivered, 2, "Buffer must not grow past its bound")
+        XCTAssertGreaterThan(dropped, 0, "The consumer fell behind, so drops must be reported")
+        XCTAssertLessThanOrEqual(delivered + dropped, 6)
     }
 
     func testSubscribingAfterTheConnectionEndedYieldsAFinishedStream() async throws {
@@ -235,41 +240,27 @@ final class MessageRoutingTests: XCTestCase {
         let harness = try await makeHarness()
         await harness.endConnection()
 
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
         // Deadlined deliberately: the bug this guards against is a hang, so a
         // regression has to fail the test rather than stall the suite.
-        let value = try await withDeadline { () -> JSONRPCNotification? in
+        let event = try await withDeadline { () -> JSONRPCNotificationEvent? in
             var iterator = stream.makeAsyncIterator()
-            return try await iterator.next()
+            return await iterator.next()
         }
-        XCTAssertNil(value, "A stream created after the close must be finished")
+        XCTAssertNil(event, "A stream created after the close must be finished")
     }
 
     func testConnectionEndFinishesNotificationStreams() async throws {
         let harness = try await makeHarness()
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
 
         await harness.endConnection()
 
-        var iterator = stream.makeAsyncIterator()
-        let value = try await iterator.next()
-        XCTAssertNil(value, "Stream should finish when the connection closes")
-    }
-
-    func testConnectionFailureSurfacesToNotificationConsumers() async throws {
-        struct SocketDied: Error {}
-        let harness = try await makeHarness()
-        let stream = harness.core.notifications.subscribe()
-
-        await harness.endConnection(throwing: SocketDied())
-
-        var iterator = stream.makeAsyncIterator()
-        do {
-            _ = try await iterator.next()
-            XCTFail("Expected the read failure to reach the consumer")
-        } catch {
-            XCTAssertTrue(error is SocketDied, "Got \(error)")
+        let event = try await withDeadline { () -> JSONRPCNotificationEvent? in
+            var iterator = stream.makeAsyncIterator()
+            return await iterator.next()
         }
+        XCTAssertNil(event, "Stream should finish when the connection closes")
     }
 
     func testResubscribingWorksAfterAReconnect() async throws {
@@ -290,12 +281,12 @@ final class MessageRoutingTests: XCTestCase {
             await Task.yield()
         }
 
-        let stream = harness.core.notifications.subscribe()
+        let stream = harness.core.notificationHub.subscribe()
         source.yield(ByteBuffer(string: #"{"method":"update","params":["mon9",{}],"id":null}"#))
 
         var iterator = stream.makeAsyncIterator()
-        let notification = try await iterator.next()
-        XCTAssertEqual(notification?.method, "update")
+        let received = notification(await iterator.next())
+        XCTAssertEqual(received?.method, "update")
 
         source.finish()
         await loop.value
@@ -452,12 +443,36 @@ final class MessageRoutingTests: XCTestCase {
         }
     }
 
+    func testConnectionFailureFailsPendingRequests() async throws {
+        struct SocketDied: Error {}
+        let harness = try await makeHarness()
+        var iterator = harness.written.makeAsyncIterator()
+
+        let response = Task {
+            try await harness.core.sendRequest(
+                JSONRPCRequest(method: "list_dbs", params: nil, id: .number(4)),
+                id: .number(4),
+                responseType: JSONRPCResponse<JSONValue>.self,
+                timeout: .seconds(30)
+            )
+        }
+        _ = try await nextWritten(&iterator)
+
+        await harness.endConnection(throwing: SocketDied())
+
+        do {
+            _ = try await response.value
+            XCTFail("Expected the read failure to fail the in-flight request")
+        } catch {
+            XCTAssertTrue(error is SocketDied, "Got \(error)")
+        }
+    }
+
     func testSendingWithoutAConnectionFails() async throws {
         let core = OVSDBConnectionCore(
             endpoint: .unix(path: "/tmp/swiftovn-never-connected"),
             eventLoopGroup: group,
-            logger: Logger(label: "test"),
-            notificationBufferSize: 8
+            logger: Logger(label: "test")
         )
         XCTAssertFalse(core.isConnected)
 
@@ -471,6 +486,242 @@ final class MessageRoutingTests: XCTestCase {
             }
         }
     }
+}
+
+// MARK: - Notification Hub
+
+/// The hub's buffering and drop accounting, driven directly: it is what keeps a
+/// stalled consumer from growing the process without limit, and what tells that
+/// consumer its view has a hole.
+final class JSONRPCNotificationHubTests: XCTestCase {
+
+    private enum StreamOutcome {
+        case event(JSONRPCNotificationEvent)
+        case finished
+        case timedOut
+    }
+
+    /// Awaits the first element of `stream`, reporting a timeout instead of
+    /// hanging the suite when the stream neither yields nor finishes.
+    private func firstOutcome(of stream: AsyncStream<JSONRPCNotificationEvent>) async -> StreamOutcome {
+        return await withTaskGroup(of: StreamOutcome.self) { group in
+            group.addTask {
+                var iterator = stream.makeAsyncIterator()
+                guard let event = await iterator.next() else { return .finished }
+                return .event(event)
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return .timedOut
+            }
+            let outcome = await group.next() ?? .timedOut
+            group.cancelAll()
+            return outcome
+        }
+    }
+
+    func testSlowSubscriberBufferIsBoundedAndDropsAreReported() async throws {
+        let bufferSize = 4
+        let published = 20
+        let hub = JSONRPCNotificationHub(bufferSize: bufferSize, logger: Logger(label: "test"))
+
+        let stream = hub.subscribe()
+
+        // Nothing consumes while these arrive: an unbounded buffer would hold
+        // all 20 (and, with real Southbound updates, exhaust memory).
+        for index in 1...published {
+            hub.publish(JSONRPCNotification(method: "update", params: .string("n\(index)")))
+        }
+        hub.finishAll()
+
+        var notifications: [String] = []
+        var dropped = 0
+        for await event in stream {
+            switch event {
+            case .notification(let notification):
+                guard case .string(let payload)? = notification.params else {
+                    XCTFail("Unexpected notification payload")
+                    return
+                }
+                notifications.append(payload)
+            case .dropped(let count):
+                dropped += count
+            }
+        }
+
+        XCTAssertLessThanOrEqual(notifications.count, bufferSize,
+                                 "Buffer must not grow past its bound")
+        XCTAssertGreaterThan(dropped, 0, "The consumer fell behind, so drops must be reported")
+        // A report is never inflated; the one emitted at close can undercount,
+        // since squeezing it into a full buffer costs another element.
+        XCTAssertLessThanOrEqual(notifications.count + dropped, published)
+        // Newest are kept: the final publish must have survived.
+        XCTAssertEqual(notifications.last, "n\(published)")
+    }
+
+    func testDropCountIsExactOnceTheConsumerCatchesUp() async throws {
+        let hub = JSONRPCNotificationHub(bufferSize: 4, logger: Logger(label: "test"))
+        let stream = hub.subscribe()
+        var iterator = stream.makeAsyncIterator()
+
+        // Overrun the buffer by two while nothing consumes.
+        for index in 1...6 {
+            hub.publish(JSONRPCNotification(method: "update", params: .string("n\(index)")))
+        }
+
+        var notifications: [String] = []
+        var dropped = 0
+        // Drain the buffer, then publish once more: the catch-up notification
+        // carries the outstanding drop report with it.
+        for step in 1...6 {
+            if step == 5 {
+                hub.publish(JSONRPCNotification(method: "update", params: .string("n7")))
+            }
+            switch await iterator.next() {
+            case .notification(let notification):
+                guard case .string(let payload)? = notification.params else {
+                    XCTFail("Unexpected notification payload")
+                    return
+                }
+                notifications.append(payload)
+            case .dropped(let count):
+                dropped += count
+            case nil:
+                XCTFail("Stream finished early")
+                return
+            }
+        }
+
+        XCTAssertEqual(notifications, ["n4", "n5", "n6", "n7"])
+        XCTAssertEqual(dropped, 3, "n1, n2 and n3 were discarded")
+        XCTAssertEqual(notifications.count + dropped, 7,
+                       "Every notification is either delivered or reported as dropped")
+    }
+
+    func testKeptUpSubscriberSeesNoDrops() async throws {
+        let hub = JSONRPCNotificationHub(bufferSize: 2, logger: Logger(label: "test"))
+        let stream = hub.subscribe()
+        var iterator = stream.makeAsyncIterator()
+
+        for index in 1...10 {
+            hub.publish(JSONRPCNotification(method: "update", params: .string("n\(index)")))
+            guard case .notification(let notification)? = await iterator.next(),
+                  case .string(let payload)? = notification.params else {
+                XCTFail("Expected notification \(index)")
+                return
+            }
+            XCTAssertEqual(payload, "n\(index)")
+        }
+    }
+
+    func testSubscribingAfterCloseReturnsAFinishedStream() async throws {
+        let hub = JSONRPCNotificationHub(logger: Logger(label: "test"))
+        hub.finishAll()
+
+        // Before the hub tracked being closed, this stream's continuation was
+        // never finished and the consumer's `for await` hung forever.
+        let outcome = await firstOutcome(of: hub.subscribe())
+        guard case .finished = outcome else {
+            XCTFail("Expected a finished stream, got \(outcome)")
+            return
+        }
+    }
+
+    func testSubscribingAfterReopenReceivesNotifications() async throws {
+        let hub = JSONRPCNotificationHub(logger: Logger(label: "test"))
+        hub.finishAll()
+
+        // A reconnect makes the hub live again; subscriptions taken after it
+        // must not come back already finished.
+        hub.reopen()
+        let stream = hub.subscribe()
+        hub.publish(JSONRPCNotification(method: "update", params: .string("after-reconnect")))
+
+        guard case .event(.notification(let notification)) = await firstOutcome(of: stream),
+              case .string(let payload)? = notification.params else {
+            XCTFail("Expected a notification after reopen")
+            return
+        }
+        XCTAssertEqual(payload, "after-reconnect")
+    }
+}
+
+// MARK: - Monitor Stream Backpressure
+
+/// A monitor consumer that falls behind must be told its view is incomplete
+/// rather than have the client buffer updates until memory runs out.
+final class MonitorStreamDropTests: XCTestCase {
+
+    func testMonitorUpdatesThrowsWhenNotificationsWereDropped() async throws {
+        let transport = StubNotificationTransport(events: [
+            .notification(Self.updateNotification(monitorId: "mon1")),
+            .dropped(count: 7),
+            .notification(Self.updateNotification(monitorId: "mon1"))
+        ])
+        let client = JSONRPCClient(transport: transport)
+
+        var delivered = 0
+        do {
+            for try await _ in client.monitorUpdates() {
+                delivered += 1
+            }
+            XCTFail("Expected the stream to fail after notifications were dropped")
+        } catch OVNManagerError.notificationsDropped(let count) {
+            XCTAssertEqual(count, 7)
+        }
+
+        // Updates before the gap are still delivered; nothing after it is,
+        // because the consumer must restart the monitor to resynchronize.
+        XCTAssertEqual(delivered, 1)
+    }
+
+    private static func updateNotification(monitorId: String) -> JSONRPCNotification {
+        return JSONRPCNotification(
+            method: "update",
+            params: .array([.string(monitorId), .object([:])])
+        )
+    }
+}
+
+/// Replays a fixed list of notification events; every other transport
+/// operation is unsupported.
+private struct StubNotificationTransport: OVSDBTransport {
+    let events: [JSONRPCNotificationEvent]
+
+    func connect() async throws {}
+    func disconnect() async throws {}
+    func send<T: Codable & Sendable>(_ message: T) async throws {}
+
+    func sendRequest<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ request: Request,
+        id: JSONRPCIdentifier,
+        responseType: Response.Type,
+        timeout: TimeAmount
+    ) async throws -> Response {
+        throw OVNManagerError.invalidResponse("stub")
+    }
+
+    func notifications() -> AsyncStream<JSONRPCNotification> {
+        let events = self.events
+        return AsyncStream { continuation in
+            for case .notification(let notification) in events {
+                continuation.yield(notification)
+            }
+            continuation.finish()
+        }
+    }
+
+    func notificationEvents() -> AsyncStream<JSONRPCNotificationEvent> {
+        let events = self.events
+        return AsyncStream { continuation in
+            for event in events {
+                continuation.yield(event)
+            }
+            continuation.finish()
+        }
+    }
+
+    var isConnectionActive: Bool { true }
 }
 
 // MARK: - Table Updates Parsing

@@ -17,8 +17,12 @@ import Synchronization
 actor OVSDBConnectionCore {
     private let endpoint: OVSDBEndpoint
     private let eventLoopGroup: EventLoopGroup
-    private let logger: Logger
+    nonisolated let logger: Logger
     private let decoder = Foundation.JSONDecoder()
+    /// Reused across sends: constructing a `JSONEncoder` is not free, and one
+    /// per outbound request adds up on the paths that write large transactions
+    /// (a port-group update emits a `wait` op per port). Only ever used from
+    /// this actor, so the reuse is serialized.
     private let encoder = Foundation.JSONEncoder()
 
     /// The live connection: present only between a successful `connect()` and
@@ -33,7 +37,7 @@ actor OVSDBConnectionCore {
     /// `Mutex` (compiler-checked `Sendable`, uncontended in practice) rather
     /// than as isolated state.
     private nonisolated let liveSession = Mutex<Session?>(nil)
-    nonisolated let notifications: JSONRPCNotificationHub
+    nonisolated let notificationHub: JSONRPCNotificationHub
 
     /// The in-flight `connect()`, so concurrent callers share one attempt
     /// instead of each bootstrapping — and leaking — their own channel.
@@ -50,12 +54,12 @@ actor OVSDBConnectionCore {
         endpoint: OVSDBEndpoint,
         eventLoopGroup: EventLoopGroup,
         logger: Logger,
-        notificationBufferSize: Int
+        notificationBufferSize: Int = OVSDBSocketConnection.notificationBufferSize
     ) {
         self.endpoint = endpoint
         self.eventLoopGroup = eventLoopGroup
         self.logger = logger
-        self.notifications = JSONRPCNotificationHub(bufferSize: notificationBufferSize, logger: logger)
+        self.notificationHub = JSONRPCNotificationHub(bufferSize: notificationBufferSize, logger: logger)
     }
 
     // MARK: - Lifecycle
@@ -152,7 +156,7 @@ actor OVSDBConnectionCore {
 
     private func activate(channel: Channel, writer: NIOAsyncChannelOutboundWriter<ByteBuffer>) {
         liveSession.withLock { $0 = Session(channel: channel, writer: writer) }
-        notifications.reopen()
+        notificationHub.reopen()
         activation?.succeed(())
         activation = nil
         logger.debug("Channel active: \(channel.isActive), writable: \(channel.isWritable)")
@@ -179,7 +183,10 @@ actor OVSDBConnectionCore {
             request.settle(with: failure)
         }
 
-        notifications.close(throwing: error)
+        // Finishes every subscription and marks the hub closed, so a
+        // `notifications()` call after the connection is gone gets a finished
+        // stream instead of one that hangs.
+        notificationHub.finishAll()
     }
 
     func disconnect() async {
@@ -350,7 +357,7 @@ actor OVSDBConnectionCore {
             return
         }
         logger.debug("Dispatching notification: \(inbound.method)")
-        notifications.publish(JSONRPCNotification(method: inbound.method, params: inbound.params))
+        notificationHub.publish(JSONRPCNotification(method: inbound.method, params: inbound.params))
     }
 
     private func handleServerRequest(_ frame: ByteBuffer, method: String) async {

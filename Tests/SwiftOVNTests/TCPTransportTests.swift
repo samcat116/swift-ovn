@@ -183,6 +183,76 @@ final class TCPTransportTests: XCTestCase {
         XCTAssertFalse(connection.isConnectionActive)
     }
 
+    func testNotificationsSubscribedAfterDisconnectAreFinished() async throws {
+        let server = try await startServer()
+        let port = try XCTUnwrap(server.localAddress?.port)
+
+        let connection = OVSDBSocketConnection(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+        await connection.disconnect()
+
+        // Subscribing once the connection is gone used to hand back a stream
+        // nothing would ever finish, hanging the consumer.
+        let stream = connection.notifications()
+        let finished = await withTaskGroup(of: Bool.self) { taskGroup in
+            taskGroup.addTask {
+                for await _ in stream {}
+                return true
+            }
+            taskGroup.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return false
+            }
+            let first = await taskGroup.next() ?? false
+            taskGroup.cancelAll()
+            return first
+        }
+        XCTAssertTrue(finished, "A stream created after disconnect must already be finished")
+
+        // Reconnecting revives the hub, so later subscribers are live again.
+        try await connection.connect()
+        XCTAssertTrue(connection.isConnectionActive)
+        await connection.disconnect()
+    }
+
+    /// `send` writes the encoder's bytes straight into a `ByteBuffer` instead of
+    /// decoding them to a `String` and concatenating a newline, so this pins what
+    /// actually reaches the wire: the encoded request, then the trailing newline.
+    func testSendWritesTheEncodedRequestFollowedByANewline() async throws {
+        let recorded = group.next().makePromise(of: [UInt8].self)
+        let server = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(RawRequestRecordingHandler(recorded: recorded))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let port = try XCTUnwrap(server.localAddress?.port)
+
+        let connection = OVSDBSocketConnection(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+        try await connection.send(
+            JSONRPCRequest(method: "list_dbs", params: nil, id: .number(1))
+        )
+
+        let bytes = try await recorded.futureResult.get()
+        XCTAssertEqual(bytes.last, UInt8(ascii: "\n"))
+
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(bytes.dropLast())) as? [String: Any]
+        )
+        XCTAssertEqual(request["method"] as? String, "list_dbs")
+        XCTAssertEqual(request["id"] as? Int, 1)
+
+        await connection.disconnect()
+    }
+
     func testConnectFailsWhenNothingIsListening() async throws {
         // Bind and immediately close to obtain a port with no listener.
         let server = try await startServer()
@@ -202,6 +272,33 @@ final class TCPTransportTests: XCTestCase {
                 return
             }
         }
+    }
+}
+
+/// Records the raw bytes of one client request verbatim, so a test can assert
+/// on the exact wire form rather than on whatever a JSON parser tolerates.
+final class RawRequestRecordingHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let recorded: EventLoopPromise<[UInt8]>
+    private var accumulated: [UInt8] = []
+    private var isRecorded = false
+
+    init(recorded: EventLoopPromise<[UInt8]>) {
+        self.recorded = recorded
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        guard !isRecorded, let bytes = buffer.readBytes(length: buffer.readableBytes) else {
+            return
+        }
+        // One write is not guaranteed to arrive as one read, so accumulate
+        // until the request's terminating newline shows up.
+        accumulated.append(contentsOf: bytes)
+        guard accumulated.last == UInt8(ascii: "\n") else { return }
+        isRecorded = true
+        recorded.succeed(accumulated)
     }
 }
 
@@ -233,8 +330,6 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
             result = ["OVN_Northbound", "OVN_Southbound"]
         case "get_schema":
             result = ["blob": String(repeating: "a", count: Self.largeBlobLength)]
-        case "monitor":
-            result = [String: Any]()
         default:
             result = [String: Any]()
         }

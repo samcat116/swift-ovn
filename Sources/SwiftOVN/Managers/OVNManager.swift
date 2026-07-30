@@ -26,12 +26,12 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Connection Management
     
-    public func connect() async throws {
+    public func connect() async throws(OVNManagerError) {
         try await connection.connect()
         logger.info("Connected to OVN database: \(database)")
     }
     
-    public func disconnect() async throws {
+    public func disconnect() async throws(OVNManagerError) {
         try await connection.disconnect()
         logger.info("Disconnected from OVN database")
     }
@@ -44,24 +44,22 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Database Operations
     
-    public func listDatabases() async throws -> [String] {
+    public func listDatabases() async throws(OVNManagerError) -> [String] {
         return try await connection.listDatabases()
     }
     
-    public func getDatabaseSchema(database: String) async throws -> JSONValue {
+    public func getDatabaseSchema(database: String) async throws(OVNManagerError) -> JSONValue {
         return try await connection.getDatabaseSchema(database: database)
     }
     
     // MARK: - Logical Switch Operations
     
-    public func getLogicalSwitches() async throws -> [OVNLogicalSwitch] {
+    public func getLogicalSwitches() async throws(OVNManagerError) -> [OVNLogicalSwitch] {
         let rows = try await connection.selectAll(from: OVNTable.logicalSwitch, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalSwitch.self)
-        }
+        return try parseRows(rows, as: OVNLogicalSwitch.self)
     }
     
-    public func getLogicalSwitch(named name: String) async throws -> OVNLogicalSwitch? {
+    public func getLogicalSwitch(named name: String) async throws(OVNManagerError) -> OVNLogicalSwitch? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.logicalSwitch, in: database, where: [condition])
         
@@ -69,7 +67,7 @@ public final class OVNManager: OVNManaging {
         return try parseRow(firstRow, as: OVNLogicalSwitch.self)
     }
     
-    public func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws -> String {
+    public func createLogicalSwitch(_ logicalSwitch: OVNLogicalSwitch) async throws(OVNManagerError) -> String {
         let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(logicalSwitch.name))
 
         guard try await rowUUID(in: OVNTable.logicalSwitch, where: nameCondition) == nil else {
@@ -114,7 +112,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateLogicalSwitch(uuid: String, _ logicalSwitch: OVNLogicalSwitch) async throws {
+    public func updateLogicalSwitch(uuid: String, _ logicalSwitch: OVNLogicalSwitch) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: logicalSwitch)
         
@@ -127,7 +125,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated logical switch: \(logicalSwitch.name)")
     }
     
-    public func deleteLogicalSwitch(uuid: String) async throws {
+    public func deleteLogicalSwitch(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVNTable.logicalSwitch, in: database, where: [condition])
         
@@ -138,7 +136,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical switch: \(uuid)")
     }
     
-    public func deleteLogicalSwitch(named name: String) async throws {
+    public func deleteLogicalSwitch(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let count = try await connection.delete(from: OVNTable.logicalSwitch, in: database, where: [condition])
         
@@ -151,14 +149,12 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Logical Switch Port Operations
     
-    public func getLogicalSwitchPorts() async throws -> [OVNLogicalSwitchPort] {
+    public func getLogicalSwitchPorts() async throws(OVNManagerError) -> [OVNLogicalSwitchPort] {
         let rows = try await connection.selectAll(from: OVNTable.logicalSwitchPort, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalSwitchPort.self)
-        }
+        return try parseRows(rows, as: OVNLogicalSwitchPort.self)
     }
     
-    public func getLogicalSwitchPort(named name: String) async throws -> OVNLogicalSwitchPort? {
+    public func getLogicalSwitchPort(named name: String) async throws(OVNManagerError) -> OVNLogicalSwitchPort? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.logicalSwitchPort, in: database, where: [condition])
         
@@ -167,7 +163,7 @@ public final class OVNManager: OVNManaging {
     }
     
     @available(*, deprecated, message: "Creates an orphan row that ovn-northd ignores (no Port_Binding, no dataplane). Use createLogicalSwitchPort(_:onSwitch:) so the port is attached to its switch.")
-    public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws -> String {
+    public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort) async throws(OVNManagerError) -> String {
         let row = try createRow(from: port)
         let result = try await connection.insert(into: OVNTable.logicalSwitchPort, in: database, row: row)
 
@@ -187,7 +183,7 @@ public final class OVNManager: OVNManaging {
     /// switch in a single OVSDB transaction, mirroring `ovn-nbctl lsp-add`.
     /// A port whose UUID is not referenced by `Logical_Switch.ports` is an
     /// orphan that ovn-northd ignores, so the two steps must never diverge.
-    public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws -> String {
+    public func createLogicalSwitchPort(_ port: OVNLogicalSwitchPort, onSwitch switchName: String) async throws(OVNManagerError) -> String {
         let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
 
         guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
@@ -208,7 +204,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws {
+    public func updateLogicalSwitchPort(uuid: String, _ port: OVNLogicalSwitchPort) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: port)
         
@@ -221,7 +217,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated logical switch port: \(port.name)")
     }
     
-    public func deleteLogicalSwitchPort(uuid: String) async throws {
+    public func deleteLogicalSwitchPort(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.logicalSwitchPort,
             in: database,
@@ -236,7 +232,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical switch port: \(uuid)")
     }
 
-    public func deleteLogicalSwitchPort(named name: String) async throws {
+    public func deleteLogicalSwitchPort(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         guard let uuid = try await rowUUID(in: OVNTable.logicalSwitchPort, where: condition) else {
             throw OVNManagerError.operationFailed("Logical switch port not found: \(name)")
@@ -249,14 +245,12 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Logical Router Operations
     
-    public func getLogicalRouters() async throws -> [OVNLogicalRouter] {
+    public func getLogicalRouters() async throws(OVNManagerError) -> [OVNLogicalRouter] {
         let rows = try await connection.selectAll(from: OVNTable.logicalRouter, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalRouter.self)
-        }
+        return try parseRows(rows, as: OVNLogicalRouter.self)
     }
     
-    public func getLogicalRouter(named name: String) async throws -> OVNLogicalRouter? {
+    public func getLogicalRouter(named name: String) async throws(OVNManagerError) -> OVNLogicalRouter? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.logicalRouter, in: database, where: [condition])
         
@@ -264,7 +258,7 @@ public final class OVNManager: OVNManaging {
         return try parseRow(firstRow, as: OVNLogicalRouter.self)
     }
     
-    public func createLogicalRouter(_ router: OVNLogicalRouter) async throws -> String {
+    public func createLogicalRouter(_ router: OVNLogicalRouter) async throws(OVNManagerError) -> String {
         let row = try createRow(from: router)
         let result = try await connection.insert(into: OVNTable.logicalRouter, in: database, row: row)
         
@@ -280,7 +274,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateLogicalRouter(uuid: String, _ router: OVNLogicalRouter) async throws {
+    public func updateLogicalRouter(uuid: String, _ router: OVNLogicalRouter) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: router)
         
@@ -293,7 +287,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated logical router: \(router.name)")
     }
     
-    public func deleteLogicalRouter(uuid: String) async throws {
+    public func deleteLogicalRouter(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVNTable.logicalRouter, in: database, where: [condition])
         
@@ -304,7 +298,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical router: \(uuid)")
     }
     
-    public func deleteLogicalRouter(named name: String) async throws {
+    public func deleteLogicalRouter(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let count = try await connection.delete(from: OVNTable.logicalRouter, in: database, where: [condition])
         
@@ -317,14 +311,12 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Logical Router Port Operations
     
-    public func getLogicalRouterPorts() async throws -> [OVNLogicalRouterPort] {
+    public func getLogicalRouterPorts() async throws(OVNManagerError) -> [OVNLogicalRouterPort] {
         let rows = try await connection.selectAll(from: OVNTable.logicalRouterPort, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalRouterPort.self)
-        }
+        return try parseRows(rows, as: OVNLogicalRouterPort.self)
     }
     
-    public func getLogicalRouterPort(named name: String) async throws -> OVNLogicalRouterPort? {
+    public func getLogicalRouterPort(named name: String) async throws(OVNManagerError) -> OVNLogicalRouterPort? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.logicalRouterPort, in: database, where: [condition])
         
@@ -333,7 +325,7 @@ public final class OVNManager: OVNManaging {
     }
     
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createLogicalRouterPort(_:onRouter:) so the port is attached to its router.")
-    public func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws -> String {
+    public func createLogicalRouterPort(_ port: OVNLogicalRouterPort) async throws(OVNManagerError) -> String {
         let row = try createRow(from: port)
         let result = try await connection.insert(into: OVNTable.logicalRouterPort, in: database, row: row)
 
@@ -353,7 +345,7 @@ public final class OVNManager: OVNManaging {
     /// router in a single OVSDB transaction, mirroring `ovn-nbctl lrp-add`.
     /// Logical_Router_Port is not a root table, so an unreferenced row is
     /// garbage-collected when the transaction commits.
-    public func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws -> String {
+    public func createLogicalRouterPort(_ port: OVNLogicalRouterPort, onRouter routerName: String) async throws(OVNManagerError) -> String {
         let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
 
         guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
@@ -374,7 +366,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws {
+    public func updateLogicalRouterPort(uuid: String, _ port: OVNLogicalRouterPort) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: port)
         
@@ -387,7 +379,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated logical router port: \(port.name)")
     }
     
-    public func deleteLogicalRouterPort(uuid: String) async throws {
+    public func deleteLogicalRouterPort(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.logicalRouterPort,
             in: database,
@@ -402,7 +394,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted logical router port: \(uuid)")
     }
 
-    public func deleteLogicalRouterPort(named name: String) async throws {
+    public func deleteLogicalRouterPort(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         guard let uuid = try await rowUUID(in: OVNTable.logicalRouterPort, where: condition) else {
             throw OVNManagerError.operationFailed("Logical router port not found: \(name)")
@@ -415,15 +407,13 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - Logical Router Static Route Operations
 
-    public func getStaticRoutes() async throws -> [OVNLogicalRouterStaticRoute] {
+    public func getStaticRoutes() async throws(OVNManagerError) -> [OVNLogicalRouterStaticRoute] {
         let rows = try await connection.selectAll(from: OVNTable.logicalRouterStaticRoute, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalRouterStaticRoute.self)
-        }
+        return try parseRows(rows, as: OVNLogicalRouterStaticRoute.self)
     }
 
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createStaticRoute(_:onRouter:) so the route is attached to its router.")
-    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws -> String {
+    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError) -> String {
         let row = try createRow(from: route)
         let result = try await connection.insert(into: OVNTable.logicalRouterStaticRoute, in: database, row: row)
 
@@ -444,7 +434,7 @@ public final class OVNManager: OVNManaging {
     /// `ovn-nbctl lr-route-add`. Logical_Router_Static_Route is not a root
     /// table, so an unreferenced row is garbage-collected when the transaction
     /// commits.
-    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws -> String {
+    public func createStaticRoute(_ route: OVNLogicalRouterStaticRoute, onRouter routerName: String) async throws(OVNManagerError) -> String {
         let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
 
         guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
@@ -465,7 +455,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws {
+    public func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: route)
 
@@ -478,7 +468,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated static route: \(uuid)")
     }
 
-    public func deleteStaticRoute(uuid: String) async throws {
+    public func deleteStaticRoute(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.logicalRouterStaticRoute,
             in: database,
@@ -495,15 +485,13 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - Gateway Chassis Operations
 
-    public func getGatewayChassis() async throws -> [OVNGatewayChassis] {
+    public func getGatewayChassis() async throws(OVNManagerError) -> [OVNGatewayChassis] {
         let rows = try await connection.selectAll(from: OVNTable.gatewayChassis, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNGatewayChassis.self)
-        }
+        return try parseRows(rows, as: OVNGatewayChassis.self)
     }
 
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
-    public func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws -> String {
+    public func createGatewayChassis(_ chassis: OVNGatewayChassis) async throws(OVNManagerError) -> String {
         let row = try createRow(from: chassis)
         let result = try await connection.insert(into: OVNTable.gatewayChassis, in: database, row: row)
 
@@ -524,7 +512,7 @@ public final class OVNManager: OVNManaging {
     /// transaction, mirroring `ovn-nbctl lrp-set-gateway-chassis`.
     /// Gateway_Chassis is not a root table, so an unreferenced row is
     /// garbage-collected when the transaction commits.
-    public func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws -> String {
+    public func createGatewayChassis(_ chassis: OVNGatewayChassis, onRouterPort routerPortName: String) async throws(OVNManagerError) -> String {
         let portCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerPortName))
 
         guard try await rowUUID(in: OVNTable.logicalRouterPort, where: portCondition) != nil else {
@@ -545,7 +533,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws {
+    public func updateGatewayChassis(uuid: String, _ chassis: OVNGatewayChassis) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: chassis)
 
@@ -558,7 +546,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated gateway chassis: \(uuid)")
     }
 
-    public func deleteGatewayChassis(uuid: String) async throws {
+    public func deleteGatewayChassis(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.gatewayChassis,
             in: database,
@@ -575,14 +563,12 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - HA Chassis Group Operations
 
-    public func getHAChassisGroups() async throws -> [OVNHAChassisGroup] {
+    public func getHAChassisGroups() async throws(OVNManagerError) -> [OVNHAChassisGroup] {
         let rows = try await connection.selectAll(from: OVNTable.haChassisGroup, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNHAChassisGroup.self)
-        }
+        return try parseRows(rows, as: OVNHAChassisGroup.self)
     }
 
-    public func getHAChassisGroup(named name: String) async throws -> OVNHAChassisGroup? {
+    public func getHAChassisGroup(named name: String) async throws(OVNManagerError) -> OVNHAChassisGroup? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.haChassisGroup, in: database, where: [condition])
 
@@ -593,7 +579,7 @@ public final class OVNManager: OVNManaging {
     /// Creates an HA chassis group. HA_Chassis_Group is a root table, so the
     /// row persists on its own; attach members with `createHAChassis(_:inGroup:)`
     /// and reference it from a port's `ha_chassis_group` column.
-    public func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws -> String {
+    public func createHAChassisGroup(_ group: OVNHAChassisGroup) async throws(OVNManagerError) -> String {
         let row = try createRow(from: group)
         let result = try await connection.insert(into: OVNTable.haChassisGroup, in: database, row: row)
 
@@ -609,7 +595,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws {
+    public func updateHAChassisGroup(uuid: String, _ group: OVNHAChassisGroup) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: group)
 
@@ -622,7 +608,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated HA chassis group: \(group.name)")
     }
 
-    public func deleteHAChassisGroup(uuid: String) async throws {
+    public func deleteHAChassisGroup(uuid: String) async throws(OVNManagerError) {
         // The ha_chassis_group columns on Logical_Router_Port and
         // Logical_Switch_Port are strong references, so ovsdb-server rejects
         // deleting the group while a port still points at it. Detach those
@@ -647,15 +633,13 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - HA Chassis Operations
 
-    public func getHAChassis() async throws -> [OVNHAChassis] {
+    public func getHAChassis() async throws(OVNManagerError) -> [OVNHAChassis] {
         let rows = try await connection.selectAll(from: OVNTable.haChassis, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNHAChassis.self)
-        }
+        return try parseRows(rows, as: OVNHAChassis.self)
     }
 
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createHAChassis(_:inGroup:) so the member is attached to its group.")
-    public func createHAChassis(_ chassis: OVNHAChassis) async throws -> String {
+    public func createHAChassis(_ chassis: OVNHAChassis) async throws(OVNManagerError) -> String {
         let row = try createRow(from: chassis)
         let result = try await connection.insert(into: OVNTable.haChassis, in: database, row: row)
 
@@ -676,7 +660,7 @@ public final class OVNManager: OVNManaging {
     /// `ovn-nbctl ha-chassis-group-add-chassis`. HA_Chassis is not a root
     /// table, so an unreferenced row is garbage-collected when the transaction
     /// commits.
-    public func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws -> String {
+    public func createHAChassis(_ chassis: OVNHAChassis, inGroup groupName: String) async throws(OVNManagerError) -> String {
         let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(groupName))
 
         guard try await rowUUID(in: OVNTable.haChassisGroup, where: groupCondition) != nil else {
@@ -697,7 +681,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws {
+    public func updateHAChassis(uuid: String, _ chassis: OVNHAChassis) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: chassis)
 
@@ -710,7 +694,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated HA chassis: \(uuid)")
     }
 
-    public func deleteHAChassis(uuid: String) async throws {
+    public func deleteHAChassis(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.haChassis,
             in: database,
@@ -727,15 +711,13 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - ACL Operations
     
-    public func getACLs() async throws -> [OVNACL] {
+    public func getACLs() async throws(OVNManagerError) -> [OVNACL] {
         let rows = try await connection.selectAll(from: OVNTable.acl, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNACL.self)
-        }
+        return try parseRows(rows, as: OVNACL.self)
     }
     
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createACL(_:onSwitch:) or createACL(_:onPortGroup:) so the ACL is attached.")
-    public func createACL(_ acl: OVNACL) async throws -> String {
+    public func createACL(_ acl: OVNACL) async throws(OVNManagerError) -> String {
         let row = try createRow(from: acl)
         let result = try await connection.insert(into: OVNTable.acl, in: database, row: row)
 
@@ -755,7 +737,7 @@ public final class OVNManager: OVNManaging {
     /// (Logical_Switch.acls) in a single OVSDB transaction, mirroring
     /// `ovn-nbctl acl-add`. ACL is not a root table, so an unreferenced row
     /// is garbage-collected when the transaction commits.
-    public func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws -> String {
+    public func createACL(_ acl: OVNACL, onSwitch switchName: String) async throws(OVNManagerError) -> String {
         let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
 
         guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
@@ -779,7 +761,7 @@ public final class OVNManager: OVNManaging {
     /// Creates an ACL and attaches it to the named port group
     /// (Port_Group.acls) in a single OVSDB transaction, mirroring
     /// `ovn-nbctl acl-add ... pg`.
-    public func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws -> String {
+    public func createACL(_ acl: OVNACL, onPortGroup portGroupName: String) async throws(OVNManagerError) -> String {
         let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(portGroupName))
 
         guard try await rowUUID(in: OVNTable.portGroup, where: groupCondition) != nil else {
@@ -800,7 +782,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateACL(uuid: String, _ acl: OVNACL) async throws {
+    public func updateACL(uuid: String, _ acl: OVNACL) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: acl)
         
@@ -813,7 +795,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated ACL: \(uuid)")
     }
     
-    public func deleteACL(uuid: String) async throws {
+    public func deleteACL(uuid: String) async throws(OVNManagerError) {
         // ACLs are strongly referenced from Logical_Switch.acls and
         // Port_Group.acls; ovsdb-server rejects the delete while either
         // reference remains, so detach from both in the same transaction.
@@ -836,14 +818,12 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - Port Group Operations
 
-    public func getPortGroups() async throws -> [OVNPortGroup] {
+    public func getPortGroups() async throws(OVNManagerError) -> [OVNPortGroup] {
         let rows = try await connection.selectAll(from: OVNTable.portGroup, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNPortGroup.self)
-        }
+        return try parseRows(rows, as: OVNPortGroup.self)
     }
 
-    public func getPortGroup(named name: String) async throws -> OVNPortGroup? {
+    public func getPortGroup(named name: String) async throws(OVNManagerError) -> OVNPortGroup? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.portGroup, in: database, where: [condition])
 
@@ -853,7 +833,7 @@ public final class OVNManager: OVNManaging {
 
     /// Creates a port group, mirroring `ovn-nbctl pg-add`. Port_Group is a
     /// root table, so the row persists until it is explicitly deleted.
-    public func createPortGroup(_ portGroup: OVNPortGroup) async throws -> String {
+    public func createPortGroup(_ portGroup: OVNPortGroup) async throws(OVNManagerError) -> String {
         let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(portGroup.name))
 
         guard try await rowUUID(in: OVNTable.portGroup, where: nameCondition) == nil else {
@@ -902,7 +882,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
-    public func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws {
+    public func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: portGroup)
 
@@ -936,17 +916,17 @@ public final class OVNManager: OVNManaging {
     /// the whole `ports` set, mirroring `ovn-nbctl pg-set-ports` incrementally.
     /// Throws if any requested port no longer exists, so a stale UUID can't be
     /// silently dropped from this weak reference set (see `mutatePorts`).
-    public func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws {
+    public func addPorts(_ portUUIDs: [String], toPortGroup name: String) async throws(OVNManagerError) {
         try await mutatePorts(portUUIDs, portGroup: name, mutator: "insert")
     }
 
     /// Removes logical switch ports from the group's membership without
     /// rewriting the whole `ports` set.
-    public func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws {
+    public func removePorts(_ portUUIDs: [String], fromPortGroup name: String) async throws(OVNManagerError) {
         try await mutatePorts(portUUIDs, portGroup: name, mutator: "delete")
     }
 
-    public func deletePortGroup(uuid: String) async throws {
+    public func deletePortGroup(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVNTable.portGroup, in: database, where: [condition])
 
@@ -957,7 +937,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted port group: \(uuid)")
     }
 
-    public func deletePortGroup(named name: String) async throws {
+    public func deletePortGroup(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let count = try await connection.delete(from: OVNTable.portGroup, in: database, where: [condition])
 
@@ -970,14 +950,12 @@ public final class OVNManager: OVNManaging {
 
     // MARK: - Load Balancer Operations
     
-    public func getLoadBalancers() async throws -> [OVNLoadBalancer] {
+    public func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer] {
         let rows = try await connection.selectAll(from: OVNTable.loadBalancer, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLoadBalancer.self)
-        }
+        return try parseRows(rows, as: OVNLoadBalancer.self)
     }
     
-    public func getLoadBalancer(named name: String) async throws -> OVNLoadBalancer? {
+    public func getLoadBalancer(named name: String) async throws(OVNManagerError) -> OVNLoadBalancer? {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let rows = try await connection.select(from: OVNTable.loadBalancer, in: database, where: [condition])
         
@@ -985,7 +963,7 @@ public final class OVNManager: OVNManaging {
         return try parseRow(firstRow, as: OVNLoadBalancer.self)
     }
     
-    public func createLoadBalancer(_ loadBalancer: OVNLoadBalancer) async throws -> String {
+    public func createLoadBalancer(_ loadBalancer: OVNLoadBalancer) async throws(OVNManagerError) -> String {
         let row = try createRow(from: loadBalancer)
         let result = try await connection.insert(into: OVNTable.loadBalancer, in: database, row: row)
         
@@ -1001,7 +979,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateLoadBalancer(uuid: String, _ loadBalancer: OVNLoadBalancer) async throws {
+    public func updateLoadBalancer(uuid: String, _ loadBalancer: OVNLoadBalancer) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: loadBalancer)
         
@@ -1014,7 +992,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated load balancer: \(loadBalancer.name)")
     }
     
-    public func deleteLoadBalancer(uuid: String) async throws {
+    public func deleteLoadBalancer(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVNTable.loadBalancer, in: database, where: [condition])
         
@@ -1025,7 +1003,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted load balancer: \(uuid)")
     }
     
-    public func deleteLoadBalancer(named name: String) async throws {
+    public func deleteLoadBalancer(named name: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
         let count = try await connection.delete(from: OVNTable.loadBalancer, in: database, where: [condition])
         
@@ -1040,43 +1018,41 @@ public final class OVNManager: OVNManaging {
     /// (Logical_Switch.load_balancer), mirroring `ovn-nbctl ls-lb-add`.
     /// Load_Balancer is a root table, so rows survive unattached — but a
     /// load balancer has no effect until a switch or router references it.
-    public func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws {
+    public func attachLoadBalancer(uuid: String, toSwitch switchName: String) async throws(OVNManagerError) {
         try await attachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
         logger.info("Attached load balancer \(uuid) to switch: \(switchName)")
     }
 
     /// Attaches an existing load balancer to the named logical router
     /// (Logical_Router.load_balancer), mirroring `ovn-nbctl lr-lb-add`.
-    public func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws {
+    public func attachLoadBalancer(uuid: String, toRouter routerName: String) async throws(OVNManagerError) {
         try await attachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
         logger.info("Attached load balancer \(uuid) to router: \(routerName)")
     }
 
     /// Detaches a load balancer from the named logical switch, mirroring
     /// `ovn-nbctl ls-lb-del`. The load balancer row itself is kept.
-    public func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws {
+    public func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
         try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
         logger.info("Detached load balancer \(uuid) from switch: \(switchName)")
     }
 
     /// Detaches a load balancer from the named logical router, mirroring
     /// `ovn-nbctl lr-lb-del`. The load balancer row itself is kept.
-    public func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws {
+    public func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws(OVNManagerError) {
         try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
         logger.info("Detached load balancer \(uuid) from router: \(routerName)")
     }
 
     // MARK: - NAT Operations
     
-    public func getNATRules() async throws -> [OVNNAT] {
+    public func getNATRules() async throws(OVNManagerError) -> [OVNNAT] {
         let rows = try await connection.selectAll(from: OVNTable.nat, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNNAT.self)
-        }
+        return try parseRows(rows, as: OVNNAT.self)
     }
     
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNATRule(_:onRouter:) so the rule is attached to its router.")
-    public func createNATRule(_ nat: OVNNAT) async throws -> String {
+    public func createNATRule(_ nat: OVNNAT) async throws(OVNManagerError) -> String {
         let row = try createRow(from: nat)
         let result = try await connection.insert(into: OVNTable.nat, in: database, row: row)
 
@@ -1096,7 +1072,7 @@ public final class OVNManager: OVNManaging {
     /// (Logical_Router.nat) in a single OVSDB transaction, mirroring
     /// `ovn-nbctl lr-nat-add`. NAT is not a root table, so an unreferenced
     /// row is garbage-collected when the transaction commits.
-    public func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws -> String {
+    public func createNATRule(_ nat: OVNNAT, onRouter routerName: String) async throws(OVNManagerError) -> String {
         let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
 
         guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
@@ -1117,7 +1093,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateNATRule(uuid: String, _ nat: OVNNAT) async throws {
+    public func updateNATRule(uuid: String, _ nat: OVNNAT) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: nat)
         
@@ -1130,7 +1106,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated NAT rule: \(uuid)")
     }
     
-    public func deleteNATRule(uuid: String) async throws {
+    public func deleteNATRule(uuid: String) async throws(OVNManagerError) {
         let count = try await connection.deleteDetaching(
             from: OVNTable.nat,
             in: database,
@@ -1147,14 +1123,12 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - DHCP Operations
     
-    public func getDHCPOptions() async throws -> [OVNDHCPOptions] {
+    public func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions] {
         let rows = try await connection.selectAll(from: OVNTable.dhcpOptions, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNDHCPOptions.self)
-        }
+        return try parseRows(rows, as: OVNDHCPOptions.self)
     }
     
-    public func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws -> String {
+    public func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws(OVNManagerError) -> String {
         let row = try createRow(from: dhcp)
         let result = try await connection.insert(into: OVNTable.dhcpOptions, in: database, row: row)
         
@@ -1170,7 +1144,7 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
     
-    public func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws {
+    public func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: dhcp)
         
@@ -1183,7 +1157,7 @@ public final class OVNManager: OVNManaging {
         logger.info("Updated DHCP options: \(uuid)")
     }
     
-    public func deleteDHCPOptions(uuid: String) async throws {
+    public func deleteDHCPOptions(uuid: String) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let count = try await connection.delete(from: OVNTable.dhcpOptions, in: database, where: [condition])
         
@@ -1196,7 +1170,7 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Monitoring
     
-    public func startMonitoring(tables: [String]) async throws -> String {
+    public func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String {
         var monitorRequests: [String: OVSDBMonitorRequest] = [:]
         
         for table in tables {
@@ -1206,21 +1180,40 @@ public final class OVNManager: OVNManaging {
         return try await connection.startMonitoring(database: database, tables: monitorRequests).monitorId
     }
     
-    public func stopMonitoring(monitorId: String) async throws {
+    public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
     
+    /// Streams row changes from this manager's monitors.
+    ///
+    /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`); a
+    /// consumer that falls further behind gets
+    /// `OVNManagerError.notificationsDropped` rather than driving the process
+    /// out of memory. Restart the monitor to resynchronize.
+    ///
+    /// Unlike the throwing methods on this type, the stream's failure type is
+    /// `any Error` rather than `OVNManagerError`: every `AsyncThrowingStream`
+    /// initializer is constrained to `Failure == any Error`, so a typed-failure
+    /// stream cannot be built. Only `OVNManagerError` is ever thrown, so match
+    /// on it in the `catch`.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
             let task = Task {
                 let updates = connection.monitorUpdates()
                 do {
                     for try await update in updates {
-                        continuation.yield(update)
+                        if case .dropped = continuation.yield(update) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
+                        .connectionFailed("Monitor stream failed: \($0)")
+                    })
                 }
             }
             // Cancel the forwarding task if the consumer drops the stream, so it
@@ -1233,70 +1226,58 @@ public final class OVNManager: OVNManaging {
     
     // MARK: - Southbound Operations
     
-    public func getChassis() async throws -> [OVNChassis] {
+    public func getChassis() async throws(OVNManagerError) -> [OVNChassis] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Chassis operations require southbound database")
         }
         
         let rows = try await connection.selectAll(from: OVNTable.chassis, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNChassis.self)
-        }
+        return try parseRows(rows, as: OVNChassis.self)
     }
     
-    public func getChassisPrivate() async throws -> [OVNChassisPrivate] {
+    public func getChassisPrivate() async throws(OVNManagerError) -> [OVNChassisPrivate] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Chassis Private operations require southbound database")
         }
         
         let rows = try await connection.selectAll(from: OVNTable.chassisPrivate, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNChassisPrivate.self)
-        }
+        return try parseRows(rows, as: OVNChassisPrivate.self)
     }
     
-    public func getPortBindings() async throws -> [OVNPortBinding] {
+    public func getPortBindings() async throws(OVNManagerError) -> [OVNPortBinding] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Port Binding operations require southbound database")
         }
         
         let rows = try await connection.selectAll(from: OVNTable.portBinding, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNPortBinding.self)
-        }
+        return try parseRows(rows, as: OVNPortBinding.self)
     }
     
-    public func getLogicalFlows() async throws -> [OVNLogicalFlow] {
+    public func getLogicalFlows() async throws(OVNManagerError) -> [OVNLogicalFlow] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Logical Flow operations require southbound database")
         }
         
         let rows = try await connection.selectAll(from: OVNTable.logicalFlow, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLogicalFlow.self)
-        }
+        return try parseRows(rows, as: OVNLogicalFlow.self)
     }
 
-    public func getAdvertisedRoutes() async throws -> [OVNAdvertisedRoute] {
+    public func getAdvertisedRoutes() async throws(OVNManagerError) -> [OVNAdvertisedRoute] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Advertised Route operations require southbound database")
         }
 
         let rows = try await connection.selectAll(from: OVNTable.advertisedRoute, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNAdvertisedRoute.self)
-        }
+        return try parseRows(rows, as: OVNAdvertisedRoute.self)
     }
 
-    public func getLearnedRoutes() async throws -> [OVNLearnedRoute] {
+    public func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute] {
         guard database == OVNDatabase.southbound else {
             throw OVNManagerError.operationFailed("Learned Route operations require southbound database")
         }
 
         let rows = try await connection.selectAll(from: OVNTable.learnedRoute, in: database)
-        return try rows.compactMap { row in
-            try parseRow(row, as: OVNLearnedRoute.self)
-        }
+        return try parseRows(rows, as: OVNLearnedRoute.self)
     }
 }
 
@@ -1305,7 +1286,7 @@ public final class OVNManager: OVNManaging {
 private extension OVNManager {
     /// Looks up a row's _uuid via a narrow select so existence checks don't
     /// fetch and decode entire rows. Returns nil when no row matches.
-    func rowUUID(in table: String, where condition: OVSDBCondition) async throws -> String? {
+    func rowUUID(in table: String, where condition: OVSDBCondition) async throws(OVNManagerError) -> String? {
         let rows = try await connection.select(from: table, in: database, where: [condition], columns: ["_uuid"])
 
         guard let row = rows.first else { return nil }
@@ -1321,7 +1302,7 @@ private extension OVNManager {
     /// whose row no longer exists at commit is silently dropped rather than
     /// rejected, so the load balancer's existence is re-checked with a wait
     /// op inside the same transaction.
-    func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws {
+    func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
         let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
         let lbCondition = OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)
 
@@ -1359,7 +1340,7 @@ private extension OVNManager {
         }
     }
 
-    func detachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws {
+    func detachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
         let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
         let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
 
@@ -1387,7 +1368,7 @@ private extension OVNManager {
     /// unless the port row still exists at commit (mirroring the load-balancer
     /// attach guard). Deletes need no such guard — removing a stale UUID is a
     /// harmless no-op.
-    func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws {
+    func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws(OVNManagerError) {
         guard !portUUIDs.isEmpty else { return }
 
         let portAtoms = portUUIDs.map { JSONValue.array([.string("uuid"), .string($0)]) }
@@ -1435,11 +1416,31 @@ private extension OVNManager {
         }
     }
 
-    func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws -> T {
-        return try OVSDBRowDecoder.decode(type, from: row)
+    /// Decodes a row into its model. `OVSDBRowDecoder` is a general `Decoder`
+    /// and so throws `DecodingError`; this is the boundary where that becomes
+    /// `OVNManagerError.decodingError`, keeping the manager API closed over one
+    /// error type.
+    func parseRow<T: Codable>(_ row: OVSDBRow, as type: T.Type) throws(OVNManagerError) -> T {
+        do {
+            return try OVSDBRowDecoder.decode(type, from: row)
+        } catch {
+            throw OVNManagerError.wrapping(error) { .decodingError($0) }
+        }
     }
 
-    func createRow<T: Codable>(from object: T) throws -> OVSDBRow {
+    /// Decodes every row of a table select. Separate from `parseRow` because
+    /// `Sequence.map` is `rethrows`, which erases a typed throw back to
+    /// `any Error` — the loop has to be written out to keep it.
+    func parseRows<T: Codable>(_ rows: [OVSDBRow], as type: T.Type) throws(OVNManagerError) -> [T] {
+        var models: [T] = []
+        models.reserveCapacity(rows.count)
+        for row in rows {
+            models.append(try parseRow(row, as: type))
+        }
+        return models
+    }
+
+    func createRow<T: Codable>(from object: T) throws(OVNManagerError) -> OVSDBRow {
         return try OVSDBRowEncoder.makeRow(from: object, hints: .ovn)
     }
 }
