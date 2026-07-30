@@ -1,0 +1,129 @@
+Sources/SwiftOVN/Models/OVNLoadBalancerHealthCheck.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-38
+Sources/SwiftOVN/Models/JSONRPCIdentifier.swift
+  s_1878efc2a618f9::t_785fa81f947690 40-53
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 112-156,385-392,406-408,418-433,437-440
+  s_1878efc2a618f9::t_1542386ba79483 441
+Sources/SwiftOVN/Models/OVNNBGlobal.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-66
+Sources/SwiftOVN/Models/OVSDBMonitorMethod.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-91
+Sources/SwiftOVN/Models/OVNLogicalSwitch.swift
+  s_1878efc2a618f9::t_785fa81f947690 15-17,57
+Sources/SwiftOVN/Models/OVSDBCondition.swift
+  s_1878efc2a618f9::t_785fa81f947690 7
+Sources/SwiftOVN/Models/OVNServiceMonitor.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-63
+Sources/SwiftOVN/Models/OVSDBLockNotification.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-43
+Sources/SwiftOVN/Models/OVSDBMonitorNotification.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-31
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_1878efc2a618f9::t_785fa81f947690 55-57
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 431-598,1502-1616
+  s_1878efc2a618f9::t_84b37c7bbc206a 1617
+Sources/SwiftOVN/Models/OVSDBOperation.swift
+  s_1878efc2a618f9::t_785fa81f947690 7-19,28-35,38,43-57,68-70,72-183
+Sources/SwiftOVN/Models/JSONRPCError.swift
+  s_1878efc2a618f9::t_785fa81f947690 17-73
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_1878efc2a618f9::t_785fa81f947690 153-172,222-238,241-255,264-269,277-278,303-304,314-316,326-328
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 333-335,384-385,395-397,411-474,695-778
+  s_1878efc2a618f9::t_66204cfd26a008 779
+Sources/SwiftOVN/Models/OVNLogicalRouter.swift
+  s_1878efc2a618f9::t_785fa81f947690 15-17
+Sources/SwiftOVN/Core/OVSDBColumnTransactions.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-77
+README.md
+  s_1878efc2a618f9::t_785fa81f947690 142-232,258-260,267,385-425,447,449-462
+  s_1878efc2a618f9::t_e7ef023ad99b65 338-346
+Sources/SwiftOVN/Models/OVNLoadBalancerGroup.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-38
+Sources/SwiftOVN/Models/OVNSBGlobal.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-40
+Sources/SwiftOVN/Models/OVSDBTableUpdates.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-32
+Tests/SwiftOVNTests/JSONValueConversionTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 46-48,67-69,100,180
+Tests/SwiftOVNTests/ConditionalMonitoringTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-974
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_1878efc2a618f9::t_785fa81f947690 48-50,58,60-62,100,109,127-129,134-136,164-169
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_1878efc2a618f9::t_785fa81f947690 133-136,142,520-522,607-609,1003-1008,1018-1023,1025,1260-1469,1731,1746,1982-2139,2141,2152-2188,2192-2226,2322-2352,2358-2474,2491,2493,2505,2514-2537,2539-2540,2542-2548,2566-2568,2584-2586,2608-2610,2612-2628,2630-2631,2633,2635-2639,2649,2653-2680,2708-2759,2767-2769,2785-2789
+  s_1878efc2a618f9::t_5eefbe58e4ee45 2790
+Sources/SwiftOVN/Models/OVNDynamicRouting.swift
+  s_1878efc2a618f9::t_785fa81f947690 83-85
+Sources/SwiftOVN/Models/OVNManagerError.swift
+  s_1878efc2a618f9::t_785fa81f947690 55-62
+Sources/SwiftOVN/Protocols/OVSManaging.swift
+  s_1878efc2a618f9::t_785fa81f947690 27-40,97-99,137-151,160-164
+Tests/SwiftOVNTests/SyncBarrierTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-301
+Sources/SwiftOVN/Models/OVSDBMutation.swift
+  s_1878efc2a618f9::t_785fa81f947690 7
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_1878efc2a618f9::t_c69a6ab254421b 590-594
+  s_1878efc2a618f9::t_d47e8649cafbe5 812
+  s_1878efc2a618f9::t_4ac9a100013df4 27-35
+  s_1878efc2a618f9::t_785fa81f947690 10-14,21-22,24,77-82,107-108,210-260,268-281,299-305,406-407,419,456-457,483,511,540,582-583,586-588,597-652,660-667,669-674,676-698,700-808,818-835,839-844,867,873-874,894-912,921-990,992,1002-1034,1036,1041-1072
+  s_1878efc2a618f9::t_c864ba4a2ea920 148-150,152-161,163-168,170,172-187,190,192-194
+  s_1878efc2a618f9::t_a276bdeb45ec39 15-18,20
+  s_1878efc2a618f9::t_72c350bf847bda 83
+  s_1878efc2a618f9::t_200cf57939a7b3 653-658
+  s_1878efc2a618f9::t_5f0f106be4bef2 913-920
+  s_1878efc2a618f9::t_60971268715233 188-189
+  s_1878efc2a618f9::t_cbe31bd2763e37 25-26
+  s_1878efc2a618f9::t_9d3a88c46695cc 589
+Sources/SwiftOVN/Models/OVSDBMonitorSession.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-44
+Tests/SwiftOVNTests/OVSDBRPCSurfaceTests.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-302
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_1878efc2a618f9::t_785fa81f947690 231,235-237,243-247,500-502,829-865,869-903
+Sources/SwiftOVN/Models/OVSDBMonitorRequest.swift
+  s_1878efc2a618f9::t_785fa81f947690 7-8,12-32,35-43,45
+CLAUDE.md
+  s_1878efc2a618f9::t_785fa81f947690 138-167
+  s_1878efc2a618f9::t_cdadab1ef5f448 204-212
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_1878efc2a618f9::t_785fa81f947690 114-119,123-124,133-134,204-206,209,225-233,241,245-246,249-275,297-407,420-523,528-530,553-629,633-635
+  s_1878efc2a618f9::t_9882c8d1a9a8cc 630-632
+  s_1878efc2a618f9::t_b5e2312f2827d6 647-650,654-655,657-658
+Sources/SwiftOVN/Models/OVSDBUpdate.swift
+  s_1878efc2a618f9::t_785fa81f947690 9-10,14-34,36-51,56-57,60-65,67-68,70-80,83,86-113
+Tests/SwiftOVNTests/ClusterConnectionTests.swift
+  s_1878efc2a618f9::t_cc19a44efec5b8 941-942,951-974
+  s_1878efc2a618f9::t_f2436eac1f7556 616-655
+  s_1878efc2a618f9::t_160f50a7de9069 781-782
+  s_a12ff1fa509e14::t_a01a62e4920bc5 975
+Sources/SwiftOVN/Models/OVSDBOperationType.swift
+  s_1878efc2a618f9::t_785fa81f947690 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "b015797d032f1803080c077d22ffa2fd85c9fd1a",
+  "prompts": {},
+  "sessions": {
+    "s_1878efc2a618f9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3fc6db85-9f1c-4c95-ac26-3d8d50b2db44",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    },
+    "s_a12ff1fa509e14": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a454949d-5148-4836-9342-d879cc28e2d3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
