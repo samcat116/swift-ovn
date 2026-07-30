@@ -22,6 +22,20 @@ let package = Package(
             name: "SwiftOVN",
             targets: ["SwiftOVN"]),
     ],
+    traits: [
+        // On by default: dropping TLS support from an existing consumer's build
+        // without them asking for it would silently break `ssl:` endpoints.
+        // Consumers that only ever talk to a local `unix:` socket (or a
+        // cleartext `tcp:` one) can opt out with
+        // `.package(url: ..., from: ..., traits: [])` — or, for the whole
+        // build, `swift build --disable-default-traits` — and skip compiling
+        // BoringSSL, which otherwise dominates this package's cold build time.
+        .default(enabledTraits: ["TLS"]),
+        .trait(
+            name: "TLS",
+            description: "Support for `ssl:` endpoints, via swift-nio-ssl (BoringSSL)."
+        ),
+    ],
     dependencies: [
         // 2.98.0 is the floor swift-nio-ssl 2.37.1 itself requires.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.98.0"),
@@ -38,8 +52,8 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
-                .product(name: "NIOTLS", package: "swift-nio"),
-                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOTLS", package: "swift-nio", condition: .when(traits: ["TLS"])),
+                .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(traits: ["TLS"])),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
@@ -52,7 +66,7 @@ let package = Package(
             name: "SwiftOVNTests",
             dependencies: [
                 "SwiftOVN",
-                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(traits: ["TLS"])),
             ]
         ),
     ]
