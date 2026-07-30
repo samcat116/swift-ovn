@@ -1,8 +1,10 @@
 import Foundation
 import NIO
 import NIOPosix
+#if TLS
 import NIOSSL
 import NIOTLS
+#endif
 import Logging
 
 /// Preserved name from when the connection was Unix-socket only.
@@ -120,36 +122,22 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             notificationHub: notificationHub
         )
 
-        // TLS state that must exist before the pipeline is built.
-        let sslContext: NIOSSLContext?
-        let sslServerHostname: String?
-        switch endpoint {
-        case .unix(let path):
-            if !FileManager.default.fileExists(atPath: path) {
-                logger.error("Socket file does not exist at path: \(path)")
-                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(path)"))
-            }
-            sslContext = nil
-            sslServerHostname = nil
-        case .tcp:
-            sslContext = nil
-            sslServerHostname = nil
-        case .ssl(let host, _, let tls):
-            do {
-                sslContext = try Self.makeSSLContext(tls)
-            } catch {
-                logger.error("Failed to build TLS context: \(error)")
-                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)"))
-            }
-            // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
-            // nil for them. This does not weaken verification: under
-            // .fullVerification NIOSSL still validates identity with a nil
-            // hostname by matching the connection's remote address against
-            // the certificate's IP SANs (NIOSSLHandler.validateHostname →
-            // validIdentityForService), and fails the handshake on no match.
-            let hostname = tls.serverHostname ?? host
-            sslServerHostname = Self.isIPAddressLiteral(hostname) ? nil : hostname
+        if case .unix(let path) = endpoint, !FileManager.default.fileExists(atPath: path) {
+            logger.error("Socket file does not exist at path: \(path)")
+            return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(path)"))
         }
+
+        #if TLS
+        // TLS state that must exist before the pipeline is built. nil for the
+        // cleartext endpoints.
+        let tlsSetup: TLSSetup?
+        do {
+            tlsSetup = try makeTLSSetup()
+        } catch {
+            logger.error("Failed to build TLS context: \(error)")
+            return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)"))
+        }
+        #endif
 
         let bootstrap = ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -157,15 +145,17 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                 self.logger.debug("Initializing channel pipeline...")
 
                 var handlers: [ChannelHandler] = []
-                if let sslContext {
+                #if TLS
+                if let tlsSetup {
                     do {
-                        handlers.append(try NIOSSLClientHandler(context: sslContext, serverHostname: sslServerHostname))
+                        handlers.append(try NIOSSLClientHandler(context: tlsSetup.sslContext, serverHostname: tlsSetup.serverHostname))
                     } catch {
                         self.logger.error("Failed to create TLS handler: \(error)")
                         return channel.eventLoop.makeFailedFuture(error)
                     }
                     handlers.append(TLSHandshakeWaitHandler())
                 }
+                #endif
                 // Outbound needs no handler: `send` and the router's echo reply
                 // both write a `ByteBuffer`, which is what the TLS handler (or
                 // the socket) wants already.
@@ -185,17 +175,22 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         switch endpoint {
         case .unix(let path):
             connectFuture = bootstrap.connect(unixDomainSocketPath: path)
-        case .tcp(let host, let port), .ssl(let host, let port, _):
+        case .tcp(let host, let port):
             connectFuture = bootstrap.connect(host: host, port: port)
+        #if TLS
+        case .ssl(let host, let port, _):
+            connectFuture = bootstrap.connect(host: host, port: port)
+        #endif
         }
 
         return connectFuture
             .flatMap { channel -> EventLoopFuture<Channel> in
+                #if TLS
                 // For ssl: endpoints the TCP connect completing is not enough;
                 // certificate verification happens during the TLS handshake,
                 // so hold the connect future until the handshake finishes and
                 // fail it if verification fails.
-                guard sslContext != nil else {
+                guard tlsSetup != nil else {
                     return channel.eventLoop.makeSucceededFuture(channel)
                 }
                 return channel.pipeline.handler(type: TLSHandshakeWaitHandler.self)
@@ -203,6 +198,9 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                         handler.handshakeFuture ?? channel.eventLoop.makeSucceededFuture(())
                     }
                     .map { channel }
+                #else
+                return channel.eventLoop.makeSucceededFuture(channel)
+                #endif
             }
             .map { channel in
                 self.logger.debug("Raw connection established, setting up channel...")
@@ -222,6 +220,30 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
                 }
                 return self.eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Failed to connect to \(self.endpoint): \(error)"))
             }
+    }
+
+    #if TLS
+    /// Everything the channel initializer needs to install the TLS handler.
+    private struct TLSSetup {
+        let sslContext: NIOSSLContext
+        /// SNI/verification hostname, or nil for IP-literal hosts.
+        let serverHostname: String?
+    }
+
+    /// The TLS state for an `ssl:` endpoint, or nil for the cleartext ones.
+    private func makeTLSSetup() throws -> TLSSetup? {
+        guard case .ssl(let host, _, let tls) = endpoint else { return nil }
+        // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
+        // nil for them. This does not weaken verification: under
+        // .fullVerification NIOSSL still validates identity with a nil
+        // hostname by matching the connection's remote address against
+        // the certificate's IP SANs (NIOSSLHandler.validateHostname →
+        // validIdentityForService), and fails the handshake on no match.
+        let hostname = tls.serverHostname ?? host
+        return TLSSetup(
+            sslContext: try Self.makeSSLContext(tls),
+            serverHostname: Self.isIPAddressLiteral(hostname) ? nil : hostname
+        )
     }
 
     private static func makeSSLContext(_ tls: OVSDBTLSConfiguration) throws -> NIOSSLContext {
@@ -248,6 +270,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             inet_pton(AF_INET, pointer, &ipv4) == 1 || inet_pton(AF_INET6, pointer, &ipv6) == 1
         }
     }
+    #endif
 
     public func disconnect() -> EventLoopFuture<Void> {
         connectionLock.lock()
@@ -379,6 +402,7 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
 
 // MARK: - TLS Handshake Wait
 
+#if TLS
 /// Surfaces TLS handshake completion as a future, so `connect()` on an `ssl:`
 /// endpoint succeeds only after certificate verification instead of at TCP
 /// establishment. All members are accessed on the channel's event loop.
@@ -444,6 +468,7 @@ final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable 
         }
     }
 }
+#endif
 
 // MARK: - Notification Hub
 
