@@ -1,0 +1,36 @@
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_1a7c92008ece7f::t_9bc324980b7b25 681,683,688-690,692-693,695,700,719-724,731,734
+  s_1a7c92008ece7f::t_7b21b1a1bea3d6 137-140
+  s_1a7c92008ece7f::t_8f396290beb31b 824-831,835-839
+  s_1a7c92008ece7f::t_5f30f08c575c7d 658-660
+  s_1a7c92008ece7f::t_fb111f31b21fcf 701-707
+  s_1a7c92008ece7f::t_5a3b693db06350 1-3,5-12,14
+  s_1a7c92008ece7f::t_96029fcc1c24b7 745-747
+  s_1a7c92008ece7f::t_540f8315a5956a 698
+  s_1a7c92008ece7f::t_36981690187678 48,55,510,657,662
+  s_1a7c92008ece7f::t_8a4b461b2ca899 840-841
+Sources/SwiftOVN/Core/OVSDBRowDecoder.swift
+  s_1a7c92008ece7f::t_c181d722789f82 1-3,5
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_1a7c92008ece7f::t_6c8e0b9b462b6a 102
+  s_1a7c92008ece7f::t_c7d3c46f09d634 160
+  s_1a7c92008ece7f::t_cec71a7863f45c 1-3,5-16
+Package.swift
+  s_1a7c92008ece7f::t_4a25a34f06f8e0 53,55-57
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "2669fd4f8891f0e7eda85a0ab733e0d76194b909",
+  "prompts": {},
+  "sessions": {
+    "s_1a7c92008ece7f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59a0cb17-efe4-48de-afcc-5b8551073c70",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
