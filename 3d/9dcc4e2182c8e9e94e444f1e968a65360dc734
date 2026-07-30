@@ -1,0 +1,141 @@
+Sources/SwiftOVN/Models/OVSDBMutation.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBTransactionRequest.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNChassis.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+CLAUDE.md
+  s_1a7c92008ece7f::t_988fc19f18e155 97-122
+Sources/SwiftOVN/Models/JSONRPCRequest.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNGatewayChassis.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBRow.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/OVNManagerModule.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 3-5,7
+Sources/SwiftOVN/Models/JSONValue.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalRouterStaticRoute.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBCondition.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNChassisPrivate.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBUpdate.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCNotification.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSQoS.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNManagerError.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSBridge.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Extensions/Codable+Extensions.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSInterface.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSNetFlow.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSFlow.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/JSONValueEncoder.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBMonitorSelect.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalRouter.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSOpenFlow.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNHAChassis.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalFlow.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCParams.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNACL.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalSwitchPort.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSMirror.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCError.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/OVSDBTransport.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBMonitorRequest.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNPortGroup.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSController.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCResponse.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNEncap.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNDynamicRouting.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalSwitch.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSDBOperation.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Examples/BasicUsage.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCNotificationEvent.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLoadBalancer.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNPortBinding.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Protocols/OVSManaging.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNAdvertisedRoute.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Core/OVSDBEndpoint.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNDHCPOptions.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSPort.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNHAChassisGroup.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLogicalRouterPort.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVSQueue.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNLearnedRoute.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/OVNNAT.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+Sources/SwiftOVN/Models/JSONRPCIdentifier.swift
+  s_1a7c92008ece7f::t_72ffac62763b99 1-3,5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "3d9dcc4e2182c8e9e94e444f1e968a65360dc734",
+  "prompts": {},
+  "sessions": {
+    "s_1a7c92008ece7f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59a0cb17-efe4-48de-afcc-5b8551073c70",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
