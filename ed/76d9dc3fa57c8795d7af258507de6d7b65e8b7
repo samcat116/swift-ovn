@@ -1,0 +1,38 @@
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_5a35fd76ee6d0a::t_aa6ed1285f818d 192
+  s_5a35fd76ee6d0a::t_878b13e5cf8852 117-126
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_5a35fd76ee6d0a::t_33640388b64ff4 955-1050
+  s_5a35fd76ee6d0a::t_b4b13351618026 1499-1525
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_5a35fd76ee6d0a::t_1e4ce6be7b766b 563-621
+Tests/SwiftOVNTests/AddressSetTests.swift
+  s_5a35fd76ee6d0a::t_afcb085a911486 154-155,158
+  s_5a35fd76ee6d0a::t_57234b9639bf98 173
+  s_5a35fd76ee6d0a::t_1e29f85bb3bfbd 79-93
+  s_5a35fd76ee6d0a::t_e63860c9080f90 52-54,57-58
+  s_5a35fd76ee6d0a::t_2ee5c2bceb0c8e 1-6,27-29,32-51,55-56,59-78,94,96,98-118,122-123,125,127-128,130-143,145-153,157,159-162,166-170,172,174-179,185-192,194,196,198-214,218,222-223,225-240,247-249
+  s_5a35fd76ee6d0a::t_acebf872b750b7 126,156
+  s_5a35fd76ee6d0a::t_7a3cb1163b3536 7-26,30-31,95,97,119-121,124,129,144,163-165,171,180,195,215-216,241-246
+  s_5a35fd76ee6d0a::t_ea3857a81b822f 181-184,193,197,217,219-221,224
+Sources/SwiftOVN/Models/OVNAddressSet.swift
+  s_5a35fd76ee6d0a::t_9816396178e9b0 1-48
+README.md
+  s_5a35fd76ee6d0a::t_9c1b9a21f5dcd8 163
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "ed76d9dc3fa57c8795d7af258507de6d7b65e8b7",
+  "prompts": {},
+  "sessions": {
+    "s_5a35fd76ee6d0a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05dabb45-398e-4970-896d-2b55c77850a7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
