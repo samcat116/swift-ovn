@@ -78,10 +78,11 @@ public extension OVNLogicalRouter {
             policies: policies,
             nat: nat,
             load_balancer: load_balancer,
-            load_balancer_group: load_balancer_group,
             enabled: enabled,
             options: options,
-            external_ids: external_ids
+            external_ids: external_ids,
+            load_balancer_group: load_balancer_group,
+            copp: copp
         )
     }
 }

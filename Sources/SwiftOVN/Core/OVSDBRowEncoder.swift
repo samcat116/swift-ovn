@@ -56,9 +56,13 @@ enum OVSDBRowEncoder {
                 // Load_Balancer_Group's own member column; load_balancer_group
                 // is also Logical_Router's)
                 "ports", "acls", "qos_rules", "dns_records", "load_balancer",
-                "load_balancer_group",
-                // Logical_Switch_Port
-                "dhcpv4_options", "dhcpv6_options",
+                "load_balancer_group", "copp", "forwarding_groups",
+                // Logical_Switch_Port (parent_name and peer are plain
+                // port-name strings, not references)
+                "dhcpv4_options", "dhcpv6_options", "mirror_rules",
+                "health_checks",
+                // ACL
+                "network_function_group", "sample_new", "sample_est",
                 // Logical_Router
                 "static_routes", "policies", "nat",
                 // Logical_Router_Static_Route (output_port is a plain
@@ -66,8 +70,8 @@ enum OVSDBRowEncoder {
                 "bfd",
                 // Logical_Router_Policy (weak references to BFD)
                 "bfd_sessions",
-                // Logical_Router_Port
-                "gateway_chassis", "ha_chassis_group",
+                // Logical_Router_Port (peer is a plain port-name string)
+                "gateway_chassis", "ha_chassis_group", "dhcp_relay",
                 // HA_Chassis_Group (chassis_name in Gateway_Chassis/HA_Chassis
                 // is a plain chassis-name string, not a reference)
                 "ha_chassis",
@@ -75,8 +79,9 @@ enum OVSDBRowEncoder {
                 "health_check",
                 // Meter
                 "bands",
-                // NAT (weak references to Address_Set)
-                "allowed_ext_ips", "exempted_ext_ips",
+                // NAT (weak references to Address_Set, and to the
+                // Logical_Router_Port the rule is applied at)
+                "allowed_ext_ips", "exempted_ext_ips", "gateway_port",
             ]
         )
 
