@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A row in the OVN Northbound `HA_Chassis` table. These rows are referenced
 /// from `HA_Chassis_Group.ha_chassis` and give one chassis a priority within

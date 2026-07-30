@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 public enum JSONRPCParams: Codable, Sendable {
     case array([JSONValue])

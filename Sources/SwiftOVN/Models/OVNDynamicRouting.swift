@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 public enum OVNDynamicRoutingRedistribute: String, CaseIterable, Sendable {
     case connected

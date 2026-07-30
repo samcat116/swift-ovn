@@ -94,6 +94,32 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Mutations with `OVSDBMutation`
 - Real-time monitoring with `monitor_cond` method
 
+### Foundation Imports
+Linux is the primary deployment target, and there full `Foundation` is far more
+than this package needs. Source files therefore import the essentials subset
+where they can:
+
+```swift
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
+```
+
+`canImport(FoundationEssentials)` is true on Linux and false on Apple platforms,
+where the `#else` branch keeps things building. New files should follow the same
+pattern — or import nothing at all, since most models only need stdlib
+`Codable`.
+
+Three files genuinely need full Foundation and keep a plain `import Foundation`:
+- `Core/OVSDBSocketConnection.swift` — `FileManager`, `JSONSerialization`, `NSNull`, `NSLock`
+- `Core/OVSDBRowEncoder.swift` — `NSError`
+- `Core/OVSDBRowDecoder.swift` — `NSNull`, in `plainObject(from:)`
+
+Tests keep `import Foundation`; XCTest links Foundation regardless, so there is
+nothing to gain there.
+
 ### Testing Approach
 - Uses XCTest framework
 - Tests located in `/Tests/SwiftOVNTests/`

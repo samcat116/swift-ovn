@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 public struct JSONRPCResponse<T: Codable>: Codable {
     public let result: T?

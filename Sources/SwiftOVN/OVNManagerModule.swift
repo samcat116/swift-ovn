@@ -1,6 +1,10 @@
 // Main module file that provides package documentation and overview
 
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import NIO
 import Logging
 
