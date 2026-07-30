@@ -1,0 +1,41 @@
+Sources/SwiftOVN/Models/OVNLogicalRouterStaticRoute.swift
+  s_cdc2deea0abb71::t_677742d6ab8138 21-25
+Sources/SwiftOVN/Models/OVNBFD.swift
+  s_cdc2deea0abb71::t_198aa134996bd6 1-58
+Sources/SwiftOVN/Models/OVNDNS.swift
+  s_cdc2deea0abb71::t_bb6a3cf3e63aa5 1-34
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_cdc2deea0abb71::t_7d24d05ddb5cb0 1627-1629
+  s_cdc2deea0abb71::t_655a1d54f248c1 562-563,565
+  s_cdc2deea0abb71::t_708a1ea978c5a6 1304-1449
+  s_cdc2deea0abb71::t_57b86777b45585 1631-1651
+  s_cdc2deea0abb71::t_e341f06e7352a7 533-536,538
+  s_cdc2deea0abb71::t_01d3476b108ca0 448-452,454,461-466,475-484,486-493
+  s_cdc2deea0abb71::t_a01de72c0996c9 1652-1667,1669,1671-1672,1676-1682,1695-1703,1711
+README.md
+  s_cdc2deea0abb71::t_b2e48e8f60decc 167-168
+Sources/SwiftOVN/Models/OVNLogicalRouterPolicy.swift
+  s_cdc2deea0abb71::t_9f4034be83183a 40-41
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_cdc2deea0abb71::t_14c8515838f6db 215-217
+  s_cdc2deea0abb71::t_06bd63072d1909 149-162
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_cdc2deea0abb71::t_7e588b5a07c703 180-241
+  s_cdc2deea0abb71::t_bef0a991c9d61d 931-1019
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "2e4332ca18e7a017117d8bab06848909e1379166",
+  "prompts": {},
+  "sessions": {
+    "s_cdc2deea0abb71": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f5805693-f646-4319-836d-0c863eef5ded",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
