@@ -260,6 +260,16 @@ public protocol OVNManaging: Sendable {
     nonisolated func monitorTableUpdates(monitorId: String?) -> AsyncThrowingStream<OVSDBTableUpdates, Error>
 
     // Southbound Operations
+    //
+    // Every requirement below reads the Southbound database and throws
+    // `operationFailed` on a manager constructed against the northbound one.
+    // They are reads: ovn-northd and ovn-controller own these rows, so the
+    // models have no public initializers and there is no CRUD here. The two
+    // exceptions are under "Southbound Writes" at the end.
+    //
+    // Where a table name exists in both databases the getter is `getSB…` and
+    // the model `OVNSB…`, because the columns differ — `getSBLoadBalancers()`
+    // is not `getLoadBalancers()` against a different database.
     func getChassis() async throws(OVNManagerError) -> [OVNChassis]
     func getChassisPrivate() async throws(OVNManagerError) -> [OVNChassisPrivate]
     func getPortBindings() async throws(OVNManagerError) -> [OVNPortBinding]
@@ -268,6 +278,79 @@ public protocol OVNManaging: Sendable {
     func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute]
     func getServiceMonitors() async throws(OVNManagerError) -> [OVNServiceMonitor]
     func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal?
+    /// The tunnels each chassis can be reached over, resolving
+    /// `OVNChassis.encaps`.
+    func getEncaps() async throws(OVNManagerError) -> [OVNEncap]
+
+    // The datapath layer the rest of the Southbound database references
+    /// The logical datapaths every port binding, flow and route is scoped to.
+    func getDatapathBindings() async throws(OVNManagerError) -> [OVNDatapathBinding]
+    /// The datapath groups a `Logical_Flow` names instead of a single datapath,
+    /// resolving `OVNLogicalFlow.logical_dp_group`.
+    func getLogicalDPGroups() async throws(OVNManagerError) -> [OVNLogicalDPGroup]
+
+    // Learned and configured address bindings
+    func getMACBindings() async throws(OVNManagerError) -> [OVNMACBinding]
+    func getSBStaticMACBindings() async throws(OVNManagerError) -> [OVNSBStaticMACBinding]
+    func getAdvertisedMACBindings() async throws(OVNManagerError) -> [OVNAdvertisedMACBinding]
+    func getFDBEntries() async throws(OVNManagerError) -> [OVNFDB]
+
+    // Multicast state
+    func getMulticastGroups() async throws(OVNManagerError) -> [OVNMulticastGroup]
+    func getIGMPGroups() async throws(OVNManagerError) -> [OVNIGMPGroup]
+    func getIPMulticast() async throws(OVNManagerError) -> [OVNIPMulticast]
+
+    // Control-plane events and routing state
+    func getControllerEvents() async throws(OVNManagerError) -> [OVNControllerEvent]
+    func getECMPNexthops() async throws(OVNManagerError) -> [OVNECMPNexthop]
+    func getSBBFDSessions() async throws(OVNManagerError) -> [OVNSBBFD]
+
+    // The southbound copies of northbound configuration
+    func getSBLoadBalancers() async throws(OVNManagerError) -> [OVNSBLoadBalancer]
+    func getSBAddressSets() async throws(OVNManagerError) -> [OVNSBAddressSet]
+    func getSBPortGroups() async throws(OVNManagerError) -> [OVNSBPortGroup]
+    func getSBDNS() async throws(OVNManagerError) -> [OVNSBDNS]
+    func getSBMeters() async throws(OVNManagerError) -> [OVNSBMeter]
+    func getSBMeterBands() async throws(OVNManagerError) -> [OVNSBMeterBand]
+    func getSBMirrors() async throws(OVNManagerError) -> [OVNSBMirror]
+    func getSBGatewayChassis() async throws(OVNManagerError) -> [OVNSBGatewayChassis]
+    func getSBHAChassis() async throws(OVNManagerError) -> [OVNSBHAChassis]
+    func getSBHAChassisGroups() async throws(OVNManagerError) -> [OVNSBHAChassisGroup]
+    func getSBChassisTemplateVars() async throws(OVNManagerError) -> [OVNSBChassisTemplateVar]
+    /// The identifiers ovn-northd shares with ovn-controller for
+    /// `allow-established` ACLs.
+    func getACLIDs() async throws(OVNManagerError) -> [OVNACLID]
+
+    // The DHCP option dictionaries, not DHCP configuration — see
+    // `OVNSBDHCPOptions`
+    func getSBDHCPOptions() async throws(OVNManagerError) -> [OVNSBDHCPOptions]
+    func getSBDHCPv6Options() async throws(OVNManagerError) -> [OVNSBDHCPv6Options]
+
+    // ovsdb-server's own configuration, referenced from `SB_Global`
+    func getConnections() async throws(OVNManagerError) -> [OVNSBConnection]
+    func getSSL() async throws(OVNManagerError) -> OVNSBSSL?
+    func getRBACRoles() async throws(OVNManagerError) -> [OVNRBACRole]
+    func getRBACPermissions() async throws(OVNManagerError) -> [OVNRBACPermission]
+
+    // MARK: Southbound Writes
+    //
+    // Deliberately not presented as CRUD. The Southbound database is
+    // ovn-northd's output, so writing it fights the thing that owns it; these
+    // two operations are the exceptions, and each is an intervention with
+    // dataplane consequences rather than an ordinary edit. See the
+    // implementations in `OVNManager` for what each one is safe to do.
+
+    /// Evicts a chassis: the standard response to a hypervisor that is gone for
+    /// good. Destructive, and see `OVNManager.deleteChassis(named:)` for what it
+    /// tears down along with the row.
+    func deleteChassis(named name: String) async throws(OVNManagerError)
+    /// Rebinds a port to a chassis directly, bypassing ovn-controller's own
+    /// claim. See `OVNManager.setPortBindingChassis(logicalPort:chassisNamed:)`.
+    func setPortBindingChassis(logicalPort: String, chassisNamed chassisName: String?) async throws(OVNManagerError)
+    /// Redirects where a port *should* be bound, which is how a live migration
+    /// is driven. See
+    /// `OVNManager.setPortBindingRequestedChassis(logicalPort:chassisNamed:)`.
+    func setPortBindingRequestedChassis(logicalPort: String, chassisNamed chassisName: String?) async throws(OVNManagerError)
 }
 
 // MARK: - OVN Database Constants
@@ -318,6 +401,39 @@ public enum OVNTable {
     public static let serviceMonitor = "Service_Monitor"
     /// The singleton southbound configuration row (`OVNSBGlobal`).
     public static let sbGlobal = "SB_Global"
+    public static let datapathBinding = "Datapath_Binding"
+    public static let logicalDPGroup = "Logical_DP_Group"
+    public static let macBinding = "MAC_Binding"
+    public static let advertisedMACBinding = "Advertised_MAC_Binding"
+    public static let fdb = "FDB"
+    public static let multicastGroup = "Multicast_Group"
+    public static let igmpGroup = "IGMP_Group"
+    public static let ipMulticast = "IP_Multicast"
+    public static let controllerEvent = "Controller_Event"
+    public static let ecmpNexthop = "ECMP_Nexthop"
+    public static let aclID = "ACL_ID"
+    public static let dhcpv6Options = "DHCPv6_Options"
+    public static let rbacRole = "RBAC_Role"
+    public static let rbacPermission = "RBAC_Permission"
+
+    // Tables both databases declare under the same name, with different
+    // columns. One constant serves both — which database a call reaches is the
+    // manager's `database`, not the table name — so these sit outside the two
+    // groups above. The names already declared northbound (`Address_Set`,
+    // `BFD`, `DHCP_Options`, `DNS`, `Gateway_Chassis`, `HA_Chassis`,
+    // `HA_Chassis_Group`, `Load_Balancer`, `Meter`, `Meter_Band`, `Port_Group`)
+    // are shared the same way; see the `OVNSB`-prefixed models for what the
+    // southbound row looks like.
+    public static let mirror = "Mirror"
+    public static let staticMACBinding = "Static_MAC_Binding"
+    public static let chassisTemplateVar = "Chassis_Template_Var"
+    /// The remotes ovsdb-server listens on or connects to (`OVNSBConnection`),
+    /// referenced from `SB_Global.connections`.
+    public static let connection = "Connection"
+    /// ovsdb-server's own TLS material (`OVNSBSSL`), referenced from
+    /// `SB_Global.ssl`. Nothing to do with `OVSDBTLSConfiguration`, which is
+    /// what this client presents when connecting.
+    public static let ssl = "SSL"
 }
 
 // MARK: - Helper Extensions

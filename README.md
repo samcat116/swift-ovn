@@ -255,14 +255,44 @@ The package includes comprehensive Swift models for:
 - `OVNLoadBalancer` - Load balancing rules
 - `OVNLoadBalancerHealthCheck` - Per-VIP backend health probing
 - `OVNLoadBalancerGroup` - Named sets of load balancers applied to many switches/routers at once
-- `OVNServiceMonitor` - Southbound health probe state, one row per backend
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
 - `OVNDNS` - DNS records served to a logical switch's ports
 - `OVNBFD` - BFD sessions monitoring a static route's or policy's next hop
-- `OVNNBGlobal` / `OVNSBGlobal` - Global configuration, and the `nb_cfg`/`sb_cfg`/`hv_cfg` sync barrier
+- `OVNNBGlobal` - Global configuration, and the `nb_cfg`/`sb_cfg`/`hv_cfg` sync barrier
+
+#### OVN Southbound Models
+
+All 39 Southbound tables are modeled. These rows belong to ovn-northd and
+ovn-controller, so the models are read-only — no public initializers, and
+`OVNManaging` exposes a getter per table rather than CRUD. The two exceptions are
+under [Southbound Writes](#southbound-writes).
+
+Where a table name exists in both databases the Southbound model is `OVNSB`-prefixed
+and its getter is `getSB…`, because the columns differ: `getSBLoadBalancers()` is not
+`getLoadBalancers()` against another database, and `OVNSBDHCPOptions` is a dictionary
+of supported DHCP options rather than the DHCP *configuration* `OVNDHCPOptions` holds.
+
+- `OVNChassis` / `OVNChassisPrivate` / `OVNEncap` - Hypervisors and gateways, and how to reach them
+- `OVNDatapathBinding` / `OVNLogicalDPGroup` - The logical switches and routers everything else is scoped to
+- `OVNPortBinding` - Where each logical port is realized
+- `OVNLogicalFlow` - The compiled pipeline
+- `OVNMACBinding` / `OVNSBStaticMACBinding` / `OVNAdvertisedMACBinding` / `OVNFDB` - Learned, configured and announced address bindings
+- `OVNMulticastGroup` / `OVNIGMPGroup` / `OVNIPMulticast` - Multicast state and snooping configuration
+- `OVNServiceMonitor` - Health probe state, one row per load balancer backend
+- `OVNControllerEvent` - Events ovn-controller punted to the control plane, e.g. a VIP with no backends
+- `OVNAdvertisedRoute` / `OVNLearnedRoute` / `OVNECMPNexthop` / `OVNSBBFD` - Dynamic routing state and live BFD sessions
+- `OVNSBLoadBalancer` / `OVNSBAddressSet` / `OVNSBPortGroup` / `OVNSBDNS` / `OVNSBMeter` / `OVNSBMeterBand` / `OVNSBMirror` / `OVNSBGatewayChassis` / `OVNSBHAChassis` / `OVNSBHAChassisGroup` / `OVNSBChassisTemplateVar` / `OVNACLID` - Northbound configuration as ovn-northd published it
+- `OVNSBDHCPOptions` / `OVNSBDHCPv6Options` - The DHCP options this OVN version supports, with codes and value types
+- `OVNSBGlobal` - Southbound global configuration and the `nb_cfg` ovn-northd published
+- `OVNSBConnection` / `OVNSBSSL` / `OVNRBACRole` / `OVNRBACPermission` - ovsdb-server's own remotes, TLS material and access controls
+
+Resolving a reference is a second read, since OVSDB has no joins — a `Logical_Flow`
+names its scope by UUID, so pair `getLogicalFlows()` with `getDatapathBindings()` and
+`getLogicalDPGroups()`. Most flows use the *group* form, so without the latter a large
+share of flows appear to belong to no datapath at all.
 
 #### OVS Models
 - `OVSBridge` - Open vSwitch bridges
@@ -323,6 +353,47 @@ let SwiftOVN = SwiftOVN(
     logger: logger
 )
 ```
+
+### Southbound Writes
+
+The Southbound database is ovn-northd's output, so writing it normally just loses a
+race with the process that owns it. Two operations are exceptions — each is an
+operational intervention with no Northbound equivalent, and each has dataplane
+consequences, so they are deliberately not presented alongside ordinary CRUD.
+
+```swift
+let sb = OVNManager(socketPath: "/var/run/ovn/ovnsb_db.sock", database: OVNDatabase.southbound)
+try await sb.connect()
+
+// Evict a hypervisor that is not coming back (`ovn-sbctl chassis-del`).
+// DESTRUCTIVE: every port bound to it goes unbound. Against a *live* chassis
+// this achieves nothing lasting — ovn-controller re-registers within seconds,
+// having in the meantime unbound every port on it.
+try await sb.deleteChassis(named: "hv-3")
+
+// Drive a live migration: `requested_chassis` is the destination, `chassis`
+// stays the current holder, and ovn-controller moves the binding when the VIF
+// appears there. Nothing is unbound by setting it.
+try await sb.setPortBindingRequestedChassis(logicalPort: "lsp-vm-1", chassisNamed: "hv-2")
+
+// Rebind by hand, bypassing ovn-controller's own claim. For the cases where no
+// ovn-controller will do it: a migration whose source hypervisor died, or a
+// binding stuck on a chassis that is gone. Pass nil to unbind.
+try await sb.setPortBindingChassis(logicalPort: "lsp-vm-1", chassisNamed: "hv-2")
+```
+
+`deleteChassis(named:)` clears the chassis's `Encap` rows, its `Chassis_Private` row
+and the `Chassis` row in one transaction. The `Chassis_Private` row is the one that
+matters: it is a root table keyed by name rather than by a reference, so deleting the
+`Chassis` row leaves it behind, and ovn-northd derives `NB_Global.hv_cfg` from the
+minimum `nb_cfg` across every `Chassis_Private` row. A leftover row pins that minimum
+at the dead chassis's last value forever, stalling `waitForHypervisors(timeout:)`
+permanently.
+
+`setPortBindingRequestedChassis` writes a column ovn-northd derives from
+`Logical_Switch_Port.options:requested-chassis` and will overwrite on its next
+recompute of that port. Setting the Northbound option is the durable way to express
+the same intent; this is the immediate one.
 
 ### Building Complex Queries
 
@@ -402,7 +473,8 @@ into it, so match on the type in the `catch`:
 
 ### OVN Databases
 - **Northbound**: High-level logical network configuration
-- **Southbound**: Low-level physical network state
+- **Southbound**: Low-level physical network state — all 39 tables readable; see
+  [Southbound Writes](#southbound-writes) for the two supported writes
 
 ### OVS Database
 - **Open_vSwitch**: Configuration and state of Open vSwitch instances
