@@ -1,0 +1,57 @@
+.github/workflows/ci.yml
+  s_6922798de3c6c2::t_d9c84410d15917 13-16,20-27,33,36
+CLAUDE.md
+  s_6922798de3c6c2::t_50587ff4660713 114-118
+  s_6922798de3c6c2::t_b9abdf9ba816f3 56
+  s_6922798de3c6c2::t_0313cf382a6a4b 89-113
+  s_6922798de3c6c2::t_89dc1f48984720 19-23
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_6922798de3c6c2::t_9cec47af0fa447 4,7
+  s_6922798de3c6c2::t_e2dbc19930dc13 170-173,175,180,185,193-195
+  s_6922798de3c6c2::t_0be7f92556417a 388
+  s_6922798de3c6c2::t_d2d33fdc322dfd 454
+  s_6922798de3c6c2::t_213888d7401f68 142-143,145,152
+  s_6922798de3c6c2::t_786eef096650b6 119-132,134
+  s_6922798de3c6c2::t_a1e319e88a3c8c 217-240
+  s_6922798de3c6c2::t_55e9b52bd603a9 265
+README.md
+  s_6922798de3c6c2::t_79765c7f1a48c6 295-296
+  s_6922798de3c6c2::t_1c626f1a71b56e 206-208
+  s_6922798de3c6c2::t_2e1de9f91020ff 9
+  s_6922798de3c6c2::t_2eaf80d2f10457 26-46
+Tests/SwiftOVNTests/TLSTransportTests.swift.new
+  s_6922798de3c6c2::t_4e8f67025d2b6a 1-172
+Sources/SwiftOVN/Core/OVSDBEndpoint.swift
+  s_6922798de3c6c2::t_cdf3c8f9039c15 9-12,18,21-26,33,39-44
+  s_6922798de3c6c2::t_bf4a91b3ad8ed5 128,131
+  s_6922798de3c6c2::t_43b2f58466971b 55-58
+  s_6922798de3c6c2::t_44e44f84f3766d 147-150
+  s_6922798de3c6c2::t_bf46e508a7bb7e 73,75-82
+Package.swift
+  s_6922798de3c6c2::t_a1f6e7bc335142 55-56
+  s_6922798de3c6c2::t_b94b212661a6ff 69
+  s_6922798de3c6c2::t_642cb07d75ac59 25-29,31-38
+  s_6922798de3c6c2::t_88f35f63a7f735 30
+Tests/SwiftOVNTests/OVSDBEndpointTests.swift
+  s_6922798de3c6c2::t_b27270576173f5 76,79,81-83
+  s_6922798de3c6c2::t_cfc256d20d2b89 98,105
+  s_6922798de3c6c2::t_2d1229961bd03b 28,33-44
+Tests/SwiftOVNTests/TLSTransportTests.swift
+  s_6922798de3c6c2::t_c448d1ea8f9ab4 1,172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "dd1c696ccf358e0ddd3b754c49ac2f6f26c609c4",
+  "prompts": {},
+  "sessions": {
+    "s_6922798de3c6c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87c8570e-f65f-4a94-b54b-4042b023ee27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
