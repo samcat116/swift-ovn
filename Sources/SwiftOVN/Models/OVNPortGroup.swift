@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A row in the OVN Northbound `Port_Group` table. Port groups collect a set
 /// of logical switch ports so ACLs can be applied to the group as a whole,

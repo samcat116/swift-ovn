@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A parent table/column pair whose reference set may contain a child row's
 /// UUID (e.g. `Logical_Switch.ports`, `Bridge.mirrors`).

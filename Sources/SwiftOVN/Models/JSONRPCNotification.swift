@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A JSON-RPC notification received from the server (a message carrying a
 /// `method` with a null or absent `id`, so no response is expected).

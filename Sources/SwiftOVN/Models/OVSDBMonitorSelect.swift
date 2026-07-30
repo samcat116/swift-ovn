@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 public struct OVSDBMonitorSelect: Codable, Sendable {
     public let initial: Bool?

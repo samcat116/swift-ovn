@@ -133,6 +133,56 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Mutations with `OVSDBMutation`
 - Real-time monitoring with `monitor_cond` method
 
+### Foundation Imports
+Linux is the primary deployment target, and there full `Foundation` is far more
+than this package needs. Source files therefore import the essentials subset
+where they can:
+
+```swift
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
+```
+
+`canImport(FoundationEssentials)` is true on Linux and false on Apple platforms,
+where the `#else` branch keeps things building. New files should follow the same
+pattern — or import nothing at all, since most models only need stdlib
+`Codable`.
+
+No source file imports full Foundation any more. `OVSDBJSONFrameDecoder.swift`
+and `JSONRPCFrameEnvelope.swift` import neither — they work on `ByteBuffer` and
+need nothing from Foundation at all, which is the better end state where it is
+reachable. Keeping it that way means preferring:
+
+- `access(path, F_OK)` over `FileManager.fileExists` (see
+  `OVSDBChannelBootstrap.connect`)
+- `Mutex` / actor state over `NSLock`
+- a `Decodable` envelope over `JSONSerialization` plus `as?` casts
+- a plain `Error` type over `NSError` with `NSLocalizedDescriptionKey` (see
+  `OVSDBRowEncodingError`)
+
+Tests keep `import Foundation`; XCTest links Foundation regardless, so there is
+nothing to gain there.
+
+**Foundation is still linked, via `NIOFoundationCompat`.** That dependency is
+what lets `OVSDBConnectionCore` code JSON straight into a `ByteBuffer` instead
+of round-tripping through `Data`, and it imports Foundation itself, so the
+subset imports above buy no binary-size win on their own. Measured on Linux
+(Swift 6.2, release) against the same tree with plain `import Foundation`:
+object code and the `BasicUsage` binary both land within 0.01%, `ldd` shows the
+same four Foundation libraries either way, and recompile time is inside
+run-to-run noise.
+
+The size argument only cashes out if `NIOFoundationCompat` goes too. Measured on
+this branch before the #51 merge, with no Foundation anywhere in the graph, a
+`--static-swift-stdlib` `BasicUsage` linked at 55.8 MB against 104.1 MB — a 46%
+cut, though only ~70 KB of it with the dynamic stdlib. That trade — one `Data`
+copy per frame against half the static binary — was considered and **not**
+taken: SwiftOVN is a library, its consumers choose the linking mode, and the
+zero-copy frame path is deliberate. Re-measure before revisiting either side.
+
 ### Testing Approach
 - Uses XCTest framework
 - Tests located in `/Tests/SwiftOVNTests/`

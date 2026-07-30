@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// An element of a notification stream: either a notification from the server
 /// or a report that some were discarded.

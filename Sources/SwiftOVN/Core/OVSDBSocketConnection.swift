@@ -1,4 +1,15 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import NIO
 import NIOPosix
 #if TLS
@@ -152,7 +163,10 @@ enum OVSDBChannelBootstrap {
         eventLoopGroup: EventLoopGroup,
         logger: Logger
     ) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
-        if case .unix(let path) = endpoint, !FileManager.default.fileExists(atPath: path) {
+        // `access(F_OK)` rather than `FileManager.fileExists` — the answer is
+        // advisory either way (the socket can vanish before connect(2)), and it
+        // keeps this file off full Foundation.
+        if case .unix(let path) = endpoint, access(path, F_OK) != 0 {
             logger.error("Socket file does not exist at path: \(path)")
             throw OVNManagerError.connectionFailed("Socket file not found: \(path)")
         }

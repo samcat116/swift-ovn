@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// Decodes `Codable` models from OVSDB wire-format rows (RFC 7047).
 ///
@@ -22,43 +26,6 @@ import Foundation
 enum OVSDBRowDecoder {
     static func decode<T: Decodable>(_ type: T.Type, from row: OVSDBRow) throws -> T {
         return try T(from: OVSDBValueDecoder(value: .object(row), codingPath: []))
-    }
-
-    /// Converts a wire value to a plain Swift object for untyped consumers
-    /// (e.g. `[String: Any]` statistics APIs): UUID atoms become strings,
-    /// maps become dictionaries (integer keys stringified), sets become
-    /// arrays, and scalars pass through.
-    static func plainObject(from value: JSONValue) -> Any {
-        if let uuid = OVSDBWire.uuidString(value) {
-            return uuid
-        }
-        if let items = OVSDBWire.setItems(value) {
-            return items.map { plainObject(from: $0) }
-        }
-        if let pairs = OVSDBWire.mapPairs(value) {
-            var result: [String: Any] = [:]
-            for pair in pairs {
-                if case .array(let keyValue) = pair, keyValue.count == 2,
-                   let key = OVSDBWire.keyString(keyValue[0]) {
-                    result[key] = plainObject(from: keyValue[1])
-                }
-            }
-            return result
-        }
-        switch value {
-        case .null:
-            return NSNull()
-        case .boolean(let bool):
-            return bool
-        case .number(let number):
-            return number
-        case .string(let string):
-            return string
-        case .array(let array):
-            return array.map { plainObject(from: $0) }
-        case .object(let object):
-            return object.mapValues { plainObject(from: $0) }
-        }
     }
 }
 

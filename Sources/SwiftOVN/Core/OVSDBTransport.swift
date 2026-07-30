@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import NIO
 
 /// A bidirectional JSON-RPC transport to an OVSDB server.

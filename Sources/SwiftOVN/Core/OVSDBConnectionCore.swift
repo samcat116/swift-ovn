@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 import Logging
 import NIOCore
 import NIOFoundationCompat
@@ -18,12 +22,12 @@ actor OVSDBConnectionCore {
     private let endpoint: OVSDBEndpoint
     private let eventLoopGroup: EventLoopGroup
     nonisolated let logger: Logger
-    private let decoder = Foundation.JSONDecoder()
+    private let decoder = JSONDecoder()
     /// Reused across sends: constructing a `JSONEncoder` is not free, and one
     /// per outbound request adds up on the paths that write large transactions
     /// (a port-group update emits a `wait` op per port). Only ever used from
     /// this actor, so the reuse is serialized.
-    private let encoder = Foundation.JSONEncoder()
+    private let encoder = JSONEncoder()
 
     /// The live connection: present only between a successful `connect()` and
     /// the read loop's teardown.

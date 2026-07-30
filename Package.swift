@@ -51,6 +51,10 @@ let package = Package(
             dependencies: [
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                // Foundation reaches the link graph through this, not through
+                // our own imports: `OVSDBConnectionCore` codes JSON straight
+                // into a `ByteBuffer` with it, which is worth more than the
+                // Foundation-free link it costs.
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio", condition: .when(traits: ["TLS"])),
                 .product(name: "NIOSSL", package: "swift-nio-ssl", condition: .when(traits: ["TLS"])),

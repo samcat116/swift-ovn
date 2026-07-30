@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A row in the OVN Northbound `Logical_Router_Static_Route` table. These rows
 /// are referenced from `Logical_Router.static_routes` and program the routes a

@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A row in the OVN Northbound `Gateway_Chassis` table. These rows are
 /// referenced from `Logical_Router_Port.gateway_chassis` and pin a

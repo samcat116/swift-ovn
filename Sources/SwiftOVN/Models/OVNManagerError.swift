@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// The single error type thrown by every throwing operation on `OVNManaging`,
 /// `OVSManaging`, `OVSDBConnection` and `JSONRPCClient` — those are declared

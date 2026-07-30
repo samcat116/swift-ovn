@@ -1,4 +1,8 @@
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
 import Foundation
+#endif
 
 /// A row in the OVN Northbound `HA_Chassis_Group` table. Referenced from
 /// `Logical_Router_Port.ha_chassis_group` and `Logical_Switch_Port`, it
