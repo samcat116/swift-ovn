@@ -109,17 +109,27 @@ final class OVSDBConnectionStateHub: Sendable {
             bufferingPolicy: .bufferingNewest(Self.bufferSize)
         )
 
-        let outcome = state.withLock { state -> (current: OVSDBConnectionState, isFinished: Bool) in
-            if !state.isFinished {
-                state.subscribers[id] = continuation
-            }
-            return (state.current, state.isFinished)
+        let isFinished = state.withLock { state -> Bool in
+            // The current state is yielded *under* the lock, before this
+            // subscriber is reachable by `publish`. Yielding it after the lock
+            // was released let a concurrent `publish` reach the newly
+            // registered continuation first, so the stream delivered the newer
+            // state and *then* the older one — and a consumer keeping the last
+            // element it saw was left showing a stale state as current, which
+            // is the one thing this hub's buffering policy promises cannot
+            // happen. Re-entrancy is not a risk here even though `yield` can
+            // run `onTermination`: this continuation is brand new, its buffer
+            // is empty and its termination handler is not installed until
+            // below, so nothing can call back into this lock.
+            continuation.yield(state.current)
+            guard !state.isFinished else { return true }
+            state.subscribers[id] = continuation
+            return false
         }
 
-        // Outside the lock: `yield`/`finish` can run `onTermination`, which takes
-        // the same non-recursive lock.
-        continuation.yield(outcome.current)
-        if outcome.isFinished {
+        if isFinished {
+            // Outside the lock: `finish()` runs `onTermination`, which takes the
+            // same non-recursive lock.
             continuation.finish()
             return stream
         }

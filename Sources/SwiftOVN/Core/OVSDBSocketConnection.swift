@@ -258,31 +258,34 @@ enum OVSDBChannelBootstrap {
             logger.error("Failed to build TLS context: \(error)")
             throw OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)")
         }
-        // The handshake promise is created here rather than inside the handler,
-        // so the handler owns no state that has to cross a concurrency domain.
-        let handshake = tlsSetup == nil ? nil : eventLoopGroup.any().makePromise(of: Void.self)
         #endif
 
         let bootstrap = ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
-        let initializer: @Sendable (Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> = { channel in
+        let initializer: @Sendable (Channel) -> EventLoopFuture<BootstrappedChannel> = { channel in
             channel.eventLoop.makeCompletedFuture {
                 logger.debug("Initializing channel pipeline...")
                 let operations = channel.pipeline.syncOperations
+                var handshake: EventLoopFuture<Void>?
                 #if TLS
-                if let tlsSetup, let handshake {
+                if let tlsSetup {
+                    // One promise per candidate channel, made on that channel's
+                    // own loop — see `BootstrappedChannel` for why it cannot be
+                    // shared across the candidates of one connect.
+                    let promise = channel.eventLoop.makePromise(of: Void.self)
                     try operations.addHandler(
                         NIOSSLClientHandler(context: tlsSetup.sslContext, serverHostname: tlsSetup.serverHostname)
                     )
-                    try operations.addHandler(TLSHandshakeWaitHandler(handshake: handshake))
+                    try operations.addHandler(TLSHandshakeWaitHandler(handshake: promise))
+                    handshake = promise.futureResult
                 }
                 #endif
                 // Outbound needs no handler: every write is already a
                 // `ByteBuffer`, which is what the TLS handler (or the socket)
                 // wants.
                 try operations.addHandler(ByteToMessageHandler(OVSDBJSONFrameDecoder()))
-                return try NIOAsyncChannel(
+                let asyncChannel = try NIOAsyncChannel<ByteBuffer, ByteBuffer>(
                     wrappingChannelSynchronously: channel,
                     configuration: NIOAsyncChannel.Configuration(
                         // The default watermarks (low 2, high 10) are the
@@ -295,26 +298,27 @@ enum OVSDBChannelBootstrap {
                         outboundType: ByteBuffer.self
                     )
                 )
+                return BootstrappedChannel(channel: asyncChannel, handshake: handshake)
             }
         }
 
-        let asyncChannel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+        let bootstrapped: BootstrappedChannel
         do {
             switch endpoint {
             case .unix(let path):
-                asyncChannel = try await bootstrap.connect(
+                bootstrapped = try await bootstrap.connect(
                     unixDomainSocketPath: path,
                     channelInitializer: initializer
                 )
             case .tcp(let host, let port):
-                asyncChannel = try await bootstrap.connect(
+                bootstrapped = try await bootstrap.connect(
                     host: host,
                     port: port,
                     channelInitializer: initializer
                 )
             #if TLS
             case .ssl(let host, let port, _):
-                asyncChannel = try await bootstrap.connect(
+                bootstrapped = try await bootstrap.connect(
                     host: host,
                     port: port,
                     channelInitializer: initializer
@@ -330,14 +334,15 @@ enum OVSDBChannelBootstrap {
             throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
         }
 
-        #if TLS
+        let asyncChannel = bootstrapped.channel
+
         // For ssl: endpoints the TCP connect completing is not enough:
         // certificate verification happens during the TLS handshake, so hold the
         // connect until the handshake finishes and fail it if verification
-        // fails.
-        if let handshake {
+        // fails. Nil for the cleartext endpoints.
+        if let handshake = bootstrapped.handshake {
             do {
-                try await handshake.futureResult.get()
+                try await handshake.get()
             } catch {
                 logger.error("TLS handshake with \(endpoint) failed: \(error)")
                 // Consume both halves before dropping the channel, rather than
@@ -353,7 +358,6 @@ enum OVSDBChannelBootstrap {
                 throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
             }
         }
-        #endif
 
         logger.debug("Channel pipeline initialized successfully")
         return asyncChannel
@@ -408,6 +412,35 @@ enum OVSDBChannelBootstrap {
         }
     }
     #endif
+}
+
+// MARK: - Bootstrapped channel
+
+/// A connected channel and, for an `ssl:` endpoint, the future that completes
+/// when *that channel's* TLS handshake does.
+///
+/// The handshake future travels with the channel rather than being made once
+/// per `connect` because `ClientBootstrap.connect(host:port:)` is Happy
+/// Eyeballs: one call initializes a channel per candidate address and closes
+/// every one but the winner. A single shared promise was therefore completed by
+/// whichever candidate finished first — and that is systematically a *loser*,
+/// whose `handlerRemoved` fires the moment it is torn down, while the winner
+/// still needs a round trip to finish its handshake. NIO keeps the first
+/// completion, so the fully connected, verified channel was closed and
+/// `connect()` reported "Connection closed before TLS handshake completed". An
+/// `ssl:` hostname with both AAAA and A records whose first family is
+/// unreachable could never be connected to at all, while `tcp:` to the same
+/// host worked.
+///
+/// Making the promise inside the initializer also means a connect that fails
+/// *before* any channel exists — DNS resolution of the `ssl:` host, most
+/// likely — creates no promise to leak. The shared one was never completed on
+/// that path, and NIO's `EventLoopFuture.deinit` traps on an unfulfilled
+/// promise in debug builds, so a typo'd hostname crashed the process instead of
+/// throwing `connectionFailed`.
+private struct BootstrappedChannel: Sendable {
+    let channel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+    let handshake: EventLoopFuture<Void>?
 }
 
 // MARK: - TLS Handshake Wait
