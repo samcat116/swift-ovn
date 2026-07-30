@@ -1,0 +1,94 @@
+Sources/SwiftOVN/Models/OVSDBOperationType.swift
+  s_2b849d7edb7452::t_34bd112ac4fac3 1-17
+Tests/SwiftOVNTests/JSONValueConversionTests.swift
+  s_2b849d7edb7452::t_9b9fd1286f4dd3 100
+  s_2b849d7edb7452::t_a98e8e38da05e3 180
+  s_2b849d7edb7452::t_03399c1e07a457 46-48
+  s_2b849d7edb7452::t_6ae0460dc74c3a 67-69
+Sources/SwiftOVN/Models/OVSDBOperation.swift
+  s_2b849d7edb7452::t_a0026e18c59171 15
+  s_2b849d7edb7452::t_51232e975f4815 7-14,16-19,28-35,38,43-57,68-70,72-183
+Sources/SwiftOVN/Models/OVSDBCondition.swift
+  s_2b849d7edb7452::t_78c9465af16344 7
+Sources/SwiftOVN/Core/OVSDBConnection.swift
+  s_2b849d7edb7452::t_9c5cac77935dcf 158-164
+  s_2b849d7edb7452::t_47a58c19cf6515 127-140
+  s_2b849d7edb7452::t_421b7fd85457cc 278
+  s_2b849d7edb7452::t_be91d1ec5bcb8d 315-316
+  s_2b849d7edb7452::t_d00738ae851e13 370
+  s_2b849d7edb7452::t_97dd05f7dc99e0 399
+  s_2b849d7edb7452::t_5ca854292d299e 265-266
+  s_2b849d7edb7452::t_72f6ce7d2ffe00 342
+  s_2b849d7edb7452::t_6f70d933e324b0 69-119
+Sources/SwiftOVN/Models/JSONRPCIdentifier.swift
+  s_2b849d7edb7452::t_e70f91d1b68359 53
+  s_2b849d7edb7452::t_2218776f615be7 40-52
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_2b849d7edb7452::t_b1a6132c73d566 2226-2228
+  s_2b849d7edb7452::t_b4141f76446872 2357-2359
+  s_2b849d7edb7452::t_197c682894d910 2156-2158
+  s_2b849d7edb7452::t_25d59562a1cdb5 474-476
+  s_2b849d7edb7452::t_7487fc55179e9a 2338
+  s_2b849d7edb7452::t_40a47d6b79ca64 87-90,96
+  s_2b849d7edb7452::t_e365dda04d8b36 2319
+  s_2b849d7edb7452::t_7be295936a07f6 2310-2312
+  s_2b849d7edb7452::t_8fce65cd6e9289 561-563
+Sources/SwiftOVN/Core/OVSDBReferenceTransactions.swift
+  s_2b849d7edb7452::t_769011da6fa686 127-129,134-136
+  s_2b849d7edb7452::t_016c7e6b0e00a8 164-169
+  s_2b849d7edb7452::t_8af1555dd3e2b9 48-50,58,60-62
+  s_2b849d7edb7452::t_91e8dc359cf8b3 100
+  s_2b849d7edb7452::t_32ae7005cd0714 109
+Sources/SwiftOVN/Models/OVSDBLockNotification.swift
+  s_2b849d7edb7452::t_d32448e0927688 1-43
+Tests/SwiftOVNTests/OVSDBRPCSurfaceTests.swift
+  s_2b849d7edb7452::t_55037460c95a58 1-26,29-302
+  s_2b849d7edb7452::t_cd2d15f6c6d542 27-28
+Sources/SwiftOVN/Core/JSONRPCClient.swift
+  s_2b849d7edb7452::t_6e29a9292e0bc5 387-421,433-437
+  s_2b849d7edb7452::t_60b6b3c25448ec 159-160
+  s_2b849d7edb7452::t_6ee127b0cf6e7f 294
+  s_2b849d7edb7452::t_5b9b8217c9cea7 68-73,77-78,87
+  s_2b849d7edb7452::t_f2c9607feb8175 179-187,195,199-219,221-228
+  s_2b849d7edb7452::t_d9532ccde6c759 283
+  s_2b849d7edb7452::t_28cac57d11d3bb 158,163
+  s_2b849d7edb7452::t_bb9a8e7a506d20 321-325,328
+  s_2b849d7edb7452::t_ec037878465d0e 263-282,284-293,295-320,326-327,329-366
+  s_2b849d7edb7452::t_a86d99cf9d751a 88
+Sources/SwiftOVN/Managers/OVSManager.swift
+  s_2b849d7edb7452::t_fe80a03b4bb915 190,194-196,202-206
+Sources/SwiftOVN/Models/OVSDBMutation.swift
+  s_2b849d7edb7452::t_af715acb3f8115 7
+README.md
+  s_2b849d7edb7452::t_3dcdc072acc1c7 235-264,266-275
+  s_2b849d7edb7452::t_3dfab3f8efbfe2 265
+Tests/SwiftOVNTests/OVNManagerTests.swift
+  s_2b849d7edb7452::t_fa15a7606571cf 401-402
+  s_2b849d7edb7452::t_ea6790e848a6fd 350-352
+  s_2b849d7edb7452::t_4ec37a4b2045c5 412-414,428-490
+  s_9b33c0b7a378a0::t_33880d3a8c2973 491
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "de21bce849c7a70567ddd4417d9d50d67eeab5c4",
+  "prompts": {},
+  "sessions": {
+    "s_2b849d7edb7452": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "66d9a865-dec0-4038-9157-7287d6f2bb54",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    },
+    "s_9b33c0b7a378a0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "859c7a9c-97e7-45f9-b8ec-96a1e21819b2",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
