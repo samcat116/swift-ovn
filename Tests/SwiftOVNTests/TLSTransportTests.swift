@@ -33,7 +33,9 @@ final class TLSTransportTests {
     }
 
     deinit {
-        try? group.syncShutdownGracefully()
+        // Asynchronously, and never `syncShutdownGracefully()` — see the note
+        // on `MessageRoutingTests.deinit`.
+        group.shutdownGracefully { _ in }
         try? FileManager.default.removeItem(atPath: caFilePath)
     }
 

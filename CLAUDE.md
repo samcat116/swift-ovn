@@ -53,7 +53,11 @@ The codebase follows a clean architecture with clear separation of concerns:
 
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
-   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
+   - `OVSDBSocketConnection.swift`: Public transport facade and channel bootstrap over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias). The TLS paths are behind `#if TLS` — see Package Traits below.
+   - `OVSDBConnectionCore.swift`: The `NIOAsyncChannel` state machine — session, in-flight requests, inbound routing. Every piece of mutable transport state lives here, as actor state or behind a `Mutex`; there is no `@unchecked Sendable` in the transport
+   - `OVSDBJSONFrameDecoder.swift`: Brace-depth framer, emits one `ByteBuffer` per top-level JSON object
+   - `JSONRPCFrameEnvelope.swift`: Scans a frame's `method`/`id` for routing without parsing the payload
+   - `JSONRPCNotificationHub.swift`: Bounded fan-out of server notifications, with drop reporting
    - `OVSDBConnection.swift`: OVSDB protocol with real-time monitoring via AsyncSequence
 
 2. **High-level managers** (`/Sources/SwiftOVN/Managers/`):
@@ -135,8 +139,15 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Tests located in `/Tests/SwiftOVNTests/`, importing `@testable import SwiftOVN`
 - Suites run in parallel by default, so nothing may share mutable global state.
   A suite needing per-test setup/teardown is a `final class` with `init`/`deinit`
-  (`TCPTransportTests`, `TLSTransportTests`, which own an event loop group);
-  everything else is a `struct`.
+  (`MessageRoutingTests`, `TCPTransportTests`, `TLSTransportTests`, which own an
+  event loop group); everything else is a `struct`.
+- **Never block in `deinit`.** Those three suites tear their group down with
+  `group.shutdownGracefully { _ in }`, not `syncShutdownGracefully()`. Swift
+  Testing runs tests as tasks, so `deinit` lands on a cooperative thread, and
+  blocking one of the pool's few threads while other suites' read-loop tasks
+  wait for a thread deadlocks the entire run — it hangs with no failure output.
+  This is the one thing that does not survive a mechanical `tearDown` → `deinit`
+  translation.
 - `OVNManagerError` is not `Equatable`, so `#expect(throws:)` cannot name a
   specific case. Compare `errorCase` (see `TestSupport.swift`) instead:
   `#expect(error?.errorCase == .timeoutError)`.

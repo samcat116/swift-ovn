@@ -669,7 +669,8 @@ struct FramingCase: Sendable, CustomTestStringConvertible {
 struct OVSDBJSONFrameDecoderTests {
 
     /// Feeds the given byte chunks through the decoder in order and returns every
-    /// framed message the decoder produced.
+    /// framed message the decoder produced. Frames come out as `ByteBuffer`s and
+    /// are rendered back to `String` here only so the expectations stay readable.
     private func frames(feeding chunks: [String]) throws -> [String] {
         let channel = EmbeddedChannel(handler: ByteToMessageHandler(OVSDBJSONFrameDecoder()))
         defer { _ = try? channel.finish() }
@@ -681,8 +682,8 @@ struct OVSDBJSONFrameDecoderTests {
         }
 
         var results: [String] = []
-        while let framed = try channel.readInbound(as: String.self) {
-            results.append(framed)
+        while let framed = try channel.readInbound(as: ByteBuffer.self) {
+            results.append(String(buffer: framed))
         }
         return results
     }

@@ -5,9 +5,9 @@ import NIOPosix
 import Logging
 @testable import SwiftOVN
 
-/// End-to-end tests for the TCP transport: a minimal in-process JSON-RPC
-/// server accepts a real TCP connection from the client and answers `echo`
-/// and `list_dbs`, exercising the same pipeline used against a remote
+/// End-to-end tests for the TCP transport: a minimal in-process JSON-RPC server
+/// accepts a real TCP connection from the client, answers requests and pushes
+/// monitor notifications, exercising the same pipeline used against a remote
 /// ovsdb-server (`tcp:<host>:6641/6642`).
 ///
 /// A `final class` rather than a `struct` so the per-test event loop group can
@@ -22,7 +22,10 @@ final class TCPTransportTests {
     }
 
     deinit {
-        try? group.syncShutdownGracefully()
+        // Asynchronously, and never `syncShutdownGracefully()` — see the note
+        // on `MessageRoutingTests.deinit`. This also closes the test servers,
+        // which is why none of them are closed explicitly.
+        group.shutdownGracefully { _ in }
     }
 
     private func startServer() async throws -> Channel {
@@ -75,6 +78,120 @@ final class TCPTransportTests {
         try await connection.disconnect()
     }
 
+    @Test("Monitor updates arrive over the socket")
+    func monitorUpdatesArriveOverTheSocket() async throws {
+        // The stub answers `monitor` and then pushes an `update` notification the
+        // way ovsdb-server does, so this covers the whole inbound path over a
+        // real socket: framing, the routing scan, and the notification hub.
+        let server = try await startServer()
+        let port = try #require(server.localAddress?.port)
+
+        let client = JSONRPCClient(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await client.connect()
+
+        // Subscribing before the request is what makes the update unmissable.
+        let updates = client.monitorUpdates()
+        _ = try await client.monitor(database: "OVN_Northbound", monitorId: "mon-1", requests: [:])
+
+        var iterator = updates.makeAsyncIterator()
+        let received = try #require(try await iterator.next())
+        #expect(received.0 == "mon-1")
+        let tables = try #require(
+            received.1.objectValue,
+            "Expected a Logical_Switch table update, got \(received.1)"
+        )
+        let rows = try #require(tables["Logical_Switch"]?.objectValue)
+        #expect(rows.count == 1)
+
+        try await client.disconnect()
+    }
+
+    @Test("A large response split across many reads is reassembled")
+    func largeResponseSplitAcrossManyReadsIsReassembled() async throws {
+        // A reply far larger than one socket read: the framer has to accumulate
+        // it across reads and the decoder has to see exactly one frame.
+        let server = try await startServer()
+        let port = try #require(server.localAddress?.port)
+
+        let client = JSONRPCClient(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await client.connect()
+
+        let schema = try await client.getSchema(database: "OVN_Southbound")
+        let blob = try #require(
+            schema.objectValue?["blob"]?.stringValue,
+            "Expected the large schema stub, got \(schema)"
+        )
+        #expect(blob.count == JSONRPCStubServerHandler.largeBlobLength)
+
+        try await client.disconnect()
+    }
+
+    @Test("Reconnecting after a disconnect works")
+    func reconnectAfterDisconnect() async throws {
+        // connect() has to be usable again after a disconnect: the session, the
+        // read loop and the notification hub are all re-established.
+        let server = try await startServer()
+        let port = try #require(server.localAddress?.port)
+
+        let client = JSONRPCClient(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await client.connect()
+        let echoed = try await client.echo()
+        #expect(echoed == ["echo"])
+        try await client.disconnect()
+        #expect(!client.isConnected)
+
+        try await client.connect()
+        #expect(client.isConnected)
+        let echoedAgain = try await client.echo()
+        #expect(echoedAgain == ["echo"])
+
+        // A stream taken out after the reconnect must be live, not a leftover
+        // finished one from the closed session.
+        let updates = client.monitorUpdates()
+        _ = try await client.monitor(database: "OVN_Northbound", monitorId: "mon-2", requests: [:])
+        var iterator = updates.makeAsyncIterator()
+        let update = try #require(try await iterator.next())
+        #expect(update.0 == "mon-2")
+
+        try await client.disconnect()
+    }
+
+    @Test("Concurrent connects share one attempt")
+    func concurrentConnectsShareOneAttempt() async throws {
+        // Each concurrent connect() used to bootstrap its own channel and leak
+        // all but the last; they now share one in-flight attempt.
+        let server = try await startServer()
+        let port = try #require(server.localAddress?.port)
+
+        let connection = OVSDBSocketConnection(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { try await connection.connect() }
+            }
+            try await group.waitForAll()
+        }
+        #expect(connection.isConnectionActive)
+
+        let client = JSONRPCClient(transport: connection)
+        let echoed = try await client.echo()
+        #expect(echoed == ["echo"])
+
+        await connection.disconnect()
+        #expect(!connection.isConnectionActive)
+    }
+
     @Test("Notifications subscribed after a disconnect are already finished")
     func notificationsSubscribedAfterDisconnectAreFinished() async throws {
         let server = try await startServer()
@@ -84,8 +201,8 @@ final class TCPTransportTests {
             endpoint: .tcp(host: "127.0.0.1", port: port),
             eventLoopGroup: group
         )
-        try await connection.connect().get()
-        try await connection.disconnect().get()
+        try await connection.connect()
+        await connection.disconnect()
 
         // Subscribing once the connection is gone used to hand back a stream
         // nothing would ever finish, hanging the consumer.
@@ -96,7 +213,7 @@ final class TCPTransportTests {
                 return true
             }
             taskGroup.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(for: .seconds(2))
                 return false
             }
             let first = await taskGroup.next() ?? false
@@ -106,15 +223,14 @@ final class TCPTransportTests {
         #expect(finished, "A stream created after disconnect must already be finished")
 
         // Reconnecting revives the hub, so later subscribers are live again.
-        try await connection.connect().get()
+        try await connection.connect()
         #expect(connection.isConnectionActive)
-        try await connection.disconnect().get()
+        await connection.disconnect()
     }
 
-    /// `send` writes the encoder's bytes straight into the channel's buffer
-    /// instead of decoding them to a `String` and concatenating a newline, so
-    /// this pins what actually reaches the wire: the encoded request, then the
-    /// trailing newline.
+    /// `send` writes the encoder's bytes straight into a `ByteBuffer` instead of
+    /// decoding them to a `String` and concatenating a newline, so this pins what
+    /// actually reaches the wire: the encoded request, then the trailing newline.
     @Test("send writes the encoded request followed by a newline")
     func sendWritesTheEncodedRequestFollowedByANewline() async throws {
         let recorded = group.next().makePromise(of: [UInt8].self)
@@ -131,10 +247,10 @@ final class TCPTransportTests {
             endpoint: .tcp(host: "127.0.0.1", port: port),
             eventLoopGroup: group
         )
-        try await connection.connect().get()
+        try await connection.connect()
         try await connection.send(
             JSONRPCRequest(method: "list_dbs", params: nil, id: .number(1))
-        ).get()
+        )
 
         let bytes = try await recorded.futureResult.get()
         #expect(bytes.last == UInt8(ascii: "\n"))
@@ -145,7 +261,7 @@ final class TCPTransportTests {
         #expect(request["method"] as? String == "list_dbs")
         #expect(request["id"] as? Int == 1)
 
-        try await connection.disconnect().get()
+        await connection.disconnect()
     }
 
     @Test("Connecting fails when nothing is listening")
@@ -193,13 +309,17 @@ final class RawRequestRecordingHandler: ChannelInboundHandler, @unchecked Sendab
     }
 }
 
-/// Answers `echo` and `list_dbs` requests the way ovsdb-server would.
+/// Answers `echo`, `list_dbs`, `get_schema` and `monitor` requests the way
+/// ovsdb-server would, including the `update` notification a monitor triggers.
 /// Assumes each inbound read contains exactly one JSON-RPC object, which
 /// holds for the sequential requests these tests issue. Shared with
 /// `TLSTransportTests`.
 final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
+
+    /// Big enough that the reply cannot arrive in a single socket read.
+    static let largeBlobLength = 512 * 1024
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
@@ -215,6 +335,8 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
             result = request["params"] ?? [Any]()
         case "list_dbs":
             result = ["OVN_Northbound", "OVN_Southbound"]
+        case "get_schema":
+            result = ["blob": String(repeating: "a", count: Self.largeBlobLength)]
         default:
             result = [String: Any]()
         }
@@ -224,11 +346,29 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
             "result": result,
             "error": NSNull()
         ]
-        guard let replyData = try? JSONSerialization.data(withJSONObject: reply) else {
+        write(reply, context: context)
+
+        // RFC 7047 §4.1.5: the monitor reply is followed by `update`
+        // notifications as rows change. One is enough to prove the path.
+        if method == "monitor", let monitorId = (request["params"] as? [Any])?.dropFirst().first {
+            let update: [String: Any] = [
+                "id": NSNull(),
+                "method": "update",
+                "params": [
+                    monitorId,
+                    ["Logical_Switch": ["3f2e-uuid": ["new": ["name": "ls0"]]]]
+                ]
+            ]
+            write(update, context: context)
+        }
+    }
+
+    private func write(_ message: [String: Any], context: ChannelHandlerContext) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else {
             return
         }
-        var out = context.channel.allocator.buffer(capacity: replyData.count)
-        out.writeBytes(replyData)
+        var out = context.channel.allocator.buffer(capacity: data.count)
+        out.writeBytes(data)
         context.writeAndFlush(wrapOutboundOut(out), promise: nil)
     }
 }
