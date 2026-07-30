@@ -45,10 +45,9 @@ public enum OVSDBReferenceTransactions {
         var operations: [OVSDBOperation] = []
 
         if let condition = parentCondition {
-            operations.append(OVSDBOperation(
-                op: "wait",
-                table: parentTable,
-                whereConditions: [condition],
+            operations.append(.wait(
+                parentTable,
+                where: [condition],
                 columns: [condition.column],
                 rows: [[condition.column: condition.value]],
                 until: "==",
@@ -56,17 +55,11 @@ public enum OVSDBReferenceTransactions {
             ))
         }
 
-        operations.append(OVSDBOperation(
-            op: "insert",
-            table: table,
-            row: row,
-            uuidName: uuidName
-        ))
+        operations.append(.insert(into: table, row: row, uuidName: uuidName))
 
-        operations.append(OVSDBOperation(
-            op: "mutate",
-            table: parentTable,
-            whereConditions: parentCondition.map { [$0] } ?? [],
+        operations.append(.mutate(
+            parentTable,
+            where: parentCondition.map { [$0] } ?? [],
             mutations: [OVSDBMutation(
                 column: parentColumn,
                 mutator: "insert",
@@ -104,12 +97,7 @@ public enum OVSDBReferenceTransactions {
         let childUUIDNames = childRows.indices.map { "\(childUUIDNamePrefix)\($0)" }
 
         var operations = zip(childRows, childUUIDNames).map { childRow, childUUIDName in
-            OVSDBOperation(
-                op: "insert",
-                table: childTable,
-                row: childRow,
-                uuidName: childUUIDName
-            )
+            OVSDBOperation.insert(into: childTable, row: childRow, uuidName: childUUIDName)
         }
 
         var row = row
@@ -118,12 +106,7 @@ public enum OVSDBReferenceTransactions {
             .array(childUUIDNames.map { .array([.string("named-uuid"), .string($0)]) })
         ])
 
-        operations.append(OVSDBOperation(
-            op: "insert",
-            table: table,
-            row: row,
-            uuidName: uuidName
-        ))
+        operations.append(.insert(into: table, row: row, uuidName: uuidName))
 
         return operations
     }
@@ -141,18 +124,16 @@ public enum OVSDBReferenceTransactions {
         let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
 
         var operations = parentReferences.map { parent in
-            OVSDBOperation(
-                op: "mutate",
-                table: parent.table,
-                whereConditions: [OVSDBCondition(column: parent.column, function: "includes", value: uuidAtom)],
+            OVSDBOperation.mutate(
+                parent.table,
+                where: [OVSDBCondition(column: parent.column, function: "includes", value: uuidAtom)],
                 mutations: [OVSDBMutation(column: parent.column, mutator: "delete", value: uuidAtom)]
             )
         }
 
-        operations.append(OVSDBOperation(
-            op: "delete",
-            table: table,
-            whereConditions: [OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)]
+        operations.append(.delete(
+            from: table,
+            where: [OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)]
         ))
 
         return operations
@@ -180,28 +161,12 @@ public enum OVSDBReferenceTransactions {
         portRow["interfaces"] = .array([.string("named-uuid"), .string("new_interface")])
 
         return [
-            OVSDBOperation(
-                op: "insert",
-                table: "Interface",
-                row: interfaceRow,
-                uuidName: "new_interface"
-            ),
-            OVSDBOperation(
-                op: "insert",
-                table: "Port",
-                row: portRow,
-                uuidName: "new_port"
-            ),
-            OVSDBOperation(
-                op: "insert",
-                table: "Bridge",
-                row: bridgeRow,
-                uuidName: "new_bridge"
-            ),
-            OVSDBOperation(
-                op: "mutate",
-                table: "Open_vSwitch",
-                whereConditions: [],
+            .insert(into: "Interface", row: interfaceRow, uuidName: "new_interface"),
+            .insert(into: "Port", row: portRow, uuidName: "new_port"),
+            .insert(into: "Bridge", row: bridgeRow, uuidName: "new_bridge"),
+            .mutate(
+                "Open_vSwitch",
+                where: [],
                 mutations: [OVSDBMutation(
                     column: "bridges",
                     mutator: "insert",

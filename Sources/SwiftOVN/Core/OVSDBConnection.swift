@@ -66,7 +66,57 @@ public actor OVSDBConnection {
         logger.debug("Getting schema for database: \(database)")
         return try await client.getSchema(database: database)
     }
-    
+
+    /// Converts `database` to `schema`. See `JSONRPCClient.convert(database:schema:)`
+    /// — this migrates the stored data and discards what the new schema has no
+    /// place for.
+    public func convertDatabase(_ database: String, to schema: JSONValue) async throws(OVNManagerError) {
+        try await client.convert(database: database, schema: schema)
+    }
+
+    // MARK: - Session
+
+    /// Declares whether this connection wants `update` notifications about
+    /// databases being added and removed. See
+    /// `JSONRPCClient.setDatabaseChangeAware(_:)`.
+    public func setDatabaseChangeAware(_ aware: Bool) async throws(OVNManagerError) {
+        try await client.setDatabaseChangeAware(aware)
+    }
+
+    /// The UUID of the server on the other end — which cluster member this
+    /// connection landed on.
+    public func serverID() async throws(OVNManagerError) -> String {
+        return try await client.getServerID()
+    }
+
+    // MARK: - Locking
+
+    /// Requests ownership of the lock named `id`, returning true if this
+    /// connection owns it as of the reply and false if the request was queued.
+    /// See `JSONRPCClient.lock(id:)`.
+    @discardableResult
+    public func lock(id: String) async throws(OVNManagerError) -> Bool {
+        return try await client.lock(id: id)
+    }
+
+    /// Takes the lock named `id` from its current owner.
+    /// See `JSONRPCClient.steal(id:)`.
+    @discardableResult
+    public func steal(lockID id: String) async throws(OVNManagerError) -> Bool {
+        return try await client.steal(id: id)
+    }
+
+    /// Releases the lock named `id`, or withdraws a queued request for it.
+    public func unlock(id: String) async throws(OVNManagerError) {
+        try await client.unlock(id: id)
+    }
+
+    /// Streams this connection's lock ownership changes. Create the stream
+    /// before calling `lock(id:)`. See `JSONRPCClient.lockUpdates()`.
+    nonisolated public func lockUpdates() -> AsyncThrowingStream<OVSDBLockNotification, Error> {
+        return client.lockUpdates()
+    }
+
     // MARK: - Table Operations
 
     /// Executes multiple operations in a single OVSDB transaction and returns
@@ -74,8 +124,20 @@ public actor OVSDBConnection {
     /// ovsdb-server returns operation errors inside a successful JSON-RPC
     /// response (RFC 7047 §4.1.3), so callers cannot rely on the RPC layer
     /// alone to detect a failed/aborted transaction.
-    public func transact(in database: String, operations: [OVSDBOperation]) async throws(OVNManagerError) -> [JSONValue] {
-        let results = try await client.transact(database: database, operations: operations)
+    ///
+    /// Pass `onRequestID` to learn the id of the request while it is in flight,
+    /// so `cancel(requestID:)` can abandon it — the only way out of a
+    /// transaction parked on a `wait` operation short of its timeout.
+    public func transact(
+        in database: String,
+        operations: [OVSDBOperation],
+        onRequestID: (@Sendable (JSONRPCIdentifier) -> Void)? = nil
+    ) async throws(OVNManagerError) -> [JSONValue] {
+        let results = try await client.transact(
+            database: database,
+            operations: operations,
+            onRequestID: onRequestID
+        )
 
         for (index, result) in results.enumerated() {
             guard case .object(let resultObject) = result,
@@ -91,6 +153,13 @@ public actor OVSDBConnection {
         }
 
         return results
+    }
+
+    /// Asks the server to abandon the in-flight request `requestID`, as
+    /// reported by `transact(in:operations:onRequestID:)`. See
+    /// `JSONRPCClient.cancel(requestID:)`.
+    public func cancel(requestID: JSONRPCIdentifier) async throws(OVNManagerError) {
+        try await client.cancel(requestID: requestID)
     }
 
     /// Inserts a row and adds its UUID to a parent row's reference column in
@@ -193,12 +262,8 @@ public actor OVSDBConnection {
     }
 
     public func selectAll(from table: String, in database: String, columns: [String]? = nil) async throws(OVNManagerError) -> [OVSDBRow] {
-        let operation = OVSDBOperation(
-            op: "select",
-            table: table,
-            whereConditions: [],  // Empty where clause to select all rows
-            columns: columns
-        )
+        // An empty where clause selects every row.
+        let operation = OVSDBOperation.select(from: table, columns: columns)
 
         let results = try await client.transact(database: database, operations: [operation])
         return try Self.rows(fromSelectResults: results)
@@ -210,12 +275,7 @@ public actor OVSDBConnection {
         where conditions: [OVSDBCondition],
         columns: [String]? = nil
     ) async throws(OVNManagerError) -> [OVSDBRow] {
-        let operation = OVSDBOperation(
-            op: "select",
-            table: table,
-            whereConditions: conditions,
-            columns: columns
-        )
+        let operation = OVSDBOperation.select(from: table, where: conditions, columns: columns)
 
         let results = try await client.transact(database: database, operations: [operation])
         return try Self.rows(fromSelectResults: results)
@@ -252,12 +312,8 @@ public actor OVSDBConnection {
     }
 
     public func insert(into table: String, in database: String, row: OVSDBRow) async throws(OVNManagerError) -> JSONValue {
-        let operation = OVSDBOperation(
-            op: "insert",
-            table: table,
-            row: row
-        )
-        
+        let operation = OVSDBOperation.insert(into: table, row: row)
+
         let results = try await client.transact(database: database, operations: [operation])
 
         guard let firstResult = results.first else {
@@ -283,12 +339,7 @@ public actor OVSDBConnection {
         where conditions: [OVSDBCondition],
         row: OVSDBRow
     ) async throws(OVNManagerError) -> Int {
-        let operation = OVSDBOperation(
-            op: "update",
-            table: table,
-            whereConditions: conditions,
-            row: row
-        )
+        let operation = OVSDBOperation.update(table, where: conditions, row: row)
         
         let results = try await client.transact(database: database, operations: [operation])
         
@@ -316,11 +367,7 @@ public actor OVSDBConnection {
         in database: String,
         where conditions: [OVSDBCondition]
     ) async throws(OVNManagerError) -> Int {
-        let operation = OVSDBOperation(
-            op: "delete",
-            table: table,
-            whereConditions: conditions
-        )
+        let operation = OVSDBOperation.delete(from: table, where: conditions)
         
         let results = try await client.transact(database: database, operations: [operation])
         
@@ -349,12 +396,7 @@ public actor OVSDBConnection {
         where conditions: [OVSDBCondition],
         mutations: [OVSDBMutation]
     ) async throws(OVNManagerError) -> Int {
-        let operation = OVSDBOperation(
-            op: "mutate",
-            table: table,
-            whereConditions: conditions,
-            mutations: mutations
-        )
+        let operation = OVSDBOperation.mutate(table, where: conditions, mutations: mutations)
         
         let results = try await client.transact(database: database, operations: [operation])
 

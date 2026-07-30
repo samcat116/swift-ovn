@@ -43,10 +43,9 @@ struct JSONValueConversionTests {
     /// `timeout` as the integer `0`, not the boolean `false`.
     @Test("A wait op's timeout serializes as an integer")
     func waitOperationTimeoutSerializesAsInteger() throws {
-        let waitOp = OVSDBOperation(
-            op: "wait",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("default"))],
+        let waitOp = OVSDBOperation.wait(
+            "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("default"))],
             columns: ["name"],
             rows: [["name": .string("default")]],
             until: "==",
@@ -65,10 +64,9 @@ struct JSONValueConversionTests {
     /// single-value containers — the whole operation tree must survive.
     @Test("A wait op's nested containers survive encoding")
     func waitOperationEncodesNestedContainers() throws {
-        let waitOp = OVSDBOperation(
-            op: "wait",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("ls-1"))],
+        let waitOp = OVSDBOperation.wait(
+            "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("ls-1"))],
             columns: ["name", "ports"],
             rows: [["name": .string("ls-1"), "tag": .number(7), "up": .boolean(false)]],
             until: "==",
@@ -99,7 +97,7 @@ struct JSONValueConversionTests {
     /// in an operation object.
     @Test("Unset optionals are omitted")
     func unsetOptionalsAreOmitted() throws {
-        let selectOp = OVSDBOperation(op: "select", table: "Logical_Switch")
+        let selectOp = OVSDBOperation(op: .select, table: "Logical_Switch")
         let json = try JSONValueEncoder.encode(selectOp)
         let object = try #require(json.objectValue, "expected object, got \(json)")
 
@@ -179,7 +177,7 @@ struct JSONValueConversionTests {
     /// values must still reach the wire without a fractional part.
     @Test("Integral values reach the wire without a fraction")
     func encodedOperationSerializesIntegersWithoutFraction() throws {
-        let waitOp = OVSDBOperation(op: "wait", table: "Logical_Switch", until: "==", timeout: 0)
+        let waitOp = OVSDBOperation(op: .wait, table: "Logical_Switch", until: "==", timeout: 0)
         let json = try JSONValueEncoder.encode(waitOp)
         let data = try JSONEncoder().encode(json)
         let text = String(decoding: data, as: UTF8.self)

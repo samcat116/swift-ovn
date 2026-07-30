@@ -84,21 +84,16 @@ public final class OVNManager: OVNManaging {
         // a duplicate racing in between the check above and the insert: abort
         // the transaction unless no row with this name exists (the same
         // technique ovn-nbctl ls-add uses to refuse duplicates).
-        let operations = [
-            OVSDBOperation(
-                op: "wait",
-                table: OVNTable.logicalSwitch,
-                whereConditions: [nameCondition],
+        let operations: [OVSDBOperation] = [
+            .wait(
+                OVNTable.logicalSwitch,
+                where: [nameCondition],
                 columns: ["name"],
                 rows: [],
                 until: "==",
                 timeout: 0
             ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVNTable.logicalSwitch,
-                row: row
-            )
+            .insert(into: OVNTable.logicalSwitch, row: row)
         ]
 
         let results = try await connection.transact(in: database, operations: operations)
@@ -476,10 +471,9 @@ public final class OVNManager: OVNManaging {
         // exactly as create does.
         var operations = rowExistenceWaitOps(route.bfd.map { [$0] } ?? [], in: OVNTable.bfd)
         let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: OVNTable.logicalRouterStaticRoute,
-            whereConditions: [condition],
+        operations.append(.update(
+            OVNTable.logicalRouterStaticRoute,
+            where: [condition],
             row: row
         ))
 
@@ -564,10 +558,9 @@ public final class OVNManager: OVNManaging {
         var operations = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
             + rowExistenceWaitOps(policy.bfd_sessions ?? [], in: OVNTable.bfd)
         let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: OVNTable.logicalRouterPolicy,
-            whereConditions: [condition],
+        operations.append(.update(
+            OVNTable.logicalRouterPolicy,
+            where: [condition],
             row: row
         ))
 
@@ -2160,10 +2153,9 @@ private extension OVNManager {
 
         let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
         var operations = rowExistenceWaitOps([uuid], in: childTable)
-        operations.append(OVSDBOperation(
-            op: "mutate",
-            table: parentTable,
-            whereConditions: [parentCondition],
+        operations.append(.mutate(
+            parentTable,
+            where: [parentCondition],
             mutations: [OVSDBMutation(column: parentColumn, mutator: "insert", value: uuidAtom)]
         ))
 
@@ -2231,10 +2223,9 @@ private extension OVNManager {
         var operations = mutator == "insert" ? rowExistenceWaitOps(uuids, in: referencedTable) : []
 
         let rowCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        operations.append(OVSDBOperation(
-            op: "mutate",
-            table: table,
-            whereConditions: [rowCondition],
+        operations.append(.mutate(
+            table,
+            where: [rowCondition],
             mutations: [OVSDBMutation(column: column, mutator: mutator, value: set)]
         ))
 
@@ -2316,21 +2307,16 @@ private extension OVNManager {
         guardOperations: [OVSDBOperation]
     ) async throws(OVNManagerError) -> String {
         var operations = guardOperations
-        operations.append(OVSDBOperation(
-            op: "wait",
-            table: table,
-            whereConditions: [nameCondition],
+        operations.append(.wait(
+            table,
+            where: [nameCondition],
             columns: ["name"],
             rows: [],
             until: "==",
             timeout: 0
         ))
         let insertIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "insert",
-            table: table,
-            row: row
-        ))
+        operations.append(.insert(into: table, row: row))
 
         let results = try await connection.transact(in: database, operations: operations)
         return try OVSDBConnection.uuid(fromInsertResults: results, at: insertIndex)
@@ -2349,12 +2335,7 @@ private extension OVNManager {
 
         var operations = guardOperations
         let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: table,
-            whereConditions: [condition],
-            row: row
-        ))
+        operations.append(.update(table, where: [condition], row: row))
 
         let results = try await connection.transact(in: database, operations: operations)
 
@@ -2373,10 +2354,9 @@ private extension OVNManager {
     func rowExistenceWaitOps(_ uuids: [String], in table: String) -> [OVSDBOperation] {
         uuids.map { uuid in
             let rowCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-            return OVSDBOperation(
-                op: "wait",
-                table: table,
-                whereConditions: [rowCondition],
+            return OVSDBOperation.wait(
+                table,
+                where: [rowCondition],
                 columns: ["_uuid"],
                 rows: [],
                 until: "!=",

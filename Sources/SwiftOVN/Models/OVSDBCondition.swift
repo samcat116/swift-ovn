@@ -4,7 +4,7 @@ import FoundationEssentials
 import Foundation
 #endif
 
-public struct OVSDBCondition: Codable, Sendable {
+public struct OVSDBCondition: Codable, Sendable, Equatable {
     public let column: String
     public let function: String
     public let value: JSONValue
