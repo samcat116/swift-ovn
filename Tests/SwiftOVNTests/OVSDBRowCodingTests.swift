@@ -177,6 +177,68 @@ struct OVSDBRowDecoderTests {
         #expect(qos.bandwidth == [:])
     }
 
+    /// A BFD session as ovsdb-server sends it: the optional integer columns are
+    /// empty sets when unset and bare numbers when set, and `status` — which
+    /// ovn-northd writes, not the client — arrives as a bare string.
+    @Test("A BFD session with set and unset optional scalars")
+    func bfdSessionWithSetAndUnsetOptionalScalars() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp0"),
+            "dst_ip": .string("192.168.1.1"),
+            "min_tx": .number(250),
+            "min_rx": emptySet,
+            "detect_mult": .number(5),
+            "options": wireMap([]),
+            "status": .string("up"),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let bfd = try OVSDBRowDecoder.decode(OVNBFD.self, from: row)
+
+        #expect(bfd.uuid == uuidA)
+        #expect(bfd.logical_port == "lrp0")
+        #expect(bfd.dst_ip == "192.168.1.1")
+        #expect(bfd.min_tx == 250)
+        #expect(bfd.min_rx == nil)
+        #expect(bfd.detect_mult == 5)
+        #expect(bfd.status == "up")
+        #expect(bfd.external_ids == ["owner": "test"])
+    }
+
+    @Test("A DNS row's records decode as a map")
+    func dnsRecordsDecodeAsAMap() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "records": wireStringMap(["vm1.ovn.org": "10.0.0.11", "vm2.ovn.org": "10.0.0.12"]),
+            "options": wireMap([]),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let dns = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(dns.uuid == uuidA)
+        #expect(dns.records == ["vm1.ovn.org": "10.0.0.11", "vm2.ovn.org": "10.0.0.12"])
+        #expect(dns.external_ids == ["owner": "test"])
+    }
+
+    /// A record set created empty and filled later: `records` has min 0, so it
+    /// arrives as an empty map and decodes to `[:]` rather than failing the
+    /// non-optional property.
+    @Test("A DNS row with no records")
+    func dnsRowWithNoRecords() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "records": wireMap([]),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let dns = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(dns.records == [:])
+    }
+
     /// A meter fresh from `ovn-nbctl meter-add` has exactly one band, so
     /// `bands` arrives as the bare UUID atom, and `fair` — the one optional
     /// column — as the empty set.
@@ -986,6 +1048,95 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.action == qos.action)
         #expect(decoded.bandwidth == qos.bandwidth)
         #expect(decoded.external_ids == qos.external_ids)
+    }
+
+    /// `logical_port` is a port *name* in this table, not a reference, and the
+    /// interval columns are plain numbers.
+    @Test("A BFD session encodes its port name as a string")
+    func bfdSessionEncodesPortNameAsAString() throws {
+        let bfd = OVNBFD(
+            logical_port: uuidB,  // a port name that happens to look like a UUID
+            dst_ip: "192.168.1.1",
+            min_tx: 250,
+            detect_mult: 5
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+
+        #expect(row["logical_port"] == .string(uuidB))
+        #expect(row["dst_ip"] == .string("192.168.1.1"))
+        #expect(row["min_tx"] == .number(250))
+        #expect(row["detect_mult"] == .number(5))
+        #expect(row["min_rx"] == nil)
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// `status` is ovn-northd's to write, so a session built in Swift carries
+    /// none and no create or update ever sends the column.
+    @Test("A constructed BFD session sends no status")
+    func constructedBFDSessionSendsNoStatus() throws {
+        let bfd = OVNBFD(logical_port: "lrp0", dst_ip: "192.168.1.1")
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+
+        #expect(bfd.status == nil)
+        #expect(row["status"] == nil)
+    }
+
+    @Test("A BFD session round trips")
+    func bfdSessionRoundTrip() throws {
+        let bfd = OVNBFD(
+            logical_port: "lrp0",
+            dst_ip: "fd00::1",
+            min_tx: 100,
+            min_rx: 100,
+            detect_mult: 3,
+            options: ["foo": "bar"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNBFD.self, from: row)
+
+        #expect(decoded.logical_port == bfd.logical_port)
+        #expect(decoded.dst_ip == bfd.dst_ip)
+        #expect(decoded.min_tx == bfd.min_tx)
+        #expect(decoded.min_rx == bfd.min_rx)
+        #expect(decoded.detect_mult == bfd.detect_mult)
+        #expect(decoded.options == bfd.options)
+        #expect(decoded.external_ids == bfd.external_ids)
+        #expect(decoded.status == nil)
+    }
+
+    @Test("A DNS record set round trips")
+    func dnsRecordSetRoundTrip() throws {
+        let dns = OVNDNS(
+            records: ["vm1.ovn.org": "10.0.0.11"],
+            options: ["foo": "bar"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: dns, hints: .ovn)
+        #expect(row["records"] == wireStringMap(["vm1.ovn.org": "10.0.0.11"]))
+
+        let decoded = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(decoded.records == dns.records)
+        #expect(decoded.options == dns.options)
+        #expect(decoded.external_ids == dns.external_ids)
+    }
+
+    /// `Logical_Switch.dns_records` is a reference set, so a switch written
+    /// with DNS rows attached must send UUID atoms — the same treatment
+    /// `load_balancer` and `acls` get.
+    @Test("A logical switch's dns_records encodes UUID atoms")
+    func logicalSwitchDNSRecordsEncodeUUIDAtoms() throws {
+        let logicalSwitch = OVNLogicalSwitch(name: "ls0", dnsRecords: [uuidB, uuidC])
+
+        let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
+
+        #expect(row["dns_records"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["name"] == .string("ls0"))
     }
 
     /// `bands` is a strong reference set, so its elements become UUID atoms;

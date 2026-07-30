@@ -37,9 +37,8 @@ public struct OVNLogicalRouterPolicy: Codable, Sendable {
     public let chain: String?
     /// Chain a `"jump"` action transfers evaluation to.
     public let jump_chain: String?
-    /// UUID references to the `BFD` sessions monitoring the next hops. Also a
-    /// weak reference set, but unguarded — SwiftOVN has no BFD model yet, so a
-    /// stale session UUID here is dropped silently by ovsdb-server.
+    /// UUID references to the `OVNBFD` sessions monitoring the next hops. Also
+    /// a weak reference set, and guarded the same way on create and update.
     public let bfd_sessions: [String]?
     public let options: [String: String]?
     public let external_ids: [String: String]?
