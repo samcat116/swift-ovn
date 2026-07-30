@@ -560,6 +560,65 @@ struct OVSDBRowEncoderTests {
         #expect(portGroup.acls == nil)
     }
 
+    @Test("An address set's addresses encode as plain strings")
+    func addressSetAddressesEncodeAsPlainStrings() throws {
+        // `addresses` is a plain string set, so it must not be rewritten into
+        // UUID atoms — the NAT columns that *reference* Address_Set rows
+        // (allowed_ext_ips, exempted_ext_ips) are the reference-typed ones.
+        let addressSet = OVNAddressSet(
+            name: "web_tier",
+            addresses: ["10.0.0.1", "10.0.1.0/24"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: addressSet, hints: .ovn)
+
+        #expect(row["addresses"] == wireSet([.string("10.0.0.1"), .string("10.0.1.0/24")]))
+        #expect(row["name"] == .string("web_tier"))
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// A UUID-shaped member must survive as a string: an address set can hold
+    /// arbitrary strings, and nothing about its shape makes it a reference.
+    @Test("An address set round trips")
+    func addressSetRoundTrip() throws {
+        let addressSet = OVNAddressSet(
+            name: "db_tier",
+            addresses: [uuidB, "fd12:3456:789a::/64"],
+            options: ["k": "v"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: addressSet, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNAddressSet.self, from: row)
+
+        #expect(decoded.name == addressSet.name)
+        #expect(decoded.addresses == addressSet.addresses)
+        #expect(decoded.options == addressSet.options)
+        #expect(decoded.external_ids == addressSet.external_ids)
+    }
+
+    /// A fresh address set has `addresses` sent as the empty set and a
+    /// single-member one as the bare string atom; both must decode to the
+    /// model's array shape.
+    @Test("An address set decodes empty and single-member membership",
+          arguments: [(emptySet, nil), (JSONValue.string("10.0.0.1"), ["10.0.0.1"])]
+            as [(JSONValue, [String]?)])
+    func addressSetMembershipShapes(wire: JSONValue, expected: [String]?) throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("as0"),
+            "addresses": wire,
+            "options": wireMap([]),
+        ]
+
+        let addressSet = try OVSDBRowDecoder.decode(OVNAddressSet.self, from: row)
+
+        #expect(addressSet.name == "as0")
+        #expect(addressSet.addresses == expected)
+        #expect(addressSet.options == [:])
+    }
+
     @Test("A Gateway_Chassis encodes chassis_name as a string and priority as a number")
     func gatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
         let chassis = OVNGatewayChassis(
