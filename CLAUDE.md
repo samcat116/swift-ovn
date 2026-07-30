@@ -131,7 +131,36 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Transactional operations using `OVSDBOperation`
 - Conditional operations with `OVSDBCondition`
 - Mutations with `OVSDBMutation`
-- Real-time monitoring with `monitor_cond` method
+- Real-time monitoring with `monitor` (RFC 7047) or, via
+  `startConditionalMonitoring`, ovsdb-server's `monitor_cond` /
+  `monitor_cond_since` / `monitor_cond_change`
+
+### Monitor Methods
+`OVSDBConnection` negotiates monitor methods per connection, most to least
+capable: `monitor_cond_since`, `monitor_cond`, `monitor` (see
+`OVSDBMonitorMethod.fallback`). Two things that look like oversights but are not:
+
+- A `monitor_cond`/`monitor_cond_since` `modify` is reported as
+  `OVSDBUpdate.diff` — the changed columns — with `old`/`new` left nil, rather
+  than being turned into a row. Synthesizing the pair needs both a full row cache
+  *and* the schema: a modify expresses set/map columns as a difference, and
+  ovsdb-server serializes a single-element set as a bare atom, so set-vs-scalar
+  cannot be told apart without column types. Deciding a cache belongs here would
+  also mean one designated consumer applying each diff exactly once, since
+  applying an XOR-style diff twice corrupts the row — the current fan-out has no
+  such consumer.
+- A monitor request carrying `whereConditions` is *refused* rather than
+  downgraded when the server implements neither conditional method. Silently
+  dropping the filter would deliver every row as if it matched. `where` is also
+  stripped from a plain `monitor` request rather than left empty: ovsdb-server
+  parses `<monitor-request>` strictly and fails the whole request over an
+  unexpected member.
+
+`JSONRPCError` decodes ovsdb-server's JSON-RPC 1.0 error shapes (a bare string,
+or `{"error":…, "details":…}`) as well as JSON-RPC 2.0's `{code, message}`.
+Before that, every real error reply failed to decode and surfaced as an opaque
+`decodingError` — and `isUnknownMethod`, which the fallback depends on, was
+unreachable.
 
 ### Foundation Imports
 Linux is the primary deployment target, and there full `Foundation` is far more

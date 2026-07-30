@@ -116,6 +116,21 @@ public protocol OVSManaging: Sendable {
     
     // Monitoring
     func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String
+    /// Starts a monitor that filters rows server-side and, where the server
+    /// supports `monitor_cond_since`, resumes from `lastTransactionId` instead of
+    /// re-downloading the database.
+    func startConditionalMonitoring(
+        tables: [String: OVSDBMonitorRequest],
+        monitorId: String?,
+        since lastTransactionId: String?
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession
+    /// Replaces a running conditional monitor's `where` conditions in place.
+    func updateMonitorConditions(
+        monitorId: String,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError)
+    /// The transaction id a `monitor_cond_since` monitor can be resumed from.
+    func lastTransactionId(forMonitor monitorId: String) async -> String?
     func stopMonitoring(monitorId: String) async throws(OVNManagerError)
     /// Streams row changes from this manager's monitors.
     ///
@@ -124,6 +139,11 @@ public protocol OVSManaging: Sendable {
     /// `Failure == any Error`, so a typed-failure stream cannot be built. Only
     /// `OVNManagerError` is ever thrown, so match on it in the `catch`.
     nonisolated func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
+    /// Streams row changes one notification at a time, carrying the transaction
+    /// id a `monitor_cond_since` monitor resumes from. The stream to use with
+    /// `startConditionalMonitoring`; the failure type is `any Error` for the
+    /// reason above.
+    nonisolated func monitorTableUpdates(monitorId: String?) -> AsyncThrowingStream<OVSDBTableUpdates, Error>
 }
 
 // MARK: - OVS Database Constants

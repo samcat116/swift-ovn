@@ -1781,10 +1781,81 @@ public final class OVNManager: OVNManaging {
         return try await connection.startMonitoring(database: database, tables: monitorRequests).monitorId
     }
     
+    /// Starts a conditional monitor on this manager's database, filtering rows
+    /// server-side and resuming from `since` where the server supports it.
+    ///
+    /// See `OVSDBConnection.startConditionalMonitoring` for the method
+    /// negotiation, what `resumed` means for the returned updates, and why a
+    /// request carrying conditions is refused rather than downgraded when the
+    /// server is too old for `monitor_cond`.
+    public func startConditionalMonitoring(
+        tables: [String: OVSDBMonitorRequest],
+        monitorId: String? = nil,
+        since lastTransactionId: String? = nil
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession {
+        return try await connection.startConditionalMonitoring(
+            database: database,
+            tables: tables,
+            monitorId: monitorId,
+            since: lastTransactionId
+        )
+    }
+
+    /// Replaces the `where` conditions of a running conditional monitor
+    /// (`monitor_cond_change`) without restarting it.
+    public func updateMonitorConditions(
+        monitorId: String,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError) {
+        try await connection.updateMonitorConditions(monitorId: monitorId, conditions: conditions)
+    }
+
+    /// The transaction id to resume a `monitor_cond_since` monitor from, as of
+    /// the last batch delivered to `monitorTableUpdates()`. See
+    /// `OVSDBConnection.lastTransactionId(forMonitor:)` for when to prefer the id
+    /// carried by the batch itself.
+    public func lastTransactionId(forMonitor monitorId: String) async -> String? {
+        return await connection.lastTransactionId(forMonitor: monitorId)
+    }
+
     public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
-    
+
+    /// Streams row changes a notification at a time, keeping one transaction's
+    /// rows together and carrying the transaction id to resume a
+    /// `monitor_cond_since` monitor from. The stream to use with
+    /// `startConditionalMonitoring`.
+    ///
+    /// Buffering and failure behave as `monitorUpdates()`'.
+    nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {
+        // Subscribed here rather than inside the task, so a stream created before
+        // the monitor is started really is subscribed by the time it is returned.
+        let batches = connection.monitorTableUpdates(monitorId: monitorId)
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
+            let task = Task {
+                do {
+                    for try await batch in batches {
+                        if case .dropped = continuation.yield(batch) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
+                        .connectionFailed("Monitor stream failed: \($0)")
+                    })
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
     /// Streams row changes from this manager's monitors.
     ///
     /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`); a

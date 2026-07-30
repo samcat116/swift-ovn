@@ -109,6 +109,51 @@ final class TCPTransportTests {
         try await client.disconnect()
     }
 
+    @Test("A conditional monitor resumes and streams update3 over the socket")
+    func conditionalMonitorOverTheSocket() async throws {
+        // The whole conditional path over a real socket: a `monitor_cond_since`
+        // request, its `[found, last-txn-id, table-updates2]` reply, and the
+        // `update3` that follows.
+        let server = try await startServer()
+        let port = try #require(server.localAddress?.port)
+
+        let connection = OVSDBConnection(
+            endpoint: .tcp(host: "127.0.0.1", port: port),
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates(monitorId: "mon-cond")
+        let session = try await connection.startConditionalMonitoring(
+            database: "OVN_Southbound",
+            tables: [
+                "Logical_Switch": OVSDBMonitorRequest(
+                    whereConditions: [
+                        OVSDBCondition(column: "name", function: "==", value: .string("ls0"))
+                    ]
+                ),
+            ],
+            monitorId: "mon-cond",
+            since: "8f3c1d2e-0000-4000-8000-000000000001"
+        )
+
+        #expect(session.method == .monitorCondSince)
+        #expect(session.resumed)
+        #expect(session.lastTransactionId == JSONRPCStubServerHandler.replyTransactionId)
+        #expect(session.initialUpdates.first?.kind == .initial)
+
+        var iterator = batches.makeAsyncIterator()
+        let batch = try #require(try await iterator.next())
+        #expect(batch.lastTransactionId == JSONRPCStubServerHandler.notificationTransactionId)
+        #expect(batch.updates.first?.kind == .modify)
+        #expect(batch.updates.first?.diff == ["name": .string("ls1")])
+
+        let resumePoint = await connection.lastTransactionId(forMonitor: "mon-cond")
+        #expect(resumePoint == JSONRPCStubServerHandler.notificationTransactionId)
+
+        try await connection.disconnect()
+    }
+
     @Test("A large response split across many reads is reassembled")
     func largeResponseSplitAcrossManyReadsIsReassembled() async throws {
         // A reply far larger than one socket read: the framer has to accumulate
@@ -337,6 +382,14 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
             result = ["OVN_Northbound", "OVN_Southbound"]
         case "get_schema":
             result = ["blob": String(repeating: "a", count: Self.largeBlobLength)]
+        case "monitor_cond_since":
+            // [<found>, <last-txn-id>, <table-updates2>]: resumed, so only what
+            // changed since the requested transaction.
+            result = [
+                true,
+                Self.replyTransactionId,
+                ["Logical_Switch": ["3f2e-uuid": ["initial": ["name": "ls0"]]]],
+            ]
         default:
             result = [String: Any]()
         }
@@ -350,7 +403,9 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
 
         // RFC 7047 §4.1.5: the monitor reply is followed by `update`
         // notifications as rows change. One is enough to prove the path.
-        if method == "monitor", let monitorId = (request["params"] as? [Any])?.dropFirst().first {
+        guard let monitorId = (request["params"] as? [Any])?.dropFirst().first else { return }
+        switch method {
+        case "monitor":
             let update: [String: Any] = [
                 "id": NSNull(),
                 "method": "update",
@@ -360,8 +415,29 @@ final class JSONRPCStubServerHandler: ChannelInboundHandler, @unchecked Sendable
                 ]
             ]
             write(update, context: context)
+        case "monitor_cond_since":
+            // A conditional monitor's changes arrive as `update3`, whose second
+            // parameter is the transaction id to resume from next, and whose rows
+            // carry a partial `modify` rather than an old/new pair.
+            let update: [String: Any] = [
+                "id": NSNull(),
+                "method": "update3",
+                "params": [
+                    monitorId,
+                    Self.notificationTransactionId,
+                    ["Logical_Switch": ["3f2e-uuid": ["modify": ["name": "ls1"]]]]
+                ]
+            ]
+            write(update, context: context)
+        default:
+            break
         }
     }
+
+    /// The transaction id a `monitor_cond_since` reply reports.
+    static let replyTransactionId = "1b4d0e5a-0000-4000-8000-00000000000a"
+    /// The one the following `update3` moves it to.
+    static let notificationTransactionId = "1b4d0e5a-0000-4000-8000-00000000000b"
 
     private func write(_ message: [String: Any], context: ChannelHandlerContext) {
         guard let data = try? JSONSerialization.data(withJSONObject: message) else {
