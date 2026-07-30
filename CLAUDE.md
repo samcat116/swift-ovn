@@ -135,7 +135,36 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Transactional operations using `OVSDBOperation`
 - Conditional operations with `OVSDBCondition`
 - Mutations with `OVSDBMutation`
-- Real-time monitoring with `monitor_cond` method
+- Real-time monitoring with `monitor` (RFC 7047) or, via
+  `startConditionalMonitoring`, ovsdb-server's `monitor_cond` /
+  `monitor_cond_since` / `monitor_cond_change`
+
+### Monitor Methods
+`OVSDBConnection` negotiates monitor methods per connection, most to least
+capable: `monitor_cond_since`, `monitor_cond`, `monitor` (see
+`OVSDBMonitorMethod.fallback`). Two things that look like oversights but are not:
+
+- A `monitor_cond`/`monitor_cond_since` `modify` is reported as
+  `OVSDBUpdate.diff` — the changed columns — with `old`/`new` left nil, rather
+  than being turned into a row. Synthesizing the pair needs both a full row cache
+  *and* the schema: a modify expresses set/map columns as a difference, and
+  ovsdb-server serializes a single-element set as a bare atom, so set-vs-scalar
+  cannot be told apart without column types. Deciding a cache belongs here would
+  also mean one designated consumer applying each diff exactly once, since
+  applying an XOR-style diff twice corrupts the row — the current fan-out has no
+  such consumer.
+- A monitor request carrying `whereConditions` is *refused* rather than
+  downgraded when the server implements neither conditional method. Silently
+  dropping the filter would deliver every row as if it matched. `where` is also
+  stripped from a plain `monitor` request rather than left empty: ovsdb-server
+  parses `<monitor-request>` strictly and fails the whole request over an
+  unexpected member.
+
+`JSONRPCError` decodes ovsdb-server's JSON-RPC 1.0 error shapes (a bare string,
+or `{"error":…, "details":…}`) as well as JSON-RPC 2.0's `{code, message}`.
+Before that, every real error reply failed to decode and surfaced as an opaque
+`decodingError` — and `isUnknownMethod`, which the fallback depends on, was
+unreachable.
 
 ### Clustering and Reconnection
 
@@ -172,9 +201,15 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
   `finishAll()` when nothing is going to reconnect; otherwise subscribers stay and
   get a `.reconnected` event, published between sessions (before any monitor
   exists on the new one, so no update can overtake it). `OVSDBConnection` restarts
-  its stored monitors when it sees that event; `monitorUpdates()` consumers get
-  `monitorInterrupted`, because the gap cannot be filled until
-  `monitor_cond_since` lands.
+  its stored monitors when it sees that event — resuming a `monitor_cond_since`
+  one from the transaction id it last delivered — while the update streams get
+  `monitorInterrupted`.
+  The re-established monitor's own reply (a resumed delta or a fresh snapshot) is
+  discarded rather than delivered: it and the new monitor's live updates would
+  reach a consumer by two different paths, with no ordering between them.
+  Delivering it means routing every consumer's updates through `OVSDBConnection`
+  instead of straight from the transport, so that one place can interleave them —
+  worth doing, and the reason `monitorInterrupted` exists in the meantime.
 - **A released connection must stop reconnecting.** The supervisor holds the core
   strongly, so `OVSDBSocketConnection.deinit` spawns a task that shuts the core
   down and only then shuts down an owned event-loop group.

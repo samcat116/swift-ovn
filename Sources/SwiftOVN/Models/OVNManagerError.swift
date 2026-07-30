@@ -52,6 +52,14 @@ extension OVNManagerError {
     ) -> OVNManagerError {
         error as? OVNManagerError ?? transform(error)
     }
+
+    /// Whether this is the server saying it does not implement the method that
+    /// was called (see `JSONRPCError.isUnknownMethod`), which is what monitor
+    /// method negotiation falls back on.
+    var indicatesUnknownMethod: Bool {
+        guard case .rpcError(let error) = self else { return false }
+        return error.isUnknownMethod
+    }
 }
 
 // Without an explicit `errorDescription`, bridging to `NSError` discards the

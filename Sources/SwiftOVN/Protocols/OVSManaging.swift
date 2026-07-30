@@ -24,6 +24,20 @@ public typealias StatisticsDictionary = [String: JSONValue]
 ///
 /// `monitorUpdates()` is the one exception, and only because the standard
 /// library forces it: see that method's documentation.
+///
+/// ## No flow operations
+///
+/// This protocol covers the `Open_vSwitch` *database* only. Installing,
+/// dumping and deleting OpenFlow rules is OpenFlow, a separate protocol spoken
+/// to `ovs-vswitchd` on its own channel and not reachable over the database
+/// socket. Earlier versions declared `getFlows`/`addFlow`/`deleteFlow`/
+/// `deleteAllFlows`/`modifyFlow` plus an `OVSFlowBuilder`; none of them could
+/// do anything, and `getFlows` returning `[]` was indistinguishable from a
+/// bridge with no flows. They are gone rather than left throwing, so the
+/// absence is a compile error instead of a runtime surprise. Use `ovs-ofctl`,
+/// or an OpenFlow client, for flows; `Bridge.protocols` and the `Controller`
+/// table — both modelled here — are how you configure *which* OpenFlow
+/// versions and controllers a bridge uses.
 public protocol OVSManaging: Sendable {
     // Connection Management
     func connect() async throws(OVNManagerError)
@@ -80,13 +94,9 @@ public protocol OVSManaging: Sendable {
     func deleteController(uuid: String) async throws(OVNManagerError)
     func deleteController(target: String) async throws(OVNManagerError)
     
-    // Flow Operations
-    func getFlows(bridge: String, table: Int?) async throws(OVNManagerError) -> [OVSFlow]
-    func addFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError)
-    func deleteFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError)
-    func deleteAllFlows(bridge: String) async throws(OVNManagerError)
-    func modifyFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError)
-    
+    // There are deliberately no flow operations here — see the note above the
+    // protocol.
+
     // Mirror Operations
     func getMirrors() async throws(OVNManagerError) -> [OVSMirror]
     func getMirror(named name: String) async throws(OVNManagerError) -> OVSMirror?
@@ -124,6 +134,21 @@ public protocol OVSManaging: Sendable {
     
     // Monitoring
     func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String
+    /// Starts a monitor that filters rows server-side and, where the server
+    /// supports `monitor_cond_since`, resumes from `lastTransactionId` instead of
+    /// re-downloading the database.
+    func startConditionalMonitoring(
+        tables: [String: OVSDBMonitorRequest],
+        monitorId: String?,
+        since lastTransactionId: String?
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession
+    /// Replaces a running conditional monitor's `where` conditions in place.
+    func updateMonitorConditions(
+        monitorId: String,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError)
+    /// The transaction id a `monitor_cond_since` monitor can be resumed from.
+    func lastTransactionId(forMonitor monitorId: String) async -> String?
     func stopMonitoring(monitorId: String) async throws(OVNManagerError)
     /// Streams row changes from this manager's monitors.
     ///
@@ -132,6 +157,11 @@ public protocol OVSManaging: Sendable {
     /// `Failure == any Error`, so a typed-failure stream cannot be built. Only
     /// `OVNManagerError` is ever thrown, so match on it in the `catch`.
     nonisolated func monitorUpdates() -> AsyncThrowingStream<OVSDBUpdate, Error>
+    /// Streams row changes one notification at a time, carrying the transaction
+    /// id a `monitor_cond_since` monitor resumes from. The stream to use with
+    /// `startConditionalMonitoring`; the failure type is `any Error` for the
+    /// reason above.
+    nonisolated func monitorTableUpdates(monitorId: String?) -> AsyncThrowingStream<OVSDBTableUpdates, Error>
 }
 
 // MARK: - OVS Database Constants
@@ -158,83 +188,11 @@ public enum OVSTable {
     public static let flowSampleCollectorSet = "Flow_Sample_Collector_Set"
 }
 
-// MARK: - OVS Command Builders
-
-public struct OVSFlowBuilder: Sendable {
-    private var table: Int?
-    private var priority: Int?
-    private var match: String?
-    private var actions: String?
-    private var idle_timeout: Int?
-    private var hard_timeout: Int?
-    private var cookie: String?
-
-    public init() {}
-    
-    public func table(_ table: Int) -> OVSFlowBuilder {
-        var builder = self
-        builder.table = table
-        return builder
-    }
-    
-    public func priority(_ priority: Int) -> OVSFlowBuilder {
-        var builder = self
-        builder.priority = priority
-        return builder
-    }
-    
-    public func match(_ match: String) -> OVSFlowBuilder {
-        var builder = self
-        builder.match = match
-        return builder
-    }
-    
-    public func actions(_ actions: String) -> OVSFlowBuilder {
-        var builder = self
-        builder.actions = actions
-        return builder
-    }
-    
-    public func idleTimeout(_ timeout: Int) -> OVSFlowBuilder {
-        var builder = self
-        builder.idle_timeout = timeout
-        return builder
-    }
-    
-    public func hardTimeout(_ timeout: Int) -> OVSFlowBuilder {
-        var builder = self
-        builder.hard_timeout = timeout
-        return builder
-    }
-    
-    public func cookie(_ cookie: String) -> OVSFlowBuilder {
-        var builder = self
-        builder.cookie = cookie
-        return builder
-    }
-    
-    public func build() -> OVSFlow {
-        return OVSFlow(
-            table: table,
-            priority: priority,
-            match: match,
-            actions: actions,
-            idle_timeout: idle_timeout,
-            hard_timeout: hard_timeout,
-            cookie: cookie
-        )
-    }
-}
-
 // MARK: - Helper Extensions
 
 public extension OVSManaging {
     /// Connects using the endpoint the manager was constructed with.
     func connectToOVS() async throws(OVNManagerError) {
         try await connect()
-    }
-    
-    func flowBuilder() -> OVSFlowBuilder {
-        return OVSFlowBuilder()
     }
 }

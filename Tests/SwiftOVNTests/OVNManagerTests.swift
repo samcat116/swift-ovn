@@ -281,23 +281,6 @@ struct OVNManagerTests {
         #expect(clearedPort.options == ["existing": "kept"])
     }
 
-    @Test("The flow builder assembles a flow")
-    func ovsFlowBuilder() throws {
-        let flow = OVSFlowBuilder()
-            .table(0)
-            .priority(1000)
-            .match("in_port=1")
-            .actions("output:2")
-            .idleTimeout(60)
-            .build()
-
-        #expect(flow.table == 0)
-        #expect(flow.priority == 1000)
-        #expect(flow.match == "in_port=1")
-        #expect(flow.actions == "output:2")
-        #expect(flow.idle_timeout == 60)
-    }
-
     @Test("A JSON-RPC error keeps its code, message and data")
     func jsonRPCErrorHandling() throws {
         let error = JSONRPCError(
@@ -347,10 +330,9 @@ struct JSONRPCClientMockTests {
 
     @Test("An OVSDB operation round trips")
     func ovsdbOperationSerialization() throws {
-        let operation = OVSDBOperation(
-            op: "select",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("test"))],
+        let operation = OVSDBOperation.select(
+            from: "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("test"))],
             columns: ["name", "ports"]
         )
 
@@ -399,9 +381,8 @@ struct JSONRPCClientMockTests {
 
     @Test("An operation encodes uuid-name and the wait fields")
     func ovsdbOperationEncodesUUIDNameAndWaitFields() throws {
-        let insert = OVSDBOperation(
-            op: "insert",
-            table: "Logical_Switch_Port",
+        let insert = OVSDBOperation.insert(
+            into: "Logical_Switch_Port",
             row: ["name": .string("vm1-port")],
             uuidName: "new_lsp"
         )
@@ -411,10 +392,9 @@ struct JSONRPCClientMockTests {
         #expect(insertJSON?["uuidName"] == nil)
         #expect(insertJSON?["where"] == nil, "insert must not carry a where clause")
 
-        let wait = OVSDBOperation(
-            op: "wait",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("ls0"))],
+        let wait = OVSDBOperation.wait(
+            "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("ls0"))],
             columns: ["name"],
             rows: [["name": .string("ls0")]],
             until: "==",
@@ -426,6 +406,70 @@ struct JSONRPCClientMockTests {
         #expect(waitJSON?["timeout"] as? Int == 0)
         #expect((waitJSON?["rows"] as? [[String: Any]])?.first?["name"] as? String == "ls0")
         #expect((waitJSON?["where"] as? [[Any]])?.count == 1)
+    }
+
+    /// The four operations RFC 7047 defines with no table: each must encode its
+    /// own member and nothing else, since ovsdb-server rejects an operation
+    /// carrying members its `op` does not define.
+    @Test("The table-less operations encode only their own members")
+    func tableLessOperationsEncodeOnlyTheirOwnMembers() throws {
+        let cases: [(OVSDBOperation, [String: Any])] = [
+            (.commit(durable: true), ["op": "commit", "durable": true]),
+            (.commit(durable: false), ["op": "commit", "durable": false]),
+            (.abort, ["op": "abort"]),
+            (.comment("ovn-nbctl ls-add ls0"), ["op": "comment", "comment": "ovn-nbctl ls-add ls0"]),
+            (.assert(lock: "ovn_nb_lock"), ["op": "assert", "lock": "ovn_nb_lock"]),
+        ]
+
+        for (operation, expected) in cases {
+            let json = try #require(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(operation)) as? [String: Any]
+            )
+            #expect(json.keys.sorted() == expected.keys.sorted(), "unexpected members on \(operation.op)")
+            #expect(json["op"] as? String == expected["op"] as? String)
+            #expect(json["table"] == nil, "\(operation.op) must not carry a table")
+            #expect(json["durable"] as? Bool == expected["durable"] as? Bool)
+            #expect(json["comment"] as? String == expected["comment"] as? String)
+            #expect(json["lock"] as? String == expected["lock"] as? String)
+        }
+    }
+
+    /// The builders exist so the `op` and the members set can't disagree.
+    @Test("Each builder sets its own operation type and no foreign members")
+    func buildersSetTheirOwnOperationType() throws {
+        let condition = OVSDBCondition.equal(column: "name", to: "ls0")
+
+        let select = OVSDBOperation.select(from: "Logical_Switch")
+        #expect(select.op == .select)
+        // An absent where clause selects every row, so it is [] and not nil.
+        #expect(select.whereConditions == [])
+
+        let insert = OVSDBOperation.insert(into: "Logical_Switch", row: ["name": .string("ls0")])
+        #expect(insert.op == .insert)
+        #expect(insert.whereConditions == nil, "insert takes no where clause")
+        #expect(insert.uuidName == nil)
+
+        let update = OVSDBOperation.update("Logical_Switch", where: [condition], row: ["name": .string("ls1")])
+        #expect(update.op == .update)
+        #expect(update.mutations == nil)
+
+        let mutate = OVSDBOperation.mutate(
+            "Logical_Switch",
+            where: [condition],
+            mutations: [OVSDBMutation.insert(column: "ports", value: "lsp0")]
+        )
+        #expect(mutate.op == .mutate)
+        #expect(mutate.row == nil)
+
+        let delete = OVSDBOperation.delete(from: "Logical_Switch", where: [condition])
+        #expect(delete.op == .delete)
+        #expect(delete.row == nil)
+
+        #expect(OVSDBOperation.wait("Logical_Switch", where: [condition], rows: []).op == .wait)
+        #expect(OVSDBOperation.commit(durable: true).durable == true)
+        #expect(OVSDBOperation.assert(lock: "l").lock == "l")
+        #expect(OVSDBOperation.comment("c").comment == "c")
+        #expect(OVSDBOperation.abort.table == nil)
     }
 
     private func encodeOperations(_ operations: [OVSDBOperation]) throws -> [[String: Any]] {
@@ -646,6 +690,91 @@ struct JSONRPCClientMockTests {
         #expect(deleteCondition[0] as? String == "_uuid")
         #expect(deleteCondition[1] as? String == "==")
         #expect(deleteCondition[2] as? [String] == ["uuid", uuid])
+    }
+
+    /// The sync barrier's first half: bumping nb_cfg is useless unless the
+    /// caller learns the value it reached, and only a select in the *same*
+    /// transaction can tell them — another client's increment could land
+    /// between two transactions.
+    @Test("increment mutates by one and selects the column back")
+    func incrementTransactionWireFormat() throws {
+        let operations = OVSDBColumnTransactions.increment(column: "nb_cfg", in: "NB_Global")
+
+        let json = try encodeOperations(operations)
+        #expect(json.count == 2)
+
+        // Op 0: the increment. An empty where matches the one row of a
+        // maxRows: 1 table.
+        #expect(json[0]["op"] as? String == "mutate")
+        #expect(json[0]["table"] as? String == "NB_Global")
+        #expect((json[0]["where"] as? [Any])?.count == 0)
+        let mutation = try #require(
+            (json[0]["mutations"] as? [[Any]])?.first,
+            "Expected one [column, mutator, value] mutation"
+        )
+        #expect(mutation.count == 3)
+        #expect(mutation[0] as? String == "nb_cfg")
+        #expect(mutation[1] as? String == "+=")
+        #expect(mutation[2] as? Int == 1)
+
+        // Op 1: the read-back, narrowed to the counter.
+        #expect(json[1]["op"] as? String == "select")
+        #expect(json[1]["table"] as? String == "NB_Global")
+        #expect(json[1]["columns"] as? [String] == ["nb_cfg"])
+        #expect((json[1]["where"] as? [Any])?.count == 0)
+    }
+
+    /// An `insert` into a map column ignores keys that already exist, so an
+    /// upsert has to delete the keys first — and both mutations have to belong
+    /// to the same mutate op, or a reader sees the column without them.
+    @Test("upsertMapEntries deletes the keys before inserting the pairs")
+    func upsertMapEntriesWireFormat() throws {
+        let mutations = OVSDBColumnTransactions.upsertMapEntries(
+            ["mac_prefix": "0a:5c:1f", "northd_probe_interval": "5000"],
+            column: "options"
+        )
+
+        let data = try JSONEncoder().encode(mutations)
+        let json = try #require(
+            JSONSerialization.jsonObject(with: data) as? [[Any]],
+            "Mutations did not encode as an array of arrays"
+        )
+        #expect(json.count == 2)
+
+        // Mutation 0: delete by key set — a set, not a map, so an entry is
+        // removed whatever it maps to.
+        #expect(json[0][0] as? String == "options")
+        #expect(json[0][1] as? String == "delete")
+        let deleted = try #require(json[0][2] as? [Any], "Expected a tagged set of keys")
+        #expect(deleted[0] as? String == "set")
+        // Dictionary iteration order is not stable across processes.
+        #expect((deleted[1] as? [String])?.sorted() == ["mac_prefix", "northd_probe_interval"])
+
+        // Mutation 1: insert the pairs, which now land because the keys are gone.
+        #expect(json[1][0] as? String == "options")
+        #expect(json[1][1] as? String == "insert")
+        let inserted = try #require(json[1][2] as? [Any], "Expected a tagged map of pairs")
+        #expect(inserted[0] as? String == "map")
+        let pairs = try #require(inserted[1] as? [[String]], "Expected [[key, value], ...]")
+        #expect(pairs.sorted { $0[0] < $1[0] } == [["mac_prefix", "0a:5c:1f"], ["northd_probe_interval", "5000"]])
+    }
+
+    /// A single key still gets the tagged `["set", [...]]` spelling: the bare
+    /// atom RFC 7047 also allows for a one-element set would read as a
+    /// string-valued delete.
+    @Test("removeMapEntries deletes a single key as a tagged set")
+    func removeMapEntriesWireFormat() throws {
+        let mutation = OVSDBColumnTransactions.removeMapEntries(keys: ["mac_prefix"], column: "options")
+
+        let data = try JSONEncoder().encode(mutation)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [Any], "Expected a 3-element array")
+
+        #expect(json.count == 3)
+        #expect(json[0] as? String == "options")
+        #expect(json[1] as? String == "delete")
+        let keys = try #require(json[2] as? [Any], "Expected a tagged set of keys")
+        #expect(keys[0] as? String == "set")
+        #expect(keys[1] as? [String] == ["mac_prefix"])
     }
 
     @Test("An insert's UUID is extracted from the right result, and only from there")

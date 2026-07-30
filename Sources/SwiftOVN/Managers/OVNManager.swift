@@ -130,21 +130,16 @@ public final class OVNManager: OVNManaging {
         // a duplicate racing in between the check above and the insert: abort
         // the transaction unless no row with this name exists (the same
         // technique ovn-nbctl ls-add uses to refuse duplicates).
-        let operations = [
-            OVSDBOperation(
-                op: "wait",
-                table: OVNTable.logicalSwitch,
-                whereConditions: [nameCondition],
+        let operations: [OVSDBOperation] = [
+            .wait(
+                OVNTable.logicalSwitch,
+                where: [nameCondition],
                 columns: ["name"],
                 rows: [],
                 until: "==",
                 timeout: 0
             ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVNTable.logicalSwitch,
-                row: row
-            )
+            .insert(into: OVNTable.logicalSwitch, row: row)
         ]
 
         let results = try await connection.transact(in: database, operations: operations)
@@ -522,10 +517,9 @@ public final class OVNManager: OVNManaging {
         // exactly as create does.
         var operations = rowExistenceWaitOps(route.bfd.map { [$0] } ?? [], in: OVNTable.bfd)
         let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: OVNTable.logicalRouterStaticRoute,
-            whereConditions: [condition],
+        operations.append(.update(
+            OVNTable.logicalRouterStaticRoute,
+            where: [condition],
             row: row
         ))
 
@@ -610,10 +604,9 @@ public final class OVNManager: OVNManaging {
         var operations = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
             + rowExistenceWaitOps(policy.bfd_sessions ?? [], in: OVNTable.bfd)
         let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: OVNTable.logicalRouterPolicy,
-            whereConditions: [condition],
+        operations.append(.update(
+            OVNTable.logicalRouterPolicy,
+            where: [condition],
             row: row
         ))
 
@@ -1003,72 +996,33 @@ public final class OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Port group already exists: \(portGroup.name)")
         }
 
-        let row = try createRow(from: portGroup)
-
         // `ports` is a weak reference set, so any initial member whose port row
         // is stale at commit would be silently dropped from the insert. Guard
         // each supplied port so a stale UUID aborts the whole insert instead of
         // creating a group with missing membership.
-        var operations = portExistenceWaitOps(portGroup.ports ?? [])
-
-        // Guard against a duplicate name racing in between the check above and
-        // the insert: the wait op aborts the transaction unless no row with
-        // this name still exists at commit.
-        operations.append(OVSDBOperation(
-            op: "wait",
-            table: OVNTable.portGroup,
-            whereConditions: [nameCondition],
-            columns: ["name"],
-            rows: [],
-            until: "==",
-            timeout: 0
-        ))
-        let insertIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "insert",
-            table: OVNTable.portGroup,
-            row: row
-        ))
-
-        let results = try await connection.transact(in: database, operations: operations)
-
-        guard results.count > insertIndex,
-              case .object(let insertResult) = results[insertIndex],
-              let uuid = insertResult["uuid"],
-              case .array(let uuidArray) = uuid,
-              uuidArray.count == 2,
-              case .string(let uuidValue) = uuidArray[1] else {
-            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
-        }
+        let uuidValue = try await insertUniquelyNamed(
+            row: try createRow(from: portGroup),
+            into: OVNTable.portGroup,
+            nameCondition: nameCondition,
+            guardOperations: portExistenceWaitOps(portGroup.ports ?? [])
+        )
 
         logger.info("Created port group: \(portGroup.name)")
         return uuidValue
     }
 
     public func updatePortGroup(uuid: String, _ portGroup: OVNPortGroup) async throws(OVNManagerError) {
-        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-        let row = try createRow(from: portGroup)
-
         // A full-row update rewrites the weak-reference `ports` set, so guard
         // each supplied port the same way create/mutate do: a stale UUID aborts
         // the update rather than being silently dropped from the new set.
-        var operations = portExistenceWaitOps(portGroup.ports ?? [])
-        let updateIndex = operations.count
-        operations.append(OVSDBOperation(
-            op: "update",
-            table: OVNTable.portGroup,
-            whereConditions: [condition],
-            row: row
-        ))
+        let count = try await updateGuarded(
+            row: try createRow(from: portGroup),
+            in: OVNTable.portGroup,
+            uuid: uuid,
+            guardOperations: portExistenceWaitOps(portGroup.ports ?? [])
+        )
 
-        let results = try await connection.transact(in: database, operations: operations)
-
-        guard results.count > updateIndex,
-              case .object(let updateResult) = results[updateIndex],
-              case .number(let count)? = updateResult["count"] else {
-            throw OVNManagerError.invalidResponse("Invalid update response format")
-        }
-        if Int(count) == 0 {
+        if count == 0 {
             throw OVNManagerError.operationFailed("Port group not found: \(uuid)")
         }
 
@@ -1301,6 +1255,216 @@ public final class OVNManager: OVNManaging {
     public func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws(OVNManagerError) {
         try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
         logger.info("Detached load balancer \(uuid) from router: \(routerName)")
+    }
+
+    // MARK: - Load Balancer Health Check Operations
+
+    public func getLoadBalancerHealthChecks() async throws(OVNManagerError) -> [OVNLoadBalancerHealthCheck] {
+        let rows = try await connection.selectAll(from: OVNTable.loadBalancerHealthCheck, in: database)
+        return try parseRows(rows, as: OVNLoadBalancerHealthCheck.self)
+    }
+
+    /// Creates a health check and attaches it to a load balancer
+    /// (Load_Balancer.health_check) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl lb-add-health-check`. Load_Balancer_Health_Check is not a
+    /// root table, so an unreferenced row is garbage-collected when the
+    /// transaction commits — there is deliberately no unattached create.
+    ///
+    /// The load balancer is identified by UUID rather than by name because the
+    /// NB schema puts no index on `Load_Balancer.name`: two load balancers may
+    /// legally carry the same name, and a name lookup would attach the check
+    /// to an arbitrary one of them.
+    ///
+    /// The check still needs a matching `ip_port_mappings` entry on the load
+    /// balancer before ovn-controller probes anything; this call only writes
+    /// the check row.
+    public func createLoadBalancerHealthCheck(_ healthCheck: OVNLoadBalancerHealthCheck, onLoadBalancer loadBalancerUUID: String) async throws(OVNManagerError) -> String {
+        let lbCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(loadBalancerUUID)]))
+
+        guard try await rowUUID(in: OVNTable.loadBalancer, where: lbCondition) != nil else {
+            throw OVNManagerError.operationFailed("Load balancer not found: \(loadBalancerUUID)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.loadBalancerHealthCheck,
+            in: database,
+            row: try createRow(from: healthCheck),
+            uuidName: "new_health_check",
+            parentTable: OVNTable.loadBalancer,
+            parentColumn: "health_check",
+            parentCondition: lbCondition
+        )
+
+        logger.info("Created health check for \(healthCheck.vip) on load balancer: \(loadBalancerUUID)")
+        return uuidValue
+    }
+
+    public func updateLoadBalancerHealthCheck(uuid: String, _ healthCheck: OVNLoadBalancerHealthCheck) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: healthCheck)
+
+        let count = try await connection.update(table: OVNTable.loadBalancerHealthCheck, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Load balancer health check not found: \(uuid)")
+        }
+
+        logger.info("Updated load balancer health check: \(uuid)")
+    }
+
+    /// Deletes a health check, removing it from its load balancer's
+    /// `health_check` set in the same transaction — that is a strong
+    /// reference, so ovsdb-server would otherwise reject the delete.
+    public func deleteLoadBalancerHealthCheck(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.loadBalancerHealthCheck,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.loadBalancer, column: "health_check")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Load balancer health check not found: \(uuid)")
+        }
+
+        logger.info("Deleted load balancer health check: \(uuid)")
+    }
+
+    // MARK: - Load Balancer Group Operations
+
+    public func getLoadBalancerGroups() async throws(OVNManagerError) -> [OVNLoadBalancerGroup] {
+        let rows = try await connection.selectAll(from: OVNTable.loadBalancerGroup, in: database)
+        return try parseRows(rows, as: OVNLoadBalancerGroup.self)
+    }
+
+    public func getLoadBalancerGroup(named name: String) async throws(OVNManagerError) -> OVNLoadBalancerGroup? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.loadBalancerGroup, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNLoadBalancerGroup.self)
+    }
+
+    /// Creates a load balancer group, mirroring `ovn-nbctl lb-group-add`.
+    /// Load_Balancer_Group is a root table, so the row persists until it is
+    /// explicitly deleted, and it has no effect until a switch or router
+    /// references it.
+    public func createLoadBalancerGroup(_ group: OVNLoadBalancerGroup) async throws(OVNManagerError) -> String {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(group.name))
+
+        guard try await rowUUID(in: OVNTable.loadBalancerGroup, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Load balancer group already exists: \(group.name)")
+        }
+
+        // `load_balancer` is a weak reference set, so an initial member whose
+        // row is stale at commit would be silently dropped from the insert.
+        let uuidValue = try await insertUniquelyNamed(
+            row: try createRow(from: group),
+            into: OVNTable.loadBalancerGroup,
+            nameCondition: nameCondition,
+            guardOperations: loadBalancerExistenceWaitOps(group.load_balancer ?? [])
+        )
+
+        logger.info("Created load balancer group: \(group.name)")
+        return uuidValue
+    }
+
+    public func updateLoadBalancerGroup(uuid: String, _ group: OVNLoadBalancerGroup) async throws(OVNManagerError) {
+        // A full-row update rewrites the weak-reference `load_balancer` set, so
+        // guard each member the same way create and mutate do.
+        let count = try await updateGuarded(
+            row: try createRow(from: group),
+            in: OVNTable.loadBalancerGroup,
+            uuid: uuid,
+            guardOperations: loadBalancerExistenceWaitOps(group.load_balancer ?? [])
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Load balancer group not found: \(uuid)")
+        }
+
+        logger.info("Updated load balancer group: \(group.name)")
+    }
+
+    /// Adds load balancers to a group's membership without rewriting the whole
+    /// `load_balancer` set, mirroring `ovn-nbctl lb-group-add-lb`. Throws if
+    /// any requested load balancer no longer exists, so a stale UUID can't be
+    /// silently dropped from this weak reference set.
+    public func addLoadBalancers(_ loadBalancerUUIDs: [String], toGroup name: String) async throws(OVNManagerError) {
+        try await mutateLoadBalancerGroupMembers(loadBalancerUUIDs, group: name, mutator: "insert")
+    }
+
+    /// Removes load balancers from a group's membership without rewriting the
+    /// whole `load_balancer` set, mirroring `ovn-nbctl lb-group-del-lb`. The
+    /// load balancer rows themselves are kept.
+    public func removeLoadBalancers(_ loadBalancerUUIDs: [String], fromGroup name: String) async throws(OVNManagerError) {
+        try await mutateLoadBalancerGroupMembers(loadBalancerUUIDs, group: name, mutator: "delete")
+    }
+
+    /// Deletes a load balancer group, detaching it from every switch and
+    /// router that references it in the same transaction. The group is a root
+    /// table row, so it is never garbage-collected — but
+    /// `Logical_Switch.load_balancer_group` and
+    /// `Logical_Router.load_balancer_group` are *strong* references, so
+    /// ovsdb-server rejects the delete while either still names the group. The
+    /// member load balancers are untouched; membership is a weak reference.
+    public func deleteLoadBalancerGroup(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.loadBalancerGroup,
+            in: database,
+            uuid: uuid,
+            parentReferences: [
+                OVSDBParentReference(table: OVNTable.logicalSwitch, column: "load_balancer_group"),
+                OVSDBParentReference(table: OVNTable.logicalRouter, column: "load_balancer_group"),
+            ]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Load balancer group not found: \(uuid)")
+        }
+
+        logger.info("Deleted load balancer group: \(uuid)")
+    }
+
+    public func deleteLoadBalancerGroup(named name: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+
+        guard let uuid = try await rowUUID(in: OVNTable.loadBalancerGroup, where: condition) else {
+            throw OVNManagerError.operationFailed("Load balancer group not found: \(name)")
+        }
+
+        try await deleteLoadBalancerGroup(uuid: uuid)
+    }
+
+    /// Attaches a load balancer group to the named logical switch
+    /// (Logical_Switch.load_balancer_group), mirroring
+    /// `ovn-nbctl ls-lb-group-add`. Every load balancer in the group applies to
+    /// the switch, including ones added to the group afterwards.
+    public func attachLoadBalancerGroup(uuid: String, toSwitch switchName: String) async throws(OVNManagerError) {
+        try await attachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        logger.info("Attached load balancer group \(uuid) to switch: \(switchName)")
+    }
+
+    /// Attaches a load balancer group to the named logical router
+    /// (Logical_Router.load_balancer_group), mirroring
+    /// `ovn-nbctl lr-lb-group-add`.
+    public func attachLoadBalancerGroup(uuid: String, toRouter routerName: String) async throws(OVNManagerError) {
+        try await attachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        logger.info("Attached load balancer group \(uuid) to router: \(routerName)")
+    }
+
+    /// Detaches a load balancer group from the named logical switch. The group
+    /// row itself is kept.
+    public func detachLoadBalancerGroup(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
+        try await detachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        logger.info("Detached load balancer group \(uuid) from switch: \(switchName)")
+    }
+
+    /// Detaches a load balancer group from the named logical router. The group
+    /// row itself is kept.
+    public func detachLoadBalancerGroup(uuid: String, fromRouter routerName: String) async throws(OVNManagerError) {
+        try await detachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        logger.info("Detached load balancer group \(uuid) from router: \(routerName)")
     }
 
     // MARK: - NAT Operations
@@ -1564,7 +1728,7 @@ public final class OVNManager: OVNManaging {
     /// (`Logical_Switch.dns_records`), which is what makes OVN answer that
     /// switch's ports with those records.
     public func attachDNS(uuid: String, toSwitch switchName: String) async throws(OVNManagerError) {
-        try await attachWeakReference(
+        try await attachReference(
             uuid: uuid,
             childTable: OVNTable.dns,
             childDescription: "DNS record set",
@@ -1579,7 +1743,7 @@ public final class OVNManager: OVNManaging {
     /// Detaches a DNS record set from the named logical switch. The `DNS` row
     /// itself is kept.
     public func detachDNS(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
-        try await detachWeakReference(
+        try await detachReference(
             uuid: uuid,
             parentTable: OVNTable.logicalSwitch,
             parentColumn: "dns_records",
@@ -1815,8 +1979,166 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted DHCP options: \(uuid)")
     }
     
+    // MARK: - Global Configuration and Sync Barrier
+
+    /// Reads the singleton `NB_Global` row, or nil if the database has none
+    /// (an empty database that ovn-northd has never connected to).
+    public func getNBGlobal() async throws(OVNManagerError) -> OVNNBGlobal? {
+        try requireNorthbound("NB_Global")
+
+        let rows = try await connection.selectAll(from: OVNTable.nbGlobal, in: database)
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNNBGlobal.self)
+    }
+
+    /// Sets the given `NB_Global.options` entries, leaving every other key
+    /// untouched (`ovn-nbctl set NB_Global . options:key=value`).
+    ///
+    /// The merge is not politeness: ovn-northd keeps generated state in this
+    /// map — `svc_monitor_mac`, `mac_prefix`, `e2e_base_mac` and friends are
+    /// written there on first run and never regenerated — so replacing the
+    /// column wholesale would silently reconfigure the deployment. Use
+    /// `removeNBGlobalOptions(_:)` to drop a key.
+    ///
+    /// An empty `options` is a no-op rather than an empty mutation.
+    public func updateNBGlobalOptions(_ options: [String: String]) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+        guard !options.isEmpty else { return }
+
+        let count = try await connection.mutate(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            mutations: OVSDBColumnTransactions.upsertMapEntries(options, column: "options")
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Updated NB_Global options: \(options.keys.sorted().joined(separator: ", "))")
+    }
+
+    /// Removes the given keys from `NB_Global.options`, whatever they map to.
+    /// Keys that are not set are ignored — a delete mutation reports the rows
+    /// it matched, not the entries it removed.
+    ///
+    /// An empty `keys` is a no-op rather than an empty mutation.
+    public func removeNBGlobalOptions(_ keys: [String]) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+        guard !keys.isEmpty else { return }
+
+        let count = try await connection.mutate(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            mutations: [OVSDBColumnTransactions.removeMapEntries(keys: keys, column: "options")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Removed NB_Global options: \(keys.sorted().joined(separator: ", "))")
+    }
+
+    /// Turns IPsec encryption of chassis-to-chassis tunnel traffic on or off
+    /// (`NB_Global.ipsec`). ovn-northd copies the flag to `SB_Global.ipsec`,
+    /// where the per-chassis IPsec daemons pick it up.
+    public func setNBGlobalIPsec(_ enabled: Bool) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+
+        let count = try await connection.update(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            row: ["ipsec": .boolean(enabled)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Set NB_Global ipsec: \(enabled)")
+    }
+
+    /// Increments `NB_Global.nb_cfg` and returns the value it reached.
+    ///
+    /// This is the barrier's starting point: every write this client committed
+    /// before the increment is ordered before it, so a later `sb_cfg`/`hv_cfg`
+    /// of at least the returned value means those writes have been processed.
+    /// `waitForNorthd(timeout:)` and `waitForHypervisors(timeout:)` do the
+    /// increment themselves; call this directly only to start a barrier you
+    /// intend to observe some other way.
+    @discardableResult
+    public func incrementNBCfg() async throws(OVNManagerError) -> Int {
+        try requireNorthbound("NB_Global")
+
+        let operations = OVSDBColumnTransactions.increment(column: "nb_cfg", in: OVNTable.nbGlobal)
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let mutateResult) = results[0],
+              case .number(let count)? = mutateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format")
+        }
+        if Int(count) == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        guard case .object(let selectResult) = results[1],
+              case .array(let rows)? = selectResult["rows"],
+              case .object(let row)? = rows.first,
+              case .number(let value)? = row["nb_cfg"] else {
+            throw OVNManagerError.invalidResponse("Invalid nb_cfg in increment response")
+        }
+
+        let target = Int(value)
+        logger.debug("Incremented NB_Global nb_cfg to \(target)")
+        return target
+    }
+
+    /// Increments `nb_cfg` and waits until ovn-northd reports having translated
+    /// that generation of the northbound database into southbound logical flows
+    /// (`sb_cfg >= nb_cfg`), returning the `sb_cfg` value observed. This is
+    /// `ovn-nbctl --wait=sb`.
+    ///
+    /// Northd having caught up does not mean any packet is forwarded
+    /// differently yet — the flows still have to reach the hypervisors, which
+    /// is what `waitForHypervisors(timeout:)` waits for. It does return much
+    /// sooner, and is the right barrier when what you need is that the
+    /// southbound database reflects your write.
+    ///
+    /// Throws `timeoutError` if the counter does not reach the target in time.
+    /// The wait is driven by a monitor on `NB_Global` for the duration of the
+    /// call, so the rows also appear on any `monitorUpdates()` stream open on
+    /// this manager.
+    @discardableResult
+    public func waitForNorthd(timeout: TimeAmount = .seconds(60)) async throws(OVNManagerError) -> Int {
+        let target = try await incrementNBCfg()
+        return try await waitForCfg(column: "sb_cfg", atLeast: target, timeout: timeout)
+    }
+
+    /// Increments `nb_cfg` and waits until every chassis has acknowledged that
+    /// generation (`hv_cfg >= nb_cfg`), returning the `hv_cfg` value observed.
+    /// This is `ovn-nbctl --wait=hv`, and the only barrier that means the
+    /// dataplane itself has caught up.
+    ///
+    /// `hv_cfg` is the minimum over all chassis, so a single hypervisor that is
+    /// down or partitioned holds it back indefinitely while the rest of the
+    /// deployment is fine — hence the timeout, and hence why a caller that only
+    /// needs the southbound database to be current should prefer
+    /// `waitForNorthd(timeout:)`.
+    ///
+    /// Throws `timeoutError` if the counter does not reach the target in time.
+    @discardableResult
+    public func waitForHypervisors(timeout: TimeAmount = .seconds(60)) async throws(OVNManagerError) -> Int {
+        let target = try await incrementNBCfg()
+        return try await waitForCfg(column: "hv_cfg", atLeast: target, timeout: timeout)
+    }
+
     // MARK: - Monitoring
-    
+
     public func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String {
         var monitorRequests: [String: OVSDBMonitorRequest] = [:]
         
@@ -1827,10 +2149,81 @@ public final class OVNManager: OVNManaging {
         return try await connection.startMonitoring(database: database, tables: monitorRequests).monitorId
     }
     
+    /// Starts a conditional monitor on this manager's database, filtering rows
+    /// server-side and resuming from `since` where the server supports it.
+    ///
+    /// See `OVSDBConnection.startConditionalMonitoring` for the method
+    /// negotiation, what `resumed` means for the returned updates, and why a
+    /// request carrying conditions is refused rather than downgraded when the
+    /// server is too old for `monitor_cond`.
+    public func startConditionalMonitoring(
+        tables: [String: OVSDBMonitorRequest],
+        monitorId: String? = nil,
+        since lastTransactionId: String? = nil
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession {
+        return try await connection.startConditionalMonitoring(
+            database: database,
+            tables: tables,
+            monitorId: monitorId,
+            since: lastTransactionId
+        )
+    }
+
+    /// Replaces the `where` conditions of a running conditional monitor
+    /// (`monitor_cond_change`) without restarting it.
+    public func updateMonitorConditions(
+        monitorId: String,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError) {
+        try await connection.updateMonitorConditions(monitorId: monitorId, conditions: conditions)
+    }
+
+    /// The transaction id to resume a `monitor_cond_since` monitor from, as of
+    /// the last batch delivered to `monitorTableUpdates()`. See
+    /// `OVSDBConnection.lastTransactionId(forMonitor:)` for when to prefer the id
+    /// carried by the batch itself.
+    public func lastTransactionId(forMonitor monitorId: String) async -> String? {
+        return await connection.lastTransactionId(forMonitor: monitorId)
+    }
+
     public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
         try await connection.stopMonitoring(monitorId: monitorId)
     }
-    
+
+    /// Streams row changes a notification at a time, keeping one transaction's
+    /// rows together and carrying the transaction id to resume a
+    /// `monitor_cond_since` monitor from. The stream to use with
+    /// `startConditionalMonitoring`.
+    ///
+    /// Buffering and failure behave as `monitorUpdates()`'.
+    nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {
+        // Subscribed here rather than inside the task, so a stream created before
+        // the monitor is started really is subscribed by the time it is returned.
+        let batches = connection.monitorTableUpdates(monitorId: monitorId)
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
+            let task = Task {
+                do {
+                    for try await batch in batches {
+                        if case .dropped = continuation.yield(batch) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
+                        .connectionFailed("Monitor stream failed: \($0)")
+                    })
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
     /// Streams row changes from this manager's monitors.
     ///
     /// Buffering is bounded (`OVSDBSocketConnection.notificationBufferSize`); a
@@ -1926,11 +2319,159 @@ public final class OVNManager: OVNManaging {
         let rows = try await connection.selectAll(from: OVNTable.learnedRoute, in: database)
         return try parseRows(rows, as: OVNLearnedRoute.self)
     }
+
+    /// The Southbound `Service_Monitor` rows: one per load balancer backend
+    /// covered by a `Load_Balancer_Health_Check`, carrying the `status` the
+    /// probing chassis reported. This is the only way to observe whether OVN
+    /// currently considers a backend up.
+    public func getServiceMonitors() async throws(OVNManagerError) -> [OVNServiceMonitor] {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("Service Monitor operations require southbound database")
+        }
+
+        let rows = try await connection.selectAll(from: OVNTable.serviceMonitor, in: database)
+        return try parseRows(rows, as: OVNServiceMonitor.self)
+    }
+
+    /// Reads the singleton `SB_Global` row, or nil if the database has none.
+    ///
+    /// Its `nb_cfg` is the generation of northbound configuration ovn-northd
+    /// has published here — the value each chassis copies onwards once it has
+    /// installed the flows. `NB_Global.sb_cfg` is the same progress reported
+    /// back on the northbound side, which is what `waitForNorthd(timeout:)`
+    /// waits on, so this is a read for inspecting the southbound side rather
+    /// than a second way to run the barrier.
+    public func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal? {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("SB_Global operations require southbound database")
+        }
+
+        let rows = try await connection.selectAll(from: OVNTable.sbGlobal, in: database)
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNSBGlobal.self)
+    }
 }
 
 // MARK: - Helper Methods
 
 private extension OVNManager {
+    /// Rejects a northbound-only operation issued against another database.
+    /// `NB_Global` exists only in `OVN_Northbound` (the southbound row is
+    /// `SB_Global`), so without this the call would come back as an ovsdb
+    /// "unknown table" rejection naming neither database.
+    func requireNorthbound(_ description: String) throws(OVNManagerError) {
+        guard database == OVNDatabase.northbound else {
+            throw OVNManagerError.operationFailed("\(description) operations require northbound database")
+        }
+    }
+
+    /// Waits for one of `NB_Global`'s sequence-number columns to reach `target`,
+    /// returning the value observed.
+    ///
+    /// Driven by a monitor rather than by polling or an OVSDB `wait` op: a
+    /// `wait` can only test `==`/`!=` against literal column values, and these
+    /// counters are compared with `>=`. Equality would be wrong as well as
+    /// inexpressible — `sb_cfg` follows whatever `nb_cfg` currently is, so
+    /// another client's increment can carry it straight past `target`.
+    ///
+    /// The monitor is started *after* the increment that set `target`, so its
+    /// initial update already answers the case where northd (or the last
+    /// hypervisor) got there first and no further update is coming.
+    func waitForCfg(column: String, atLeast target: Int, timeout: TimeAmount) async throws(OVNManagerError) -> Int {
+        let monitorId = UUID().uuidString
+        // Create the stream before starting the monitor, or an update that
+        // lands in between is lost (see `OVSDBConnection.monitorUpdates`).
+        let updates = connection.monitorUpdates(monitorId: monitorId)
+
+        let (_, initialUpdates) = try await connection.startMonitoring(
+            database: database,
+            tables: [OVNTable.nbGlobal: OVSDBMonitorRequest(columns: [column])],
+            monitorId: monitorId
+        )
+
+        let outcome: Result<Int, OVNManagerError>
+        if let initial = Self.cfgValue(of: column, in: initialUpdates), initial >= target {
+            outcome = .success(initial)
+        } else {
+            do {
+                let reached = try await Self.firstCfgValue(of: column, atLeast: target, in: updates, timeout: timeout)
+                outcome = .success(reached)
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+
+        // Best effort: the wait is over either way, and a monitor that could
+        // not be cancelled (a closed connection, most likely) must not mask
+        // what the wait actually produced.
+        try? await connection.stopMonitoring(monitorId: monitorId)
+        return try outcome.get()
+    }
+
+    /// The column's value in the first `NB_Global` update that carries it. A
+    /// monitor's modify update only carries the columns that changed, so an
+    /// update without this one says nothing about it.
+    static func cfgValue(of column: String, in update: OVSDBUpdate) -> Int? {
+        guard update.table == OVNTable.nbGlobal,
+              case .number(let value)? = update.new?[column] else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    static func cfgValue(of column: String, in updates: [OVSDBUpdate]) -> Int? {
+        for update in updates {
+            if let value = cfgValue(of: column, in: update) { return value }
+        }
+        return nil
+    }
+
+    /// The first value of `column` on the stream that is at least `target`,
+    /// or `timeoutError` if none arrives in time.
+    ///
+    /// The timeout is a sibling task rather than a deadline checked between
+    /// updates, because the interesting failure is exactly the one where *no*
+    /// update arrives: a chassis that is down never advances `hv_cfg`, so the
+    /// loop would otherwise wait forever inside `next()`.
+    static func firstCfgValue(
+        of column: String,
+        atLeast target: Int,
+        in updates: AsyncThrowingStream<OVSDBUpdate, Error>,
+        timeout: TimeAmount
+    ) async throws(OVNManagerError) -> Int {
+        let reached: Int?
+        do {
+            reached = try await withThrowingTaskGroup(of: Int?.self) { group in
+                group.addTask {
+                    for try await update in updates {
+                        guard let value = cfgValue(of: column, in: update), value >= target else { continue }
+                        return value
+                    }
+                    // The stream finished without the counter getting there:
+                    // the connection closed under us. Reported as a timeout
+                    // rather than invented as a success.
+                    return nil
+                }
+                group.addTask {
+                    try await Task.sleep(for: .nanoseconds(max(0, timeout.nanoseconds)))
+                    return nil
+                }
+
+                // Whichever finishes first decides; the loser is cancelled,
+                // which unsubscribes the stream consumer.
+                defer { group.cancelAll() }
+                return try await group.next() ?? nil
+            }
+        } catch {
+            throw OVNManagerError.wrapping(error) {
+                .connectionFailed("Monitor stream failed while waiting for \(column): \($0)")
+            }
+        }
+
+        guard let reached else { throw OVNManagerError.timeoutError }
+        return reached
+    }
+
     /// Looks up a row's _uuid via a narrow select so existence checks don't
     /// fetch and decode entire rows. Returns nil when no row matches.
     func rowUUID(in table: String, where condition: OVSDBCondition) async throws(OVNManagerError) -> String? {
@@ -1947,9 +2488,9 @@ private extension OVNManager {
 
     /// Binds the `load_balancer` column of whichever parent table the caller
     /// named — `Logical_Switch` or `Logical_Router` — to the shared
-    /// weak-reference helpers below.
+    /// reference helpers below.
     func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
-        try await attachWeakReference(
+        try await attachReference(
             uuid: uuid,
             childTable: OVNTable.loadBalancer,
             childDescription: "Load balancer",
@@ -1961,7 +2502,7 @@ private extension OVNManager {
     }
 
     func detachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
-        try await detachWeakReference(
+        try await detachReference(
             uuid: uuid,
             parentTable: parentTable,
             parentColumn: "load_balancer",
@@ -1970,14 +2511,41 @@ private extension OVNManager {
         )
     }
 
+    /// The same binding for `load_balancer_group`, which sits beside
+    /// `load_balancer` on both parent tables.
+    func attachLoadBalancerGroup(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await attachReference(
+            uuid: uuid,
+            childTable: OVNTable.loadBalancerGroup,
+            childDescription: "Load balancer group",
+            parentTable: parentTable,
+            parentColumn: "load_balancer_group",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
+    func detachLoadBalancerGroup(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await detachReference(
+            uuid: uuid,
+            parentTable: parentTable,
+            parentColumn: "load_balancer_group",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
     /// Adds a root-table row's UUID to a name-keyed parent's reference column
-    /// (`Logical_Switch.load_balancer`, `Logical_Switch.dns_records`, …).
+    /// (`Logical_Switch.load_balancer`, `Logical_Switch.dns_records`,
+    /// `Logical_Router.load_balancer_group`, …).
     ///
-    /// Every such column is a weak reference: mutating in a UUID whose row no
-    /// longer exists at commit is silently dropped rather than rejected, so the
-    /// child's existence is re-checked with a wait op inside the same
-    /// transaction.
-    func attachWeakReference(
+    /// Most such columns are weak references: mutating in a UUID whose row no
+    /// longer exists at commit is silently dropped rather than rejected, so
+    /// the child's existence is re-checked with a wait op inside the same
+    /// transaction. `load_balancer_group` is the strong one, which
+    /// ovsdb-server would reject at commit instead — the wait op just gets
+    /// there first, aborting the transaction either way.
+    func attachReference(
         uuid: String,
         childTable: String,
         childDescription: String,
@@ -1995,10 +2563,9 @@ private extension OVNManager {
 
         let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
         var operations = rowExistenceWaitOps([uuid], in: childTable)
-        operations.append(OVSDBOperation(
-            op: "mutate",
-            table: parentTable,
-            whereConditions: [parentCondition],
+        operations.append(.mutate(
+            parentTable,
+            where: [parentCondition],
             mutations: [OVSDBMutation(column: parentColumn, mutator: "insert", value: uuidAtom)]
         ))
 
@@ -2014,8 +2581,9 @@ private extension OVNManager {
     }
 
     /// Removes a UUID from a parent's reference column. No existence guard on
-    /// the child: deleting a stale UUID from a set is a harmless no-op.
-    func detachWeakReference(
+    /// the child, weak or strong: deleting a stale UUID from a set is a
+    /// harmless no-op.
+    func detachReference(
         uuid: String,
         parentTable: String,
         parentColumn: String,
@@ -2037,33 +2605,38 @@ private extension OVNManager {
         }
     }
 
-    /// Inserts or deletes a set of Logical_Switch_Port UUIDs in a port
-    /// group's `ports` column via a single mutate op. A no-op (empty UUID
-    /// list) is skipped so the caller never issues an empty mutation.
+    /// Inserts or deletes a set of UUIDs in a weak reference column of the row
+    /// named `name`, via a single mutate op. A no-op (empty UUID list) is
+    /// skipped so the caller never issues an empty mutation.
     ///
-    /// `Port_Group.ports` is a weak reference set: ovsdb-server silently drops
-    /// a UUID whose Logical_Switch_Port no longer exists at commit, so an
-    /// `insert` of a stale UUID would report the port group matched while
-    /// applying no membership change. For inserts we therefore guard each
-    /// added port with a same-transaction wait op that aborts the transaction
-    /// unless the port row still exists at commit (mirroring the load-balancer
-    /// attach guard). Deletes need no such guard — removing a stale UUID is a
-    /// harmless no-op.
-    func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws(OVNManagerError) {
-        guard !portUUIDs.isEmpty else { return }
+    /// ovsdb-server silently drops a UUID whose row no longer exists at commit
+    /// from a weak reference column, so an `insert` of a stale UUID would
+    /// report the parent row matched while applying no membership change. For
+    /// inserts we therefore guard each added UUID with a same-transaction wait
+    /// op that aborts the transaction unless the row still exists at commit
+    /// (mirroring the attach guard). Deletes need no such guard — removing a
+    /// stale UUID is a harmless no-op.
+    func mutateWeakReferenceSet(
+        _ uuids: [String],
+        referencing referencedTable: String,
+        column: String,
+        inTable table: String,
+        named name: String,
+        description: String,
+        mutator: String
+    ) async throws(OVNManagerError) {
+        guard !uuids.isEmpty else { return }
 
-        let portAtoms = portUUIDs.map { JSONValue.array([.string("uuid"), .string($0)]) }
-        let portSet = JSONValue.array([.string("set"), .array(portAtoms)])
+        let atoms = uuids.map { JSONValue.array([.string("uuid"), .string($0)]) }
+        let set = JSONValue.array([.string("set"), .array(atoms)])
 
-        // Deletes need no guard — removing a stale UUID is a harmless no-op.
-        var operations = mutator == "insert" ? portExistenceWaitOps(portUUIDs) : []
+        var operations = mutator == "insert" ? rowExistenceWaitOps(uuids, in: referencedTable) : []
 
-        let groupCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
-        operations.append(OVSDBOperation(
-            op: "mutate",
-            table: OVNTable.portGroup,
-            whereConditions: [groupCondition],
-            mutations: [OVSDBMutation(column: "ports", mutator: mutator, value: portSet)]
+        let rowCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        operations.append(.mutate(
+            table,
+            where: [rowCondition],
+            mutations: [OVSDBMutation(column: column, mutator: mutator, value: set)]
         ))
 
         let results = try await connection.transact(in: database, operations: operations)
@@ -2073,8 +2646,36 @@ private extension OVNManager {
             throw OVNManagerError.invalidResponse("Invalid mutate response format")
         }
         if Int(count) == 0 {
-            throw OVNManagerError.operationFailed("Port group not found: \(name)")
+            throw OVNManagerError.operationFailed("\(description) not found: \(name)")
         }
+    }
+
+    /// The `Port_Group.ports` membership mutation (a weak `Logical_Switch_Port`
+    /// reference set).
+    func mutatePorts(_ portUUIDs: [String], portGroup name: String, mutator: String) async throws(OVNManagerError) {
+        try await mutateWeakReferenceSet(
+            portUUIDs,
+            referencing: OVNTable.logicalSwitchPort,
+            column: "ports",
+            inTable: OVNTable.portGroup,
+            named: name,
+            description: "Port group",
+            mutator: mutator
+        )
+    }
+
+    /// The `Load_Balancer_Group.load_balancer` membership mutation (a weak
+    /// `Load_Balancer` reference set).
+    func mutateLoadBalancerGroupMembers(_ loadBalancerUUIDs: [String], group name: String, mutator: String) async throws(OVNManagerError) {
+        try await mutateWeakReferenceSet(
+            loadBalancerUUIDs,
+            referencing: OVNTable.loadBalancer,
+            column: "load_balancer",
+            inTable: OVNTable.loadBalancerGroup,
+            named: name,
+            description: "Load balancer group",
+            mutator: mutator
+        )
     }
 
     /// Inserts or deletes addresses in an address set's `addresses` column via
@@ -2104,6 +2705,58 @@ private extension OVNManager {
         }
     }
 
+    /// Inserts a row into a table whose `name` column the schema indexes,
+    /// after `guardOperations`. The caller has already checked the name is
+    /// free; the wait op appended here closes the race between that check and
+    /// the insert, aborting the transaction unless no row with that name
+    /// exists at commit. Returns the new row's UUID.
+    func insertUniquelyNamed(
+        row: OVSDBRow,
+        into table: String,
+        nameCondition: OVSDBCondition,
+        guardOperations: [OVSDBOperation]
+    ) async throws(OVNManagerError) -> String {
+        var operations = guardOperations
+        operations.append(.wait(
+            table,
+            where: [nameCondition],
+            columns: ["name"],
+            rows: [],
+            until: "==",
+            timeout: 0
+        ))
+        let insertIndex = operations.count
+        operations.append(.insert(into: table, row: row))
+
+        let results = try await connection.transact(in: database, operations: operations)
+        return try OVSDBConnection.uuid(fromInsertResults: results, at: insertIndex)
+    }
+
+    /// Updates the row with `uuid` after `guardOperations`, returning how many
+    /// rows the update matched. Separate from `connection.update` only because
+    /// the guards have to share the update's transaction.
+    func updateGuarded(
+        row: OVSDBRow,
+        in table: String,
+        uuid: String,
+        guardOperations: [OVSDBOperation]
+    ) async throws(OVNManagerError) -> Int {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+
+        var operations = guardOperations
+        let updateIndex = operations.count
+        operations.append(.update(table, where: [condition], row: row))
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count > updateIndex,
+              case .object(let updateResult) = results[updateIndex],
+              case .number(let count)? = updateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+        return Int(count)
+    }
+
     /// Builds a `wait` op per UUID that aborts the enclosing transaction unless
     /// a row with that UUID still exists in `table` at commit. Every weak
     /// reference column needs this guard: ovsdb-server silently drops a stale
@@ -2111,10 +2764,9 @@ private extension OVNManager {
     func rowExistenceWaitOps(_ uuids: [String], in table: String) -> [OVSDBOperation] {
         uuids.map { uuid in
             let rowCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
-            return OVSDBOperation(
-                op: "wait",
-                table: table,
-                whereConditions: [rowCondition],
+            return OVSDBOperation.wait(
+                table,
+                where: [rowCondition],
                 columns: ["_uuid"],
                 rows: [],
                 until: "!=",
@@ -2128,6 +2780,12 @@ private extension OVNManager {
     /// update, mutate).
     func portExistenceWaitOps(_ portUUIDs: [String]) -> [OVSDBOperation] {
         rowExistenceWaitOps(portUUIDs, in: OVNTable.logicalSwitchPort)
+    }
+
+    /// The `Load_Balancer` guards for `Load_Balancer_Group.load_balancer`,
+    /// which is a weak reference set like `Port_Group.ports`.
+    func loadBalancerExistenceWaitOps(_ loadBalancerUUIDs: [String]) -> [OVSDBOperation] {
+        rowExistenceWaitOps(loadBalancerUUIDs, in: OVNTable.loadBalancer)
     }
 
     /// Decodes a row into its model. `OVSDBRowDecoder` is a general `Decoder`

@@ -111,10 +111,17 @@ public actor JSONRPCClient {
     
     // MARK: - Generic JSON-RPC Methods
     
+    /// Sends a request and awaits its response.
+    ///
+    /// `onRequestID` is handed the id this call was assigned, from inside the
+    /// actor and before the request is written. It exists so a caller can
+    /// `cancel(requestID:)` a long-running request from another task: ids are
+    /// allocated here, so there is no other way to learn one.
     public func call<T: Codable & Sendable>(
         method: String,
         params: JSONRPCParams? = nil,
-        responseType: T.Type
+        responseType: T.Type,
+        onRequestID: (@Sendable (JSONRPCIdentifier) -> Void)? = nil
     ) async throws(OVNManagerError) -> T {
         let id = JSONRPCIdentifier.number(nextRequestId())
         let request = JSONRPCRequest(method: method, params: params, id: id)
@@ -122,6 +129,8 @@ public actor JSONRPCClient {
         logger.debug("Sending JSON-RPC request: \(method) with ID: \(id)")
 
         logger.debug("Connection active before send: \(connection.isConnectionActive)")
+
+        onRequestID?(id)
 
         // One operation: the transport registers its interest in `id` before it
         // writes, so a reply that arrives immediately cannot be missed.
@@ -192,8 +201,12 @@ public actor JSONRPCClient {
     
     public func listDatabases() async throws(OVNManagerError) -> [String] {
         logger.info("Listing databases...")
+        // Explicitly empty rather than absent: RFC 7047 §4.1.1 gives list_dbs
+        // `"params": []`, and a request is specified to carry the member, so a
+        // server is free to reject one that omits it.
         let result = try await call(
             method: "list_dbs",
+            params: .array([]),
             responseType: [String].self
         )
         logger.info("Found \(result.count) databases: \(result)")
@@ -209,7 +222,15 @@ public actor JSONRPCClient {
         )
     }
     
-    public func transact(database: String, operations: [OVSDBOperation]) async throws(OVNManagerError) -> [JSONValue] {
+    /// Runs `operations` as one transaction (RFC 7047 §4.1.3).
+    ///
+    /// Pass `onRequestID` to learn the request's id while it is in flight, so
+    /// it can be given to `cancel(requestID:)`.
+    public func transact(
+        database: String,
+        operations: [OVSDBOperation],
+        onRequestID: (@Sendable (JSONRPCIdentifier) -> Void)? = nil
+    ) async throws(OVNManagerError) -> [JSONValue] {
         var paramsArray: [JSONValue] = [.string(database)]
 
         for operation in operations {
@@ -217,12 +238,40 @@ public actor JSONRPCClient {
         }
 
         let params = JSONRPCParams.array(paramsArray)
-        
+
         return try await call(
             method: "transact",
             params: params,
-            responseType: [JSONValue].self
+            responseType: [JSONValue].self,
+            onRequestID: onRequestID
         )
+    }
+
+    /// Asks the server to abandon the request identified by `requestID`
+    /// (RFC 7047 §4.1.4) — the way to give up on a `transact` that is blocked
+    /// behind a `wait` operation instead of holding the connection until it
+    /// times out.
+    ///
+    /// A notification, not a request: nothing replies to the cancel itself.
+    /// What completes the caller still awaiting the cancelled request is that
+    /// request's own reply, which comes back as a `canceled` error if the
+    /// cancellation won the race and as the normal result if it did not.
+    public func cancel(requestID: JSONRPCIdentifier) async throws(OVNManagerError) {
+        // Sent with an explicit null id, the form RFC 7047 §4.1.4 shows for a
+        // notification, rather than by omitting the member.
+        let request = JSONRPCRequest(
+            method: "cancel",
+            params: .array([requestID.jsonValue]),
+            id: .null
+        )
+
+        logger.debug("Cancelling in-flight request \(requestID)")
+
+        do {
+            try await connection.send(request)
+        } catch {
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to send 'cancel' notification: \($0)") }
+        }
     }
     
     public func monitor(
@@ -245,6 +294,117 @@ public actor JSONRPCClient {
         )
     }
     
+    /// `monitor_cond` (ovsdb-server(7)): as `monitor`, but each table request may
+    /// carry `where` conditions the server filters rows by, and row changes
+    /// arrive as `update2` notifications.
+    ///
+    /// Returns the initial `<table-updates2>` — the matching rows, each as an
+    /// `initial` row update.
+    public func monitorCond(
+        database: String,
+        monitorId: String,
+        requests: [String: OVSDBMonitorRequest]
+    ) async throws(OVNManagerError) -> JSONValue {
+        let requestsValue = try encodeParameter(requests)
+
+        let params = JSONRPCParams.array([
+            .string(database),
+            .string(monitorId),
+            requestsValue
+        ])
+
+        return try await call(
+            method: OVSDBMonitorMethod.monitorCond.rpcMethod,
+            params: params,
+            responseType: JSONValue.self
+        )
+    }
+
+    /// `monitor_cond_since` (ovsdb-server(7)): a `monitor_cond` that resumes from
+    /// a transaction id, so a reconnecting client is sent a delta instead of the
+    /// whole database. Row changes arrive as `update3` notifications, each
+    /// carrying the transaction id to resume from next.
+    ///
+    /// `found` is false when the server could not resume from
+    /// `lastTransactionId` — it has been compacted away, or this is a different
+    /// server in the cluster — in which case the returned `<table-updates2>` is a
+    /// complete snapshot and the caller must discard whatever state it hoped to
+    /// resume.
+    public func monitorCondSince(
+        database: String,
+        monitorId: String,
+        requests: [String: OVSDBMonitorRequest],
+        since lastTransactionId: String = OVSDBMonitorMethod.initialTransactionId
+    ) async throws(OVNManagerError) -> (found: Bool, lastTransactionId: String, tableUpdates: JSONValue) {
+        let requestsValue = try encodeParameter(requests)
+
+        let params = JSONRPCParams.array([
+            .string(database),
+            .string(monitorId),
+            requestsValue,
+            .string(lastTransactionId)
+        ])
+
+        let result = try await call(
+            method: OVSDBMonitorMethod.monitorCondSince.rpcMethod,
+            params: params,
+            responseType: JSONValue.self
+        )
+
+        guard case .array(let parts) = result,
+              parts.count >= 3,
+              case .boolean(let found) = parts[0],
+              case .string(let transactionId) = parts[1] else {
+            throw OVNManagerError.invalidResponse(
+                "monitor_cond_since reply is not [found, last-txn-id, table-updates2]: \(result)"
+            )
+        }
+
+        return (found: found, lastTransactionId: transactionId, tableUpdates: parts[2])
+    }
+
+    /// `monitor_cond_change` (ovsdb-server(7)): replaces the `where` conditions of
+    /// a running conditional monitor in place. Rows that newly match arrive as
+    /// inserts and rows that stopped matching as deletes, without the full
+    /// resynchronization that cancelling the monitor and starting another costs.
+    ///
+    /// Only conditions can be changed: ovsdb-server parses a
+    /// `<monitor-cond-update-request>` strictly and takes nothing but `where`.
+    /// Passing an empty condition list for a table makes it match every row
+    /// again.
+    public func monitorCondChange(
+        monitorId: String,
+        newMonitorId: String? = nil,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError) {
+        let requests = conditions.mapValues { MonitorConditionChange(whereConditions: $0) }
+        let requestsValue = try encodeParameter(requests)
+
+        let params = JSONRPCParams.array([
+            .string(monitorId),
+            .string(newMonitorId ?? monitorId),
+            requestsValue
+        ])
+
+        // The server replies with the string "ok"; there is nothing in it to
+        // check that the absence of an error has not already established.
+        _ = try await call(
+            method: "monitor_cond_change",
+            params: params,
+            responseType: JSONValue.self
+        )
+    }
+
+    /// One table's entry in a `monitor_cond_change`'s
+    /// `<monitor-cond-update-requests>`.
+    private struct MonitorConditionChange: Encodable {
+        let whereConditions: [OVSDBCondition]
+
+        private enum CodingKeys: String, CodingKey {
+            case whereConditions = "where"
+        }
+    }
+
     public func cancelMonitor(monitorId: String) async throws(OVNManagerError) {
         let params = JSONRPCParams.array([.string(monitorId)])
 
@@ -257,9 +417,116 @@ public actor JSONRPCClient {
         )
     }
 
+    // MARK: - Locking
+
+    /// Requests ownership of the lock named `id` (RFC 7047 §4.1.8).
+    ///
+    /// Returns true when this connection owns the lock as of the reply. False
+    /// means the request is *queued* behind the current owner, not that it
+    /// failed: ownership arrives later as a `locked` notification on
+    /// `lockUpdates()`, and stays queued until then or until `unlock(id:)`.
+    ///
+    /// Ownership can be taken away at any time by another client's
+    /// `steal(id:)`, so a writer that holds a lock should still make its
+    /// transactions conditional on it with `OVSDBOperation.assert(lock:)`.
+    /// Locks are per-connection and released when the connection drops.
+    @discardableResult
+    public func lock(id: String) async throws(OVNManagerError) -> Bool {
+        logger.info("Requesting OVSDB lock '\(id)'")
+        return try await lockRequest(method: "lock", id: id)
+    }
+
+    /// Takes ownership of the lock named `id` away from its current owner
+    /// (RFC 7047 §4.1.8), which is told with a `stolen` notification.
+    ///
+    /// Returns true — a steal is granted immediately — unless the server
+    /// answers otherwise; the boolean is reported rather than assumed.
+    @discardableResult
+    public func steal(id: String) async throws(OVNManagerError) -> Bool {
+        logger.info("Stealing OVSDB lock '\(id)'")
+        return try await lockRequest(method: "steal", id: id)
+    }
+
+    /// Releases the lock named `id`, or withdraws a queued request for it
+    /// (RFC 7047 §4.1.8).
+    public func unlock(id: String) async throws(OVNManagerError) {
+        logger.info("Releasing OVSDB lock '\(id)'")
+        _ = try await call(
+            method: "unlock",
+            params: .array([.string(id)]),
+            responseType: JSONValue.self
+        )
+    }
+
+    /// Issues a `lock`/`steal` request and reads the `locked` member out of the
+    /// `{"locked": <boolean>}` reply both share.
+    private func lockRequest(method: String, id: String) async throws(OVNManagerError) -> Bool {
+        let result = try await call(
+            method: method,
+            params: .array([.string(id)]),
+            responseType: JSONValue.self
+        )
+
+        guard case .object(let object) = result,
+              case .boolean(let locked)? = object["locked"] else {
+            throw OVNManagerError.invalidResponse("'\(method)' reply has no boolean 'locked' member: \(result)")
+        }
+        return locked
+    }
+
+    // MARK: - Server and Session
+    //
+    // `set_db_change_aware`, `get_server_id` and `convert` are ovsdb-server's
+    // own additions to the RFC 7047 method set, documented in ovsdb-server(7)
+    // rather than in the RFC — which is also why a server that predates them
+    // answers with an "unknown method" error rather than ignoring them.
+
+    /// Declares whether this connection wants to be told about databases being
+    /// added and removed.
+    ///
+    /// A clustered ovsdb-server adds and removes databases while clients are
+    /// connected, and only tells the ones that asked. This is also what a
+    /// client monitoring the `_Server` database wants, since the whole point of
+    /// that monitor is to follow the set of databases and their cluster state.
+    public func setDatabaseChangeAware(_ aware: Bool) async throws(OVNManagerError) {
+        _ = try await call(
+            method: "set_db_change_aware",
+            params: .array([.boolean(aware)]),
+            responseType: JSONValue.self
+        )
+    }
+
+    /// The UUID identifying the server on the other end of this connection.
+    ///
+    /// Distinguishes which member of a cluster a connection landed on — the
+    /// same address can be answered by a different member after a reconnect.
+    public func getServerID() async throws(OVNManagerError) -> String {
+        return try await call(
+            method: "get_server_id",
+            params: .array([]),
+            responseType: String.self
+        )
+    }
+
+    /// Converts `database` to `schema`, migrating the data it holds.
+    ///
+    /// A cluster-wide, destructive operation: the server applies the new schema
+    /// to the stored data, dropping whatever the new schema has no place for.
+    public func convert(database: String, schema: JSONValue) async throws(OVNManagerError) {
+        logger.info("Converting database \(database) to a new schema")
+        _ = try await call(
+            method: "convert",
+            params: .array([.string(database), schema]),
+            responseType: JSONValue.self
+        )
+    }
+
     // MARK: - Monitoring Stream
 
     /// Streams `update` notifications as `(monitorId, tableUpdates)` pairs.
+    ///
+    /// Plain `monitor` only: a conditional monitor's `update2`/`update3`
+    /// notifications are not delivered here — use `monitorNotifications()`.
     ///
     /// Subscribe *before* calling `monitor(...)` so no update is missed; the
     /// underlying stream buffers notifications between iterations. The stream
@@ -283,6 +550,89 @@ public actor JSONRPCClient {
     /// is constrained to `Failure == any Error`, so a typed-failure stream
     /// cannot be built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
+        return notificationStream { notification in
+            guard notification.method == OVSDBMonitorMethod.monitor.notificationMethod,
+                  case .array(let paramsArray)? = notification.params,
+                  paramsArray.count >= 2,
+                  case .string(let monitorId) = paramsArray[0] else {
+                return nil
+            }
+            return (monitorId, paramsArray[1])
+        }
+    }
+
+    /// Streams the `locked` and `stolen` notifications that report this
+    /// connection gaining or losing an OVSDB lock.
+    ///
+    /// Create the stream *before* calling `lock(id:)`, or the promotion of a
+    /// queued request can land before there is anything subscribed to see it.
+    /// Notifications for every lock this connection has asked for arrive here;
+    /// filter on `lockID` if it holds more than one.
+    ///
+    /// Failure behaves as `monitorUpdates()`: dropped notifications end the
+    /// stream with `OVNManagerError.notificationsDropped` rather than leaving
+    /// the consumer believing a stale ownership state.
+    nonisolated public func lockUpdates() -> AsyncThrowingStream<OVSDBLockNotification, Error> {
+        return notificationStream { OVSDBLockNotification($0) }
+    }
+
+    /// Streams every monitor notification — `update`, `update2` and `update3` —
+    /// tagged with the method that produced it, with the row payload left
+    /// unparsed.
+    ///
+    /// Use this rather than `monitorUpdates()` for a monitor started with
+    /// `monitor_cond` or `monitor_cond_since`: those report changes as `update2`
+    /// and `update3`, which `monitorUpdates()` filters out, and only `update3`
+    /// carries the transaction id a later `monitor_cond_since` resumes from.
+    ///
+    /// The subscription and buffering rules are `monitorUpdates()`': subscribe
+    /// before starting the monitor, and a consumer that falls further behind than
+    /// `OVSDBSocketConnection.notificationBufferSize` gets
+    /// `OVNManagerError.notificationsDropped`.
+    nonisolated public func monitorNotifications() -> AsyncThrowingStream<OVSDBMonitorNotification, Error> {
+        return notificationStream { notification in
+            guard let method = OVSDBMonitorMethod(notificationMethod: notification.method),
+                  case .array(let paramsArray)? = notification.params,
+                  case .string(let monitorId)? = paramsArray.first else {
+                return nil
+            }
+
+            switch method {
+            case .monitor, .monitorCond:
+                // [<monitor-id>, <table-updates>]
+                guard paramsArray.count >= 2 else { return nil }
+                return OVSDBMonitorNotification(
+                    monitorId: monitorId,
+                    method: method,
+                    tableUpdates: paramsArray[1]
+                )
+            case .monitorCondSince:
+                // [<monitor-id>, <last-txn-id>, <table-updates2>]
+                guard paramsArray.count >= 3,
+                      case .string(let transactionId) = paramsArray[1] else {
+                    return nil
+                }
+                return OVSDBMonitorNotification(
+                    monitorId: monitorId,
+                    method: method,
+                    lastTransactionId: transactionId,
+                    tableUpdates: paramsArray[2]
+                )
+            }
+        }
+    }
+
+    /// Builds one bounded stream over the transport's notifications, keeping the
+    /// notifications `transform` maps to a value and skipping the rest.
+    ///
+    /// The gap handling is the point of sharing this: a `dropped` event and a
+    /// rejected `yield` both have to finish the stream with
+    /// `notificationsDropped`, and a reconnect with `monitorInterrupted`, so that
+    /// every public monitor stream fails the same way rather than each
+    /// re-deriving it.
+    private nonisolated func notificationStream<Element: Sendable>(
+        _ transform: @escaping @Sendable (JSONRPCNotification) -> Element?
+    ) -> AsyncThrowingStream<Element, Error> {
         let events = connection.notificationEvents()
         return AsyncThrowingStream(
             bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
@@ -294,20 +644,18 @@ public actor JSONRPCClient {
                         continuation.finish(throwing: OVNManagerError.notificationsDropped(count: count))
                         return
                     case .reconnected:
+                        // The monitors of the previous session are gone, so this
+                        // stream's view has a hole no later notification fills —
+                        // the same situation as a drop, reported separately
+                        // because the recovery differs (see `monitorInterrupted`).
                         continuation.finish(throwing: OVNManagerError.monitorInterrupted)
                         return
                     case .notification(let notification):
-                        guard notification.method == "update",
-                              case .array(let paramsArray)? = notification.params,
-                              paramsArray.count >= 2,
-                              case .string(let monitorId) = paramsArray[0] else {
-                            continue
-                        }
-                        // `.bufferingOldest` keeps the updates already buffered
+                        guard let element = transform(notification) else { continue }
+                        // `.bufferingOldest` keeps the elements already buffered
                         // and rejects this one, so the consumer sees an unbroken
-                        // run of updates followed by the error rather than a
-                        // silent gap.
-                        if case .dropped = continuation.yield((monitorId, paramsArray[1])) {
+                        // run followed by the error rather than a silent gap.
+                        if case .dropped = continuation.yield(element) {
                             continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
                             return
                         }

@@ -139,6 +139,97 @@ growing the buffer until the process runs out of memory. Work that can lag
 behind the stream should hand updates to its own queue, and re-monitor when a
 drop is reported.
 
+### Conditional Monitoring and Resume
+
+`startMonitoring` uses RFC 7047 `monitor`, which sends every row of every
+monitored table and has no way to resume: a reconnect, or a dropped-notification
+recovery, means downloading the database again. `startConditionalMonitoring` uses
+what production OVN clients use instead — `monitor_cond_since`, falling back to
+`monitor_cond` and then `monitor` depending on the server's age — so the server
+filters rows before sending them, and a reconnect asks only for what changed:
+
+```swift
+// Only the flows of one datapath, and only their match and actions.
+let session = try await SwiftOVN.startConditionalMonitoring(
+    tables: [
+        "Logical_Flow": OVSDBMonitorRequest(
+            columns: ["match", "actions"],
+            whereConditions: [
+                OVSDBCondition(column: "logical_datapath", function: "==", value: .string(datapathUUID))
+            ]
+        ),
+    ],
+    monitorId: "flows",
+    since: resumePoint  // nil the first time
+)
+
+if !session.resumed {
+    // The server could not resume from `resumePoint`, so these updates are a
+    // complete snapshot: discard whatever state was carried across, don't merge.
+    cache.removeAll()
+}
+apply(session.initialUpdates)
+
+// Batched, because one notification is one OVSDB transaction — and its
+// transaction id is only a valid resume point once all of its rows are applied.
+for try await batch in SwiftOVN.monitorTableUpdates(monitorId: "flows") {
+    apply(batch.updates)
+    resumePoint = batch.lastTransactionId
+}
+
+// Narrow or widen the monitor without restarting it and resynchronizing:
+try await SwiftOVN.updateMonitorConditions(
+    monitorId: "flows",
+    conditions: ["Logical_Flow": [OVSDBCondition(column: "logical_datapath", function: "==", value: .string(otherDatapath))]]
+)
+```
+
+Two things to know about the updates these monitors deliver:
+
+- **A modify reports only what changed.** `update2`/`update3` describe a change
+  as one of `initial`, `insert`, `modify` or `delete` — read `update.kind` — and
+  a modify carries just the changed columns, in `update.diff`, with `old` and
+  `new` nil. That is deliberate: reconstructing the whole row would take a
+  client-side copy of every monitored row *and* the database schema, because a
+  modify expresses set- and map-valued columns as a difference against the old
+  value and a single-element set is indistinguishable from a scalar on the wire.
+  A consumer that needs whole rows keeps its own cache keyed by `update.uuid`,
+  seeded from `session.initialUpdates`, and applies `diff` with the column types
+  it knows.
+- **Falling back never quietly widens a filter.** Plain `monitor` cannot evaluate
+  a condition, so against a server that implements neither conditional method a
+  request carrying `whereConditions` fails rather than starting a monitor that
+  would deliver every row as though it matched. `session.method` says which method
+  was used, and `session.resumed` is false whenever the reply is a full snapshot.
+
+### Waiting for a Write to Reach the Dataplane
+
+An OVSDB transaction returning success means the northbound database accepted
+the write, not that anything forwards packets differently yet. `NB_Global`'s
+sequence numbers are how you find out: bump `nb_cfg`, then watch how far it has
+propagated. This is what `ovn-nbctl --wait=sb` and `--wait=hv` do.
+
+```swift
+let portUUID = try await SwiftOVN.createLogicalSwitchPort(port, onSwitch: "my-switch")
+
+// ovn-northd has translated the write into southbound logical flows.
+try await SwiftOVN.waitForNorthd(timeout: .seconds(30))
+
+// Every hypervisor has installed those flows — the dataplane is current.
+// Slower, and a chassis that is down holds it back until the timeout.
+try await SwiftOVN.waitForHypervisors(timeout: .seconds(60))
+
+// Or read the counters directly.
+let global = try await SwiftOVN.getNBGlobal()
+print("nb_cfg \(global?.nb_cfg ?? 0), northd at \(global?.sb_cfg ?? 0), hypervisors at \(global?.hv_cfg ?? 0)")
+```
+
+Both helpers increment `nb_cfg` themselves and return the value the counter
+they watch reached, or throw `OVNManagerError.timeoutError`. Global options are
+changed a key at a time — `updateNBGlobalOptions(_:)` merges rather than
+replaces, because ovn-northd keeps generated state (`svc_monitor_mac`,
+`mac_prefix`) in the same map.
+
 ## Architecture
 
 ### Core Components
@@ -164,19 +255,22 @@ The package includes comprehensive Swift models for:
 - `OVNPortGroup` - Port groups for scalable security-group ACLs
 - `OVNAddressSet` - Named address sets referenced from ACL match strings as `$name`
 - `OVNLoadBalancer` - Load balancing rules
+- `OVNLoadBalancerHealthCheck` - Per-VIP backend health probing
+- `OVNLoadBalancerGroup` - Named sets of load balancers applied to many switches/routers at once
+- `OVNServiceMonitor` - Southbound health probe state, one row per backend
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
 - `OVNDNS` - DNS records served to a logical switch's ports
 - `OVNBFD` - BFD sessions monitoring a static route's or policy's next hop
+- `OVNNBGlobal` / `OVNSBGlobal` - Global configuration, and the `nb_cfg`/`sb_cfg`/`hv_cfg` sync barrier
 
 #### OVS Models
 - `OVSBridge` - Open vSwitch bridges
 - `OVSPort` - Bridge ports
 - `OVSInterface` - Network interfaces
 - `OVSController` - OpenFlow controllers
-- `OVSFlow` - Flow table entries
 - `OVSMirror` - Port mirroring configuration
 - `OVSQoS` - Quality of service policies (the Open_vSwitch `QoS` table, distinct from `OVNQoS`)
 
@@ -241,11 +335,15 @@ By default this connection:
 - moves to another remote when the current one reports that it has stopped being
   the leader.
 
-Reconnection deliberately does not hide the drop. Requests in flight when the
-session ends still fail, and monitors are *restarted* rather than resumed, so a
-`monitorUpdates()` stream ends with `OVNManagerError.monitorInterrupted` and the
-rows have to be re-read (resuming exactly where a monitor left off needs
-`monitor_cond_since`). `isConnected` keeps its meaning — a session is up right
+Every monitor this connection started is re-established on the new session under
+the same ID — a `monitor_cond_since` one from the last transaction ID delivered,
+so the server sends what changed instead of the database again.
+
+Reconnection deliberately does not hide the drop, though. Requests in flight when
+the session ends still fail, and an update stream ends with
+`OVNManagerError.monitorInterrupted`: the changes made while the connection was
+down were delivered to nobody, so a consumer replicating rows has to re-read them
+and take a new stream. `isConnected` keeps its meaning — a session is up right
 now — which with reconnection is a value that flickers; to act on it, observe the
 lifecycle instead:
 
@@ -284,6 +382,47 @@ let SwiftOVN = SwiftOVN(
 )
 ```
 
+### Active/Standby Election with OVSDB Locks
+
+Running more than one instance of a controller against the same database needs
+exactly one of them writing at a time. OVSDB's locks are the supported way to
+arrange that: ownership is per-connection, released when the connection drops,
+and can be stolen by a peer that decides the owner is gone.
+
+```swift
+let connection = OVSDBConnection(socketPath: "/var/run/ovn/ovnnb_db.sock")
+try await connection.connect()
+
+// Subscribe before requesting the lock, or a promotion that lands immediately
+// has nothing watching for it.
+let ownership = connection.lockUpdates()
+
+var isActive = try await connection.lock(id: "my_controller")
+if !isActive {
+    // Queued behind the current owner; promotion arrives as a notification.
+    for try await change in ownership where change.lockID == "my_controller" {
+        isActive = change.kind == .locked
+        break
+    }
+}
+```
+
+Ownership can be taken away at any moment, so a writer should not rely on
+having checked: make the transaction itself conditional on the lock, and
+ovsdb-server aborts it rather than let a demoted writer commit.
+
+```swift
+_ = try await connection.transact(in: OVNDatabase.northbound, operations: [
+    .assert(lock: "my_controller"),
+    .insert(into: "Logical_Switch", row: ["name": .string("ls0")]),
+    .comment("created by my-controller"),
+])
+```
+
+`steal(lockID:)` takes a lock from its current owner (which is told with a
+`stolen` notification), and `unlock(id:)` releases one or withdraws a queued
+request.
+
 ### Building Complex Queries
 
 ```swift
@@ -305,21 +444,22 @@ let acl = OVNACL(
 try await SwiftOVN.createACL(acl)
 ```
 
-### Flow Management with OVS
+### OpenFlow Rules Are Out of Scope
 
-```swift
-// Build OpenFlow rules using the flow builder
-let flow = ovsManager.flowBuilder()
-    .table(0)
-    .priority(1000)
-    .match("in_port=1,dl_type=0x0800")
-    .actions("output:2")
-    .idleTimeout(300)
-    .build()
+`OVSManaging` covers the `Open_vSwitch` *database*. Installing, dumping and
+deleting OpenFlow rules is OpenFlow — a separate protocol spoken to
+`ovs-vswitchd` over its own channel, not reachable through the database socket.
+So there is no `getFlows`/`addFlow`/`OVSFlowBuilder` here; use `ovs-ofctl` or a
+dedicated OpenFlow client for flows.
 
-// Note: Flow operations typically require ovs-ofctl commands
-// This package focuses on OVSDB operations
-```
+What *is* here is the database side of OpenFlow configuration:
+`OVSBridge.protocols` selects the versions a bridge speaks, and `OVSController`
+plus `createController(_:onBridge:)` point it at a controller.
+
+> Versions before this change did declare those five methods. They could not
+> work, and `getFlows` returned `[]` — which a caller could not tell apart from
+> a bridge with no flows — so they were removed rather than left to fail at
+> runtime.
 
 ## Error Handling
 

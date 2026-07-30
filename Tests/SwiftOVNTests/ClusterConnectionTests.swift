@@ -613,6 +613,46 @@ final class ClusterConnectionTests {
         try await connection.disconnect()
     }
 
+    @Test("A conditional monitor is resumed from its last transaction id")
+    func conditionalMonitorIsResumedFromItsLastTransactionId() async throws {
+        // The point of restarting a `monitor_cond_since` monitor with `since`:
+        // the alternative is the server re-sending an entire Southbound database
+        // on every leader election.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let session = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+        #expect(session.method == .monitorCondSince)
+        // The first request has nothing to resume from, so it asks from zero.
+        #expect(server.monitors == [
+            ClusterStubServer.RecordedMonitor(
+                database: Self.database,
+                monitorId: "flows",
+                since: OVSDBMonitorMethod.initialTransactionId
+            )
+        ])
+
+        await dropSessions(of: server)
+
+        #expect(await eventually { server.monitors.count == 2 })
+        #expect(server.monitors.last?.since == ClusterStubServer.transactionId,
+                "Expected the reconnect to resume, saw \(server.monitors)")
+        // And the resumed monitor keeps its identity, so the caller's handle to
+        // it still works.
+        #expect(await connection.monitorMethod(forMonitor: "flows") == .monitorCondSince)
+
+        try await connection.disconnect()
+    }
+
     @Test("A stopped monitor is not restarted")
     func stoppedMonitorIsNotRestarted() async throws {
         let server = try await startServer()
@@ -738,6 +778,8 @@ final class ClusterStubServer: @unchecked Sendable {
     struct RecordedMonitor: Sendable, Equatable {
         let database: String
         let monitorId: String
+        /// The `monitor_cond_since` resume point, nil for the other methods.
+        var since: String?
     }
 
     private let lock = NSLock()
@@ -896,6 +938,8 @@ final class ClusterStubServer: @unchecked Sendable {
             write(["id": id, "result": [database, "_Server"], "error": NSNull()], to: channel)
         case "monitor":
             respondToMonitor(params: params, id: id, on: channel)
+        case "monitor_cond_since":
+            respondToMonitorCondSince(params: params, id: id, on: channel)
         case "never_answered":
             // Deliberately no reply: lets a test hold a request in flight.
             break
@@ -903,6 +947,31 @@ final class ClusterStubServer: @unchecked Sendable {
             write(["id": id, "result": [String: Any](), "error": NSNull()], to: channel)
         }
     }
+
+    /// `[<db>, <monitor-id>, <requests>, <last-txn-id>]` in, `[found,
+    /// last-txn-id, table-updates2]` out. The resume point is recorded rather
+    /// than acted on, so a test can assert what the client asked to resume from.
+    private func respondToMonitorCondSince(params: [Any], id: Any, on channel: Channel) {
+        let requestedDatabase = params.first as? String ?? ""
+        let monitorId = params.dropFirst().first as? String ?? ""
+        let since = params.count > 3 ? params[3] as? String : nil
+        let found = since != nil && since != "00000000-0000-0000-0000-000000000000"
+
+        lock.withLock {
+            recordedMonitors.append(
+                RecordedMonitor(database: requestedDatabase, monitorId: monitorId, since: since)
+            )
+        }
+        write([
+            "id": id,
+            "result": [found, Self.transactionId, [String: Any]()] as [Any],
+            "error": NSNull()
+        ], to: channel)
+    }
+
+    /// The transaction id this stub reports as its latest, i.e. the point a
+    /// reconnect should resume from.
+    static let transactionId = "6c6ee2f0-0000-0000-0000-000000000001"
 
     private func respondToMonitor(params: [Any], id: Any, on channel: Channel) {
         let requestedDatabase = params.first as? String ?? ""
