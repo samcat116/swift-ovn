@@ -120,6 +120,16 @@ public protocol OVNManaging: Sendable {
     func deletePortGroup(uuid: String) async throws(OVNManagerError)
     func deletePortGroup(named name: String) async throws(OVNManagerError)
 
+    // Address Set Operations
+    func getAddressSets() async throws(OVNManagerError) -> [OVNAddressSet]
+    func getAddressSet(named name: String) async throws(OVNManagerError) -> OVNAddressSet?
+    func createAddressSet(_ addressSet: OVNAddressSet) async throws(OVNManagerError) -> String
+    func updateAddressSet(uuid: String, _ addressSet: OVNAddressSet) async throws(OVNManagerError)
+    func addAddresses(_ addresses: [String], toAddressSet name: String) async throws(OVNManagerError)
+    func removeAddresses(_ addresses: [String], fromAddressSet name: String) async throws(OVNManagerError)
+    func deleteAddressSet(uuid: String) async throws(OVNManagerError)
+    func deleteAddressSet(named name: String) async throws(OVNManagerError)
+
     // Load Balancer Operations
     func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer]
     func getLoadBalancer(named name: String) async throws(OVNManagerError) -> OVNLoadBalancer?
@@ -159,6 +169,21 @@ public protocol OVNManaging: Sendable {
     func deleteDNS(uuid: String) async throws(OVNManagerError)
     func attachDNS(uuid: String, toSwitch switchName: String) async throws(OVNManagerError)
     func detachDNS(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError)
+
+    // Meter Operations
+    func getMeters() async throws(OVNManagerError) -> [OVNMeter]
+    func getMeter(named name: String) async throws(OVNManagerError) -> OVNMeter?
+    func createMeter(_ meter: OVNMeter, withBands bands: [OVNMeterBand]) async throws(OVNManagerError) -> String
+    func createMeter(_ meter: OVNMeter, withBand band: OVNMeterBand) async throws(OVNManagerError) -> String
+    func updateMeter(uuid: String, _ meter: OVNMeter) async throws(OVNManagerError)
+    func deleteMeter(uuid: String) async throws(OVNManagerError)
+    func deleteMeter(named name: String) async throws(OVNManagerError)
+
+    // Meter Band Operations
+    func getMeterBands() async throws(OVNManagerError) -> [OVNMeterBand]
+    func createMeterBand(_ band: OVNMeterBand, onMeter meterName: String) async throws(OVNManagerError) -> String
+    func updateMeterBand(uuid: String, _ band: OVNMeterBand) async throws(OVNManagerError)
+    func deleteMeterBand(uuid: String) async throws(OVNManagerError)
 
     // DHCP Operations
     func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions]
@@ -206,6 +231,7 @@ public enum OVNTable {
     public static let haChassisGroup = "HA_Chassis_Group"
     public static let acl = "ACL"
     public static let portGroup = "Port_Group"
+    public static let addressSet = "Address_Set"
     public static let loadBalancer = "Load_Balancer"
     public static let nat = "NAT"
     public static let dhcpOptions = "DHCP_Options"
@@ -214,6 +240,8 @@ public enum OVNTable {
     public static let qos = "QoS"
     public static let bfd = "BFD"
     public static let dns = "DNS"
+    public static let meter = "Meter"
+    public static let meterBand = "Meter_Band"
 
     // Southbound tables
     public static let chassis = "Chassis"
