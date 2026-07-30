@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 import NIO
 import NIOPosix
 import Logging
@@ -8,19 +9,20 @@ import Logging
 /// server accepts a real TCP connection from the client and answers `echo`
 /// and `list_dbs`, exercising the same pipeline used against a remote
 /// ovsdb-server (`tcp:<host>:6641/6642`).
-final class TCPTransportTests: XCTestCase {
+///
+/// A `final class` rather than a `struct` so the per-test event loop group can
+/// be torn down in `deinit`, the way `tearDown` used to.
+@Suite("TCP transport")
+final class TCPTransportTests {
 
-    private var group: MultiThreadedEventLoopGroup!
+    private let group: MultiThreadedEventLoopGroup
 
-    override func setUp() {
-        super.setUp()
+    init() {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    override func tearDown() {
+    deinit {
         try? group.syncShutdownGracefully()
-        group = nil
-        super.tearDown()
     }
 
     private func startServer() async throws -> Channel {
@@ -33,33 +35,35 @@ final class TCPTransportTests: XCTestCase {
             .get()
     }
 
-    func testJSONRPCClientOverTCP() async throws {
-        // No explicit server cleanup: tearDown's group shutdown closes it.
+    @Test("A JSON-RPC client talks to a server over TCP")
+    func jsonRPCClientOverTCP() async throws {
+        // No explicit server cleanup: deinit's group shutdown closes it.
         let server = try await startServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let client = JSONRPCClient(
             endpoint: .tcp(host: "127.0.0.1", port: port),
             eventLoopGroup: group
         )
         try await client.connect()
-        XCTAssertTrue(client.isConnected)
+        #expect(client.isConnected)
 
         let echoed = try await client.echo()
-        XCTAssertEqual(echoed, ["echo"])
+        #expect(echoed == ["echo"])
 
         let databases = try await client.listDatabases()
-        XCTAssertEqual(databases, ["OVN_Northbound", "OVN_Southbound"])
+        #expect(databases == ["OVN_Northbound", "OVN_Southbound"])
 
         try await client.disconnect()
-        XCTAssertFalse(client.isConnected)
+        #expect(!client.isConnected)
     }
 
-    func testOVSDBConnectionOverTCP() async throws {
+    @Test("An OVSDB connection handshakes over TCP")
+    func ovsdbConnectionOverTCP() async throws {
         // OVSDBConnection.connect() performs the initial echo handshake, so a
         // successful connect proves the full request/response path over TCP.
         let server = try await startServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let connection = OVSDBConnection(
             endpoint: .tcp(host: "127.0.0.1", port: port),
@@ -67,13 +71,14 @@ final class TCPTransportTests: XCTestCase {
         )
         try await connection.connect()
         let isConnected = await connection.isConnected
-        XCTAssertTrue(isConnected)
+        #expect(isConnected)
         try await connection.disconnect()
     }
 
-    func testNotificationsSubscribedAfterDisconnectAreFinished() async throws {
+    @Test("Notifications subscribed after a disconnect are already finished")
+    func notificationsSubscribedAfterDisconnectAreFinished() async throws {
         let server = try await startServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let connection = OVSDBSocketConnection(
             endpoint: .tcp(host: "127.0.0.1", port: port),
@@ -98,11 +103,11 @@ final class TCPTransportTests: XCTestCase {
             taskGroup.cancelAll()
             return first
         }
-        XCTAssertTrue(finished, "A stream created after disconnect must already be finished")
+        #expect(finished, "A stream created after disconnect must already be finished")
 
         // Reconnecting revives the hub, so later subscribers are live again.
         try await connection.connect().get()
-        XCTAssertTrue(connection.isConnectionActive)
+        #expect(connection.isConnectionActive)
         try await connection.disconnect().get()
     }
 
@@ -110,7 +115,8 @@ final class TCPTransportTests: XCTestCase {
     /// instead of decoding them to a `String` and concatenating a newline, so
     /// this pins what actually reaches the wire: the encoded request, then the
     /// trailing newline.
-    func testSendWritesTheEncodedRequestFollowedByANewline() async throws {
+    @Test("send writes the encoded request followed by a newline")
+    func sendWritesTheEncodedRequestFollowedByANewline() async throws {
         let recorded = group.next().makePromise(of: [UInt8].self)
         let server = try await ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -119,7 +125,7 @@ final class TCPTransportTests: XCTestCase {
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let connection = OVSDBSocketConnection(
             endpoint: .tcp(host: "127.0.0.1", port: port),
@@ -131,36 +137,32 @@ final class TCPTransportTests: XCTestCase {
         ).get()
 
         let bytes = try await recorded.futureResult.get()
-        XCTAssertEqual(bytes.last, UInt8(ascii: "\n"))
+        #expect(bytes.last == UInt8(ascii: "\n"))
 
-        let request = try XCTUnwrap(
+        let request = try #require(
             JSONSerialization.jsonObject(with: Data(bytes.dropLast())) as? [String: Any]
         )
-        XCTAssertEqual(request["method"] as? String, "list_dbs")
-        XCTAssertEqual(request["id"] as? Int, 1)
+        #expect(request["method"] as? String == "list_dbs")
+        #expect(request["id"] as? Int == 1)
 
         try await connection.disconnect().get()
     }
 
-    func testConnectFailsWhenNothingIsListening() async throws {
+    @Test("Connecting fails when nothing is listening")
+    func connectFailsWhenNothingIsListening() async throws {
         // Bind and immediately close to obtain a port with no listener.
         let server = try await startServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
         try await server.close()
 
         let client = JSONRPCClient(
             endpoint: .tcp(host: "127.0.0.1", port: port),
             eventLoopGroup: group
         )
-        do {
+        let error = await #expect(throws: OVNManagerError.self) {
             try await client.connect()
-            XCTFail("Expected connection to fail")
-        } catch {
-            guard case OVNManagerError.connectionFailed = error else {
-                XCTFail("Expected connectionFailed, got \(error)")
-                return
-            }
         }
+        #expect(error?.errorCase == .connectionFailed)
     }
 }
 

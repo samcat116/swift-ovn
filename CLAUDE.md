@@ -130,9 +130,20 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Real-time monitoring with `monitor_cond` method
 
 ### Testing Approach
-- Uses XCTest framework
-- Tests located in `/Tests/SwiftOVNTests/`
-- Currently imports `@testable import OVNManager` (note: may need updating to `@testable import SwiftOVN`)
+- Uses Swift Testing (`import Testing`, `@Suite`/`@Test`/`#expect`/`#require`).
+  There is no XCTest left in the target — do not add any back.
+- Tests located in `/Tests/SwiftOVNTests/`, importing `@testable import SwiftOVN`
+- Suites run in parallel by default, so nothing may share mutable global state.
+  A suite needing per-test setup/teardown is a `final class` with `init`/`deinit`
+  (`TCPTransportTests`, `TLSTransportTests`, which own an event loop group);
+  everything else is a `struct`.
+- `OVNManagerError` is not `Equatable`, so `#expect(throws:)` cannot name a
+  specific case. Compare `errorCase` (see `TestSupport.swift`) instead:
+  `#expect(error?.errorCase == .timeoutError)`.
+- Prefer `@Test(arguments:)` over a loop or near-duplicate test bodies. The
+  framing cases in `OVNManagerTests.swift` show the pattern: a `FramingCase`
+  value conforming to `CustomTestStringConvertible` so each case gets a
+  readable label, with the per-case rationale as a comment on the case.
 
 ### Platform Support
 - Minimum Swift version: 5.9

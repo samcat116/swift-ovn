@@ -1,5 +1,6 @@
 #if TLS
-import XCTest
+import Foundation
+import Testing
 import NIO
 import NIOPosix
 import NIOSSL
@@ -10,29 +11,30 @@ import Logging
 /// server using a self-signed certificate whose SANs cover `localhost` and
 /// `127.0.0.1`. Also verifies that `connect()` reflects the TLS handshake
 /// outcome instead of resolving at TCP establishment.
-final class TLSTransportTests: XCTestCase {
+///
+/// A `final class` rather than a `struct` so the per-test event loop group and
+/// the temporary CA file can be torn down in `deinit`.
+@Suite("TLS transport")
+final class TLSTransportTests {
 
-    private var group: MultiThreadedEventLoopGroup!
-    private var caFilePath: String!
+    private let group: MultiThreadedEventLoopGroup
+    /// The client API takes the CA as a PEM file path.
+    private let caFilePath: String
 
-    override func setUpWithError() throws {
-        try super.setUpWithError()
-        group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        // The client API takes the CA as a PEM file path.
+    init() throws {
+        // Written before the group exists: a throw here leaves nothing to tear
+        // down, and `deinit` does not run for an initializer that threw before
+        // every property was set.
         let caFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftovn-test-ca-\(UUID().uuidString).pem")
         try Self.certificatePEM.write(to: caFile, atomically: true, encoding: .utf8)
         caFilePath = caFile.path
+        group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    override func tearDown() {
+    deinit {
         try? group.syncShutdownGracefully()
-        group = nil
-        if let caFilePath {
-            try? FileManager.default.removeItem(atPath: caFilePath)
-        }
-        caFilePath = nil
-        super.tearDown()
+        try? FileManager.default.removeItem(atPath: caFilePath)
     }
 
     private func startTLSServer() async throws -> Channel {
@@ -56,11 +58,12 @@ final class TLSTransportTests: XCTestCase {
             .get()
     }
 
-    func testHandshakeAndEchoWithTrustedCA() async throws {
+    @Test("The handshake succeeds and echo works against a trusted CA")
+    func handshakeAndEchoWithTrustedCA() async throws {
         // The client connects by IP with no serverHostname, so a passing
         // handshake also proves NIOSSL's IP-SAN identity verification path.
         let server = try await startTLSServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let tls = OVSDBTLSConfiguration(caCertificatePath: caFilePath)
         let client = JSONRPCClient(
@@ -68,40 +71,37 @@ final class TLSTransportTests: XCTestCase {
             eventLoopGroup: group
         )
         try await client.connect()
-        XCTAssertTrue(client.isConnected)
+        #expect(client.isConnected)
 
         let echoed = try await client.echo()
-        XCTAssertEqual(echoed, ["echo"])
+        #expect(echoed == ["echo"])
 
         try await client.disconnect()
     }
 
-    func testConnectFailsWhenCertificateIsUntrusted() async throws {
+    @Test("Connecting fails when the certificate is untrusted")
+    func connectFailsWhenCertificateIsUntrusted() async throws {
         // Without our CA in the trust roots the handshake must fail, and that
         // failure must surface from connect() itself — not from a later
         // request — since verification happens after the TCP connect.
         let server = try await startTLSServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let client = JSONRPCClient(
             endpoint: .ssl(host: "127.0.0.1", port: port, tls: OVSDBTLSConfiguration()),
             eventLoopGroup: group
         )
-        do {
+        let error = await #expect(throws: OVNManagerError.self) {
             try await client.connect()
-            XCTFail("Expected TLS handshake to fail against an untrusted certificate")
-        } catch {
-            guard case OVNManagerError.connectionFailed = error else {
-                XCTFail("Expected connectionFailed, got \(error)")
-                return
-            }
         }
-        XCTAssertFalse(client.isConnected)
+        #expect(error?.errorCase == .connectionFailed)
+        #expect(!client.isConnected)
     }
 
-    func testDisabledVerificationConnects() async throws {
+    @Test("Disabling verification connects")
+    func disabledVerificationConnects() async throws {
         let server = try await startTLSServer()
-        let port = try XCTUnwrap(server.localAddress?.port)
+        let port = try #require(server.localAddress?.port)
 
         let tls = OVSDBTLSConfiguration(verifiesServerCertificate: false)
         let client = JSONRPCClient(
@@ -110,7 +110,7 @@ final class TLSTransportTests: XCTestCase {
         )
         try await client.connect()
         let echoed = try await client.echo()
-        XCTAssertEqual(echoed, ["echo"])
+        #expect(echoed == ["echo"])
         try await client.disconnect()
     }
 
