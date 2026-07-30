@@ -155,6 +155,14 @@ Three files genuinely need full Foundation and keep a plain `import Foundation`:
 Tests keep `import Foundation`; XCTest links Foundation regardless, so there is
 nothing to gain there.
 
+Measured on Linux (Swift 6.2, release), the subset import buys nothing *yet*:
+object code and the linked `BasicUsage` binary are both within 0.01% of the
+all-Foundation build, and recompile time is inside run-to-run noise. That is
+expected — as long as those three files import Foundation, the module links the
+whole framework, and on Linux Foundation re-exports FoundationEssentials
+anyway. The payoff only arrives if the last three imports go, so re-measure
+before assuming this saves anything.
+
 ### Testing Approach
 - Uses XCTest framework
 - Tests located in `/Tests/SwiftOVNTests/`
