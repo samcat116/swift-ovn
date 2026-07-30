@@ -55,6 +55,18 @@ final class OVSDBMonitorBroadcaster: Sendable {
     private let bufferSize: Int
     private let logger: Logger
     private let state = Mutex(State())
+    /// Serializes a whole `publish` against a whole `finishAll`.
+    ///
+    /// Both walk the subscriber table outside the `state` lock — they have to,
+    /// because `yield`/`finish` can run `onTermination`, which takes it. Without
+    /// this, `finishAll` could snapshot a lagging subscriber's `pendingDrops`
+    /// while `publish` was between discarding a batch and recording it, then
+    /// finish that subscriber's stream cleanly: the consumer would be told its
+    /// view was complete when a batch had just been thrown away.
+    ///
+    /// Held across `yield`, which is safe: `yield` enqueues and resumes, it does
+    /// not run consumer code, and `onTermination` takes only `state`.
+    private let delivery = Mutex(())
 
     init(bufferSize: Int = OVSDBSocketConnection.notificationBufferSize, logger: Logger? = nil) {
         // A zero-length buffer would report the value just handed to `yield` as
@@ -96,6 +108,10 @@ final class OVSDBMonitorBroadcaster: Sendable {
     /// pipeline task, so calls are serialized and the per-subscriber drop counts
     /// below stay consistent.
     func publish(_ event: Event) {
+        delivery.withLock { _ in deliver(event) }
+    }
+
+    private func deliver(_ event: Event) {
         // Snapshot under the lock, then yield outside it: `yield` can finish a
         // stream, whose `onTermination` reaches back into this lock.
         let entries = state.withLock { Array($0.subscribers) }
@@ -144,6 +160,10 @@ final class OVSDBMonitorBroadcaster: Sendable {
     /// Finishes every subscription and refuses later ones, so a stream taken out
     /// after the connection is gone comes back finished instead of hanging.
     func finishAll() {
+        delivery.withLock { _ in finishAllLocked() }
+    }
+
+    private func finishAllLocked() {
         let entries = state.withLock { state -> [Subscriber] in
             state.isClosed = true
             let entries = Array(state.subscribers.values)

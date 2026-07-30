@@ -706,6 +706,51 @@ struct ConditionalMonitoringTests {
         #expect(received.map(\.2) == [nil, nil, "txn-1"])
     }
 
+    /// Regression: `updateMonitorConditions` changed the conditions on the
+    /// server but not the request stored for re-establishment, so the first
+    /// reconnect silently put the monitor back on the conditions it was
+    /// *created* with — and a `monitor_cond_since` resume then computed its
+    /// delta under conditions the consumer's rows were never built under.
+    @Test("A condition change survives a reconnect")
+    func conditionChangeSurvivesReconnect() async throws {
+        let transport = MonitorStubTransport()
+        let connection = OVSDBConnection(transport: transport)
+        try await connection.connect()
+
+        _ = try await connection.startConditionalMonitoring(
+            database: "OVN_Southbound",
+            tables: ["Port_Binding": OVSDBMonitorRequest(
+                whereConditions: [OVSDBCondition(column: "datapath", function: "==", value: .string("dp-1"))]
+            )],
+            monitorId: "mon-1"
+        )
+
+        try await connection.updateMonitorConditions(
+            monitorId: "mon-1",
+            conditions: ["Port_Binding": [
+                OVSDBCondition(column: "datapath", function: "==", value: .string("dp-2"))
+            ]]
+        )
+
+        transport.reconnect()
+
+        // Bounded, so a re-establishment that never happens fails this test
+        // rather than hanging the run.
+        var restarts: [MonitorStubTransport.Request] = []
+        for _ in 0..<400 {
+            restarts = transport.requests.filter { $0.method == "monitor_cond_since" }
+            if restarts.count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        let restart = try #require(restarts.count >= 2 ? restarts[1] : nil, "The monitor was never re-established")
+        let requested = try #require(restart.params.count > 2 ? restart.params[2].objectValue : nil)
+        let portBinding = try #require(requested["Port_Binding"]?.objectValue)
+        let conditions = try #require(portBinding["where"]?.arrayValue)
+
+        #expect(conditions == [.array([.string("datapath"), .string("=="), .string("dp-2")])])
+    }
+
     @Test("Disconnecting forgets the negotiated method")
     func disconnectingForgetsTheNegotiatedMethod() async throws {
         let transport = MonitorStubTransport(unsupportedMethods: ["monitor_cond_since"])
@@ -908,6 +953,15 @@ private final class MonitorStubTransport: OVSDBTransport {
         let subscribers = state.withLock { $0.subscribers }
         for subscriber in subscribers {
             subscriber.yield(.notification(notification))
+        }
+    }
+
+    /// Reports the gap a recoverable drop leaves, which is what makes the
+    /// connection re-establish its monitors on the new session.
+    func reconnect() {
+        let subscribers = state.withLock { $0.subscribers }
+        for subscriber in subscribers {
+            subscriber.yield(.reconnected)
         }
     }
 

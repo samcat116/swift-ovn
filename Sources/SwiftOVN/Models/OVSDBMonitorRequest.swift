@@ -42,4 +42,10 @@ public struct OVSDBMonitorRequest: Codable, Sendable {
     func droppingConditions() -> OVSDBMonitorRequest {
         return OVSDBMonitorRequest(columns: columns, select: select)
     }
+
+    /// The same request with different conditions, for recording what a
+    /// `monitor_cond_change` left the monitor running with.
+    func withConditions(_ conditions: [OVSDBCondition]) -> OVSDBMonitorRequest {
+        return OVSDBMonitorRequest(columns: columns, select: select, whereConditions: conditions)
+    }
 }
