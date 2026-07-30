@@ -27,7 +27,6 @@ enum OVSDBRowDecoder {
     static func decode<T: Decodable>(_ type: T.Type, from row: OVSDBRow) throws -> T {
         return try T(from: OVSDBValueDecoder(value: .object(row), codingPath: []))
     }
-
 }
 
 // MARK: - Wire-form helpers

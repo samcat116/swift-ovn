@@ -169,13 +169,19 @@ nothing to gain there.
 **Foundation is still linked, via `NIOFoundationCompat`.** That dependency is
 what lets `OVSDBConnectionCore` code JSON straight into a `ByteBuffer` instead
 of round-tripping through `Data`, and it imports Foundation itself, so the
-subset imports above currently buy no binary-size win — measured on Linux
-(Swift 6.2, release) they are within 0.7% of the all-Foundation build, and
-recompile time is inside run-to-run noise. The size argument only cashes out if
-`NIOFoundationCompat` goes too: a build with no Foundation anywhere in the graph
-linked a `--static-swift-stdlib` `BasicUsage` at 55.8 MB against 104.1 MB, a 46%
-cut. That trade — one `Data` copy per frame against half the static binary — has
-not been taken. Re-measure before assuming either side of it.
+subset imports above buy no binary-size win on their own. Measured on Linux
+(Swift 6.2, release) against the same tree with plain `import Foundation`:
+object code and the `BasicUsage` binary both land within 0.01%, `ldd` shows the
+same four Foundation libraries either way, and recompile time is inside
+run-to-run noise.
+
+The size argument only cashes out if `NIOFoundationCompat` goes too. Measured on
+this branch before the #51 merge, with no Foundation anywhere in the graph, a
+`--static-swift-stdlib` `BasicUsage` linked at 55.8 MB against 104.1 MB — a 46%
+cut, though only ~70 KB of it with the dynamic stdlib. That trade — one `Data`
+copy per frame against half the static binary — was considered and **not**
+taken: SwiftOVN is a library, its consumers choose the linking mode, and the
+zero-copy frame path is deliberate. Re-measure before revisiting either side.
 
 ### Testing Approach
 - Uses XCTest framework
