@@ -1,0 +1,27 @@
+.github/workflows/ci.yml
+  s_af5a7fd833917f::t_167df2268f3aa3 36
+Tests/SwiftOVNTests/ClusterConnectionTests.swift
+  s_af5a7fd833917f::t_28df3003290271 470-477
+  s_af5a7fd833917f::t_ee026c21ed269a 478
+CLAUDE.md
+  s_af5a7fd833917f::t_846a912c1676a6 216-227
+Sources/SwiftOVN/Core/OVSDBConnectionCore.swift
+  s_af5a7fd833917f::t_3f3ec776321c86 268-272
+  s_af5a7fd833917f::t_69508d2479f5e8 257-267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "e38b5ccdde3769e67787c9f8efc1d682ea64ef70",
+  "prompts": {},
+  "sessions": {
+    "s_af5a7fd833917f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6f73b621-04dd-4d62-b38a-a8fb2bc426b0",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
