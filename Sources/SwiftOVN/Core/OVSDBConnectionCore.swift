@@ -254,6 +254,22 @@ actor OVSDBConnectionCore {
             }
 
             // A session is up, and vetted if leader-only mode asked for it.
+            //
+            // Checked here and not only at the top of the pass, because
+            // `disconnect()` closes the live session and this one did not exist
+            // when it looked: `activate` installs it part-way through
+            // `openSession`, so a disconnect landing in that window finds
+            // nothing to close and cancelling this task does not help either
+            // (`openSession` waits on an `EventLoopPromise`, and
+            // `EventLoopFuture.get()` ignores cancellation). Serving the session
+            // anyway would park `awaitSessionEnd()` on a channel nobody will
+            // ever close, while `disconnect()` waits on this task — both
+            // forever. Closing it here is what breaks that.
+            if let stop = stoppingReason() {
+                await endSession()
+                return stop
+            }
+
             sessionsThisRun += 1
             next = (servedIndex + 1) % remotes.count
             if sessionsThisRun > 1 {

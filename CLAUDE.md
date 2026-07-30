@@ -213,6 +213,18 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
   of silent backoff. Only sessions that were once up are re-established. A
   `connect()` issued *while* a reconnect is in flight waits for that reconnect
   rather than starting a second supervisor.
+- **A session opened while stopping has to be closed by the supervisor.**
+  `disconnect()` closes the *live* session, and `activate` only installs one
+  part-way through `openSession`; a disconnect landing in that window finds
+  nothing to close, and cancelling the supervisor does not reach it either
+  (`openSession` waits on an `EventLoopPromise`, and `EventLoopFuture.get()`
+  ignores cancellation). Without the `stoppingReason()` check that follows a
+  successful `openSession`, the supervisor went on to serve that session, parked
+  in `awaitSessionEnd()` on a channel nobody would ever close, while
+  `disconnect()` waited on the supervisor — both forever, with no failure
+  output. It presents as the whole test run hanging with unrelated tests left
+  unfinished, and it needs a loaded machine to hit: `swift test` under two CPUs
+  reproduced it in roughly a third of runs where an idle machine never did.
 - **Two promises, deliberately.** `sessionReady` is per session (succeeded when
   the writer is installed, failed by `tearDown`); `activation` is per `connect()`
   and only the supervisor completes it. Failing `activation` from `tearDown`

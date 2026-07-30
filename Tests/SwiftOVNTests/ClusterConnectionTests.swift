@@ -467,6 +467,15 @@ final class ClusterConnectionTests {
         await connection.disconnect()
     }
 
+    // There is deliberately no test for `disconnect()` racing a reconnect, the
+    // hang `superviseSessions` now guards against by closing a session it opened
+    // while stopping. The window is the scheduling gap between the supervisor
+    // connecting and the read loop running `activate`, and it only opens under
+    // real load: a test hammering connect / drop / disconnect — serially, and
+    // across eight concurrent tasks — never once reproduced it in isolation,
+    // while the full suite on two CPUs hung in three runs out of ten. A test
+    // that cannot fail on the bug it names is worse than none.
+
     @Test("With reconnection disabled a dropped session stays closed")
     func withReconnectionDisabledADroppedSessionStaysClosed() async throws {
         let server = try await startServer()
