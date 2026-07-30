@@ -1,0 +1,41 @@
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_67eb8686cfc5bc::t_7e0523a313fd15 337-338,342-343,345
+  s_67eb8686cfc5bc::t_7eeb6385793584 266,270,272-276,280-281
+  s_67eb8686cfc5bc::t_55508dcc70eb29 301,305,309,314,321
+  s_67eb8686cfc5bc::t_097c32b8428471 288
+  s_67eb8686cfc5bc::t_3bdcc0c1a22ce1 417-443
+  s_80b031a34197a4::t_ddf3396df3ec59 444-445
+Sources/SwiftOVN/Core/OVSDBConnectionCore.swift
+  s_67eb8686cfc5bc::t_08b034c5ac8e8a 546-557
+  s_67eb8686cfc5bc::t_0bc0ffa8e62a09 458-469
+  s_67eb8686cfc5bc::t_29a0f97e6503f0 695-700
+  s_67eb8686cfc5bc::t_a841d2af630a22 701-702
+  s_67eb8686cfc5bc::t_52389510fb0670 172-176
+  s_67eb8686cfc5bc::t_9117a85fad63ed 839
+Sources/SwiftOVN/Core/OVSDBConnectionState.swift
+  s_67eb8686cfc5bc::t_201a0a0ea23759 112-127,130-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "7dd1b36bb32fd42b1d555663006bfd1e00ad0ef1",
+  "prompts": {},
+  "sessions": {
+    "s_67eb8686cfc5bc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab9abb82-b958-481a-9773-01a265d73c6c",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    },
+    "s_80b031a34197a4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "481b08f9-d378-4482-93f3-f6ca8af728c1",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
