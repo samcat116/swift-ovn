@@ -72,6 +72,12 @@ public protocol OVNManaging: Sendable {
     func updateStaticRoute(uuid: String, _ route: OVNLogicalRouterStaticRoute) async throws(OVNManagerError)
     func deleteStaticRoute(uuid: String) async throws(OVNManagerError)
 
+    // Logical Router Policy Operations
+    func getPolicies() async throws(OVNManagerError) -> [OVNLogicalRouterPolicy]
+    func createPolicy(_ policy: OVNLogicalRouterPolicy, onRouter routerName: String) async throws(OVNManagerError) -> String
+    func updatePolicy(uuid: String, _ policy: OVNLogicalRouterPolicy) async throws(OVNManagerError)
+    func deletePolicy(uuid: String) async throws(OVNManagerError)
+
     // Gateway Chassis Operations
     func getGatewayChassis() async throws(OVNManagerError) -> [OVNGatewayChassis]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createGatewayChassis(_:onRouterPort:) so the binding is attached to its router port.")
@@ -144,6 +150,12 @@ public protocol OVNManaging: Sendable {
     func updateNATRule(uuid: String, _ nat: OVNNAT) async throws(OVNManagerError)
     func deleteNATRule(uuid: String) async throws(OVNManagerError)
     
+    // QoS Operations (Northbound QoS, not the Open_vSwitch table)
+    func getQoSRules() async throws(OVNManagerError) -> [OVNQoS]
+    func createQoSRule(_ qos: OVNQoS, onSwitch switchName: String) async throws(OVNManagerError) -> String
+    func updateQoSRule(uuid: String, _ qos: OVNQoS) async throws(OVNManagerError)
+    func deleteQoSRule(uuid: String) async throws(OVNManagerError)
+
     // DHCP Operations
     func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions]
     func createDHCPOptions(_ dhcp: OVNDHCPOptions) async throws(OVNManagerError) -> String
@@ -184,6 +196,7 @@ public enum OVNTable {
     public static let logicalRouter = "Logical_Router"
     public static let logicalRouterPort = "Logical_Router_Port"
     public static let logicalRouterStaticRoute = "Logical_Router_Static_Route"
+    public static let logicalRouterPolicy = "Logical_Router_Policy"
     public static let gatewayChassis = "Gateway_Chassis"
     public static let haChassis = "HA_Chassis"
     public static let haChassisGroup = "HA_Chassis_Group"
@@ -193,6 +206,9 @@ public enum OVNTable {
     public static let loadBalancer = "Load_Balancer"
     public static let nat = "NAT"
     public static let dhcpOptions = "DHCP_Options"
+    /// The Northbound `QoS` table (`OVNQoS`), not the identically named
+    /// Open_vSwitch one (`OVSQoS`).
+    public static let qos = "QoS"
     
     // Southbound tables
     public static let chassis = "Chassis"

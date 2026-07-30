@@ -46,8 +46,10 @@ enum OVSDBRowEncoder {
 
         /// Reference-typed columns across the OVN Northbound/Southbound
         /// tables this package writes. Column names are unambiguous across
-        /// those tables (no string-typed column shares a name with a
-        /// reference-typed one).
+        /// those tables with one exception: `output_port` is a plain port-name
+        /// string in `Logical_Router_Static_Route` and a `Logical_Router_Port`
+        /// reference in `Logical_Router_Policy`, so it is table-scoped instead
+        /// — see `ovn(table:)`.
         static let ovn = ColumnHints(
             uuidReferenceColumns: [
                 // Logical_Switch
@@ -59,6 +61,8 @@ enum OVSDBRowEncoder {
                 // Logical_Router_Static_Route (output_port is a plain
                 // port-name string, not a reference)
                 "bfd",
+                // Logical_Router_Policy (weak references to BFD)
+                "bfd_sessions",
                 // Logical_Router_Port
                 "gateway_chassis", "ha_chassis_group",
                 // HA_Chassis_Group (chassis_name in Gateway_Chassis/HA_Chassis
@@ -70,6 +74,22 @@ enum OVSDBRowEncoder {
                 "allowed_ext_ips", "exempted_ext_ips",
             ]
         )
+
+        /// Reference-typed columns that hold only inside one table, because the
+        /// same column name is *not* reference-typed elsewhere in the database
+        /// and the name-keyed hints above cannot tell the two apart.
+        private static let ovnTableScopedReferenceColumns: [String: Set<String>] = [
+            OVNTable.logicalRouterPolicy: ["output_port"],
+        ]
+
+        /// `ovn`, plus the reference columns that only apply within `table`.
+        /// Callers that write a table listed in
+        /// `ovnTableScopedReferenceColumns` must use this instead of `ovn`.
+        static func ovn(table: String) -> ColumnHints {
+            var hints = ovn
+            hints.uuidReferenceColumns.formUnion(ovnTableScopedReferenceColumns[table] ?? [])
+            return hints
+        }
 
         /// Reference-typed columns across the Open_vSwitch tables this
         /// package writes. `QoS.queues` and `Bridge.flow_tables` are

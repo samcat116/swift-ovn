@@ -487,6 +487,91 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted static route: \(uuid)")
     }
 
+    // MARK: - Logical Router Policy Operations
+
+    public func getPolicies() async throws(OVNManagerError) -> [OVNLogicalRouterPolicy] {
+        let rows = try await connection.selectAll(from: OVNTable.logicalRouterPolicy, in: database)
+        return try parseRows(rows, as: OVNLogicalRouterPolicy.self)
+    }
+
+    /// Creates a policy and attaches it to the named logical router
+    /// (Logical_Router.policies) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl lr-policy-add`. Logical_Router_Policy is not a root table, so
+    /// an unreferenced row is garbage-collected when the transaction commits.
+    public func createPolicy(_ policy: OVNLogicalRouterPolicy, onRouter routerName: String) async throws(OVNManagerError) -> String {
+        let routerCondition = OVSDBCondition(column: "name", function: "==", value: .string(routerName))
+
+        guard try await rowUUID(in: OVNTable.logicalRouter, where: routerCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
+        }
+
+        // output_port is a weak reference, so a UUID whose router port is stale
+        // at commit would be dropped from the insert — leaving a reroute policy
+        // with no egress port and no error to show for it.
+        let guardOps = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
+        let attachOps = OVSDBReferenceTransactions.insertAttached(
+            row: try createRow(from: policy, in: OVNTable.logicalRouterPolicy),
+            into: OVNTable.logicalRouterPolicy,
+            uuidName: "new_policy",
+            parentTable: OVNTable.logicalRouter,
+            parentColumn: "policies",
+            parentCondition: routerCondition
+        )
+
+        let results = try await connection.transact(in: database, operations: guardOps + attachOps)
+
+        // attachOps is wait(router) → insert → mutate, so the insert's result
+        // sits one past the guards.
+        let uuidValue = try OVSDBConnection.uuid(fromInsertResults: results, at: guardOps.count + 1)
+
+        logger.info("Created router policy: \(policy.priority) \(policy.match) on router: \(routerName)")
+        return uuidValue
+    }
+
+    public func updatePolicy(uuid: String, _ policy: OVNLogicalRouterPolicy) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: policy, in: OVNTable.logicalRouterPolicy)
+
+        // A full-row update rewrites the weak-reference output_port, so guard it
+        // exactly as create does.
+        var operations = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
+        let updateIndex = operations.count
+        operations.append(OVSDBOperation(
+            op: "update",
+            table: OVNTable.logicalRouterPolicy,
+            whereConditions: [condition],
+            row: row
+        ))
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count > updateIndex,
+              case .object(let updateResult) = results[updateIndex],
+              case .number(let count)? = updateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+        if Int(count) == 0 {
+            throw OVNManagerError.operationFailed("Router policy not found: \(uuid)")
+        }
+
+        logger.info("Updated router policy: \(uuid)")
+    }
+
+    public func deletePolicy(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.logicalRouterPolicy,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalRouter, column: "policies")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Router policy not found: \(uuid)")
+        }
+
+        logger.info("Deleted router policy: \(uuid)")
+    }
+
     // MARK: - Gateway Chassis Operations
 
     public func getGatewayChassis() async throws(OVNManagerError) -> [OVNGatewayChassis] {
@@ -1221,8 +1306,71 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted NAT rule: \(uuid)")
     }
     
+    // MARK: - QoS Operations
+
+    /// Rows of the Northbound `QoS` table. Unrelated to `OVSManager`'s
+    /// `getQoSPolicies()`, which reads the Open_vSwitch table of the same name.
+    public func getQoSRules() async throws(OVNManagerError) -> [OVNQoS] {
+        let rows = try await connection.selectAll(from: OVNTable.qos, in: database)
+        return try parseRows(rows, as: OVNQoS.self)
+    }
+
+    /// Creates a QoS rule and attaches it to the named logical switch
+    /// (Logical_Switch.qos_rules) in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl qos-add`. QoS is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits — there is deliberately
+    /// no unattached create.
+    public func createQoSRule(_ qos: OVNQoS, onSwitch switchName: String) async throws(OVNManagerError) -> String {
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.qos,
+            in: database,
+            row: try createRow(from: qos),
+            uuidName: "new_qos",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "qos_rules",
+            parentCondition: switchCondition
+        )
+
+        logger.info("Created QoS rule on switch: \(switchName)")
+        return uuidValue
+    }
+
+    public func updateQoSRule(uuid: String, _ qos: OVNQoS) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: qos)
+
+        let count = try await connection.update(table: OVNTable.qos, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("QoS rule not found: \(uuid)")
+        }
+
+        logger.info("Updated QoS rule: \(uuid)")
+    }
+
+    public func deleteQoSRule(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.qos,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.logicalSwitch, column: "qos_rules")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("QoS rule not found: \(uuid)")
+        }
+
+        logger.info("Deleted QoS rule: \(uuid)")
+    }
+
     // MARK: - DHCP Operations
-    
+
     public func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions] {
         let rows = try await connection.selectAll(from: OVNTable.dhcpOptions, in: database)
         return try parseRows(rows, as: OVNDHCPOptions.self)
@@ -1523,24 +1671,30 @@ private extension OVNManager {
         }
     }
 
-    /// Builds a `wait` op per port UUID that aborts the enclosing transaction
-    /// unless that `Logical_Switch_Port` still exists at commit. `Port_Group`'s
-    /// `ports` is a weak reference set, so ovsdb-server would otherwise silently
-    /// drop a stale UUID and report the write as succeeding. Used by any
-    /// transaction that writes the `ports` column (create, update, mutate).
-    func portExistenceWaitOps(_ portUUIDs: [String]) -> [OVSDBOperation] {
-        portUUIDs.map { uuid in
-            let portCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+    /// Builds a `wait` op per UUID that aborts the enclosing transaction unless
+    /// a row with that UUID still exists in `table` at commit. Every weak
+    /// reference column needs this guard: ovsdb-server silently drops a stale
+    /// UUID from one and reports the write as succeeding.
+    func rowExistenceWaitOps(_ uuids: [String], in table: String) -> [OVSDBOperation] {
+        uuids.map { uuid in
+            let rowCondition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
             return OVSDBOperation(
                 op: "wait",
-                table: OVNTable.logicalSwitchPort,
-                whereConditions: [portCondition],
+                table: table,
+                whereConditions: [rowCondition],
                 columns: ["_uuid"],
                 rows: [],
                 until: "!=",
                 timeout: 0
             )
         }
+    }
+
+    /// The `Logical_Switch_Port` guards for `Port_Group.ports`, which is a weak
+    /// reference set. Used by any transaction that writes that column (create,
+    /// update, mutate).
+    func portExistenceWaitOps(_ portUUIDs: [String]) -> [OVSDBOperation] {
+        rowExistenceWaitOps(portUUIDs, in: OVNTable.logicalSwitchPort)
     }
 
     /// Decodes a row into its model. `OVSDBRowDecoder` is a general `Decoder`
@@ -1569,5 +1723,12 @@ private extension OVNManager {
 
     func createRow<T: Codable>(from object: T) throws(OVNManagerError) -> OVSDBRow {
         return try OVSDBRowEncoder.makeRow(from: object, hints: .ovn)
+    }
+
+    /// The table-scoped variant, required for a table where a column's wire form
+    /// differs from the same column name elsewhere in the database — today just
+    /// `Logical_Router_Policy.output_port`. See `ColumnHints.ovn(table:)`.
+    func createRow<T: Codable>(from object: T, in table: String) throws(OVNManagerError) -> OVSDBRow {
+        return try OVSDBRowEncoder.makeRow(from: object, hints: .ovn(table: table))
     }
 }
