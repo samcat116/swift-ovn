@@ -142,6 +142,26 @@ public protocol OVNManaging: Sendable {
     func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError)
     func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws(OVNManagerError)
 
+    // Load Balancer Health Check Operations
+    func getLoadBalancerHealthChecks() async throws(OVNManagerError) -> [OVNLoadBalancerHealthCheck]
+    func createLoadBalancerHealthCheck(_ healthCheck: OVNLoadBalancerHealthCheck, onLoadBalancer loadBalancerUUID: String) async throws(OVNManagerError) -> String
+    func updateLoadBalancerHealthCheck(uuid: String, _ healthCheck: OVNLoadBalancerHealthCheck) async throws(OVNManagerError)
+    func deleteLoadBalancerHealthCheck(uuid: String) async throws(OVNManagerError)
+
+    // Load Balancer Group Operations
+    func getLoadBalancerGroups() async throws(OVNManagerError) -> [OVNLoadBalancerGroup]
+    func getLoadBalancerGroup(named name: String) async throws(OVNManagerError) -> OVNLoadBalancerGroup?
+    func createLoadBalancerGroup(_ group: OVNLoadBalancerGroup) async throws(OVNManagerError) -> String
+    func updateLoadBalancerGroup(uuid: String, _ group: OVNLoadBalancerGroup) async throws(OVNManagerError)
+    func addLoadBalancers(_ loadBalancerUUIDs: [String], toGroup name: String) async throws(OVNManagerError)
+    func removeLoadBalancers(_ loadBalancerUUIDs: [String], fromGroup name: String) async throws(OVNManagerError)
+    func deleteLoadBalancerGroup(uuid: String) async throws(OVNManagerError)
+    func deleteLoadBalancerGroup(named name: String) async throws(OVNManagerError)
+    func attachLoadBalancerGroup(uuid: String, toSwitch switchName: String) async throws(OVNManagerError)
+    func attachLoadBalancerGroup(uuid: String, toRouter routerName: String) async throws(OVNManagerError)
+    func detachLoadBalancerGroup(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError)
+    func detachLoadBalancerGroup(uuid: String, fromRouter routerName: String) async throws(OVNManagerError)
+
     // NAT Operations
     func getNATRules() async throws(OVNManagerError) -> [OVNNAT]
     @available(*, deprecated, message: "Creates an orphan row that is garbage-collected at commit, so the returned UUID refers to nothing. Use createNATRule(_:onRouter:) so the rule is attached to its router.")
@@ -191,6 +211,23 @@ public protocol OVNManaging: Sendable {
     func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws(OVNManagerError)
     func deleteDHCPOptions(uuid: String) async throws(OVNManagerError)
     
+    // Global Configuration and Sync Barrier (northbound)
+    func getNBGlobal() async throws(OVNManagerError) -> OVNNBGlobal?
+    func updateNBGlobalOptions(_ options: [String: String]) async throws(OVNManagerError)
+    func removeNBGlobalOptions(_ keys: [String]) async throws(OVNManagerError)
+    func setNBGlobalIPsec(_ enabled: Bool) async throws(OVNManagerError)
+    @discardableResult
+    func incrementNBCfg() async throws(OVNManagerError) -> Int
+    /// Waits until ovn-northd has translated everything written so far.
+    /// See `OVNManager.waitForNorthd(timeout:)`; the implementation defaults
+    /// the timeout, which a protocol requirement cannot express.
+    @discardableResult
+    func waitForNorthd(timeout: TimeAmount) async throws(OVNManagerError) -> Int
+    /// Waits until every hypervisor has caught up with everything written so
+    /// far. See `OVNManager.waitForHypervisors(timeout:)`.
+    @discardableResult
+    func waitForHypervisors(timeout: TimeAmount) async throws(OVNManagerError) -> Int
+
     // Monitoring
     func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String
     /// Starts a monitor that filters rows server-side and, where the server
@@ -229,6 +266,8 @@ public protocol OVNManaging: Sendable {
     func getLogicalFlows() async throws(OVNManagerError) -> [OVNLogicalFlow]
     func getAdvertisedRoutes() async throws(OVNManagerError) -> [OVNAdvertisedRoute]
     func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute]
+    func getServiceMonitors() async throws(OVNManagerError) -> [OVNServiceMonitor]
+    func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal?
 }
 
 // MARK: - OVN Database Constants
@@ -253,6 +292,8 @@ public enum OVNTable {
     public static let portGroup = "Port_Group"
     public static let addressSet = "Address_Set"
     public static let loadBalancer = "Load_Balancer"
+    public static let loadBalancerHealthCheck = "Load_Balancer_Health_Check"
+    public static let loadBalancerGroup = "Load_Balancer_Group"
     public static let nat = "NAT"
     public static let dhcpOptions = "DHCP_Options"
     /// The Northbound `QoS` table (`OVNQoS`), not the identically named
@@ -262,6 +303,9 @@ public enum OVNTable {
     public static let dns = "DNS"
     public static let meter = "Meter"
     public static let meterBand = "Meter_Band"
+    /// The singleton northbound configuration row, and the `nb_cfg`/`sb_cfg`/
+    /// `hv_cfg` sequence numbers the sync barrier is built on.
+    public static let nbGlobal = "NB_Global"
 
     // Southbound tables
     public static let chassis = "Chassis"
@@ -271,6 +315,9 @@ public enum OVNTable {
     public static let advertisedRoute = "Advertised_Route"
     public static let learnedRoute = "Learned_Route"
     public static let encap = "Encap"
+    public static let serviceMonitor = "Service_Monitor"
+    /// The singleton southbound configuration row (`OVNSBGlobal`).
+    public static let sbGlobal = "SB_Global"
 }
 
 // MARK: - Helper Extensions

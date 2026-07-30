@@ -201,6 +201,34 @@ Two things to know about the updates these monitors deliver:
   would deliver every row as though it matched. `session.method` says which method
   was used, and `session.resumed` is false whenever the reply is a full snapshot.
 
+### Waiting for a Write to Reach the Dataplane
+
+An OVSDB transaction returning success means the northbound database accepted
+the write, not that anything forwards packets differently yet. `NB_Global`'s
+sequence numbers are how you find out: bump `nb_cfg`, then watch how far it has
+propagated. This is what `ovn-nbctl --wait=sb` and `--wait=hv` do.
+
+```swift
+let portUUID = try await SwiftOVN.createLogicalSwitchPort(port, onSwitch: "my-switch")
+
+// ovn-northd has translated the write into southbound logical flows.
+try await SwiftOVN.waitForNorthd(timeout: .seconds(30))
+
+// Every hypervisor has installed those flows — the dataplane is current.
+// Slower, and a chassis that is down holds it back until the timeout.
+try await SwiftOVN.waitForHypervisors(timeout: .seconds(60))
+
+// Or read the counters directly.
+let global = try await SwiftOVN.getNBGlobal()
+print("nb_cfg \(global?.nb_cfg ?? 0), northd at \(global?.sb_cfg ?? 0), hypervisors at \(global?.hv_cfg ?? 0)")
+```
+
+Both helpers increment `nb_cfg` themselves and return the value the counter
+they watch reached, or throw `OVNManagerError.timeoutError`. Global options are
+changed a key at a time — `updateNBGlobalOptions(_:)` merges rather than
+replaces, because ovn-northd keeps generated state (`svc_monitor_mac`,
+`mac_prefix`) in the same map.
+
 ## Architecture
 
 ### Core Components
@@ -225,12 +253,16 @@ The package includes comprehensive Swift models for:
 - `OVNPortGroup` - Port groups for scalable security-group ACLs
 - `OVNAddressSet` - Named address sets referenced from ACL match strings as `$name`
 - `OVNLoadBalancer` - Load balancing rules
+- `OVNLoadBalancerHealthCheck` - Per-VIP backend health probing
+- `OVNLoadBalancerGroup` - Named sets of load balancers applied to many switches/routers at once
+- `OVNServiceMonitor` - Southbound health probe state, one row per backend
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
 - `OVNDNS` - DNS records served to a logical switch's ports
 - `OVNBFD` - BFD sessions monitoring a static route's or policy's next hop
+- `OVNNBGlobal` / `OVNSBGlobal` - Global configuration, and the `nb_cfg`/`sb_cfg`/`hv_cfg` sync barrier
 
 #### OVS Models
 - `OVSBridge` - Open vSwitch bridges

@@ -12,8 +12,9 @@ public struct OVNLogicalSwitch: Codable, Sendable {
     public let qosRules: [String]?
     public let dnsRecords: [String]?
     public let loadBalancer: [String]?
-    /// `Load_Balancer_Group` references. That table is not modeled yet, so
-    /// these stay UUID strings.
+    /// UUIDs of the `OVNLoadBalancerGroup` rows applied to this switch. Unlike
+    /// `loadBalancer`, which is a weak reference set, these are *strong*
+    /// references: a group cannot be deleted while a switch still names it.
     public let loadBalancerGroup: [String]?
     /// `Copp` (control-plane protection) reference. That table is not modeled
     /// yet, so this stays a UUID string.
