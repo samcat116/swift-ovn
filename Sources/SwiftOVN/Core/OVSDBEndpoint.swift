@@ -56,7 +56,7 @@ public enum OVSDBEndpoint: Sendable, Equatable {
     /// `ssl:` strings are rejected when the `TLS` package trait is disabled —
     /// the scheme cannot be a compile-time error here, since the string is only
     /// known at runtime.
-    public init(parsing string: String) throws {
+    public init(parsing string: String) throws(OVNManagerError) {
         guard let colonIndex = string.firstIndex(of: ":") else {
             throw OVNManagerError.connectionFailed("Invalid OVSDB endpoint '\(string)': expected unix:, tcp: or ssl: prefix")
         }
@@ -85,7 +85,7 @@ public enum OVSDBEndpoint: Sendable, Equatable {
         }
     }
 
-    private static func parseHostPort(_ remainder: String, in original: String) throws -> (host: String, port: Int) {
+    private static func parseHostPort(_ remainder: String, in original: String) throws(OVNManagerError) -> (host: String, port: Int) {
         let host: String
         let portString: String
 

@@ -2,6 +2,12 @@ import Foundation
 import NIO
 import Logging
 
+/// Speaks JSON-RPC over an `OVSDBTransport`.
+///
+/// Every throwing method is `throws(OVNManagerError)`. This is where that
+/// contract starts: the transport below is `EventLoopFuture`-based and surfaces
+/// NIO channel and TLS failures, and `JSONValueEncoder` throws `EncodingError`,
+/// so every `get()` and every parameter encode here is wrapped.
 public actor JSONRPCClient {
     private let connection: any OVSDBTransport
     private let logger: Logger
@@ -26,14 +32,22 @@ public actor JSONRPCClient {
         self.logger = logger ?? Logger(label: "ovn-manager.jsonrpc-client")
     }
     
-    public func connect() async throws {
+    public func connect() async throws(OVNManagerError) {
         logger.info("JSONRPCClient: Starting connection process...")
-        try await connection.connect().get()
+        do {
+            try await connection.connect().get()
+        } catch {
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to connect: \($0)") }
+        }
         logger.info("JSONRPCClient: Connection established successfully")
     }
-    
-    public func disconnect() async throws {
-        try await connection.disconnect().get()
+
+    public func disconnect() async throws(OVNManagerError) {
+        do {
+            try await connection.disconnect().get()
+        } catch {
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to disconnect: \($0)") }
+        }
     }
     
     nonisolated public var isConnected: Bool {
@@ -51,27 +65,39 @@ public actor JSONRPCClient {
         method: String,
         params: JSONRPCParams? = nil,
         responseType: T.Type
-    ) async throws -> T {
+    ) async throws(OVNManagerError) -> T {
         let id = JSONRPCIdentifier.number(nextRequestId())
         let request = JSONRPCRequest(method: method, params: params, id: id)
-        
+
         logger.debug("Sending JSON-RPC request: \(method) with ID: \(id)")
-        
+
         logger.debug("Connection active before send: \(connection.isConnectionActive)")
-        
+
         // Set up the response handler before sending to avoid race conditions
         let responseFuture = connection.receive(
             as: JSONRPCResponse<T>.self,
             requestId: id
         )
-        
-        try await connection.send(request).get()
+
+        do {
+            try await connection.send(request).get()
+        } catch {
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to send '\(method)' request: \($0)") }
+        }
         logger.debug("Message sent successfully, waiting for response...")
-        
-        let response: JSONRPCResponse<T> = try await responseFuture.get()
-        
+
+        let response: JSONRPCResponse<T>
+        do {
+            response = try await responseFuture.get()
+        } catch {
+            // The router already reports its own failures as `OVNManagerError`
+            // (timeout, closed connection, response decoding); anything left is
+            // a channel-level failure it forwarded verbatim.
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to receive '\(method)' response: \($0)") }
+        }
+
         logger.debug("Received response for request ID: \(id)")
-        
+
         if let error = response.error {
             logger.error("JSON-RPC error response: \(error.message)")
             throw OVNManagerError.rpcError(error)
@@ -84,17 +110,31 @@ public actor JSONRPCClient {
         return result
     }
     
-    public func notify(method: String, params: JSONRPCParams? = nil) async throws {
+    public func notify(method: String, params: JSONRPCParams? = nil) async throws(OVNManagerError) {
         let request = JSONRPCRequest(method: method, params: params, id: nil)
-        
+
         logger.debug("Sending JSON-RPC notification: \(method)")
-        
-        try await connection.send(request).get()
+
+        do {
+            try await connection.send(request).get()
+        } catch {
+            throw OVNManagerError.wrapping(error) { .connectionFailed("Failed to send '\(method)' notification: \($0)") }
+        }
     }
-    
+
+    /// Encodes a request parameter, wrapping the `EncodingError` a general
+    /// `Encoder` throws into `encodingError`.
+    private func encodeParameter<T: Encodable>(_ value: T) throws(OVNManagerError) -> JSONValue {
+        do {
+            return try JSONValueEncoder.encode(value)
+        } catch {
+            throw OVNManagerError.wrapping(error) { .encodingError($0) }
+        }
+    }
+
     // MARK: - OVSDB Specific Methods
-    
-    public func echo() async throws -> [String] {
+
+    public func echo() async throws(OVNManagerError) -> [String] {
         logger.info("Performing echo test...")
         let params = JSONRPCParams.array([.string("echo")])
         let result = try await call(
@@ -106,7 +146,7 @@ public actor JSONRPCClient {
         return result
     }
     
-    public func listDatabases() async throws -> [String] {
+    public func listDatabases() async throws(OVNManagerError) -> [String] {
         logger.info("Listing databases...")
         let result = try await call(
             method: "list_dbs",
@@ -116,7 +156,7 @@ public actor JSONRPCClient {
         return result
     }
     
-    public func getSchema(database: String) async throws -> JSONValue {
+    public func getSchema(database: String) async throws(OVNManagerError) -> JSONValue {
         let params = JSONRPCParams.array([.string(database)])
         return try await call(
             method: "get_schema",
@@ -125,13 +165,13 @@ public actor JSONRPCClient {
         )
     }
     
-    public func transact(database: String, operations: [OVSDBOperation]) async throws -> [JSONValue] {
+    public func transact(database: String, operations: [OVSDBOperation]) async throws(OVNManagerError) -> [JSONValue] {
         var paramsArray: [JSONValue] = [.string(database)]
-        
+
         for operation in operations {
-            paramsArray.append(try JSONValueEncoder.encode(operation))
+            paramsArray.append(try encodeParameter(operation))
         }
-        
+
         let params = JSONRPCParams.array(paramsArray)
         
         return try await call(
@@ -145,8 +185,8 @@ public actor JSONRPCClient {
         database: String,
         monitorId: String,
         requests: [String: OVSDBMonitorRequest]
-    ) async throws -> JSONValue {
-        let requestsValue = try JSONValueEncoder.encode(requests)
+    ) async throws(OVNManagerError) -> JSONValue {
+        let requestsValue = try encodeParameter(requests)
 
         let params = JSONRPCParams.array([
             .string(database),
@@ -161,7 +201,7 @@ public actor JSONRPCClient {
         )
     }
     
-    public func cancelMonitor(monitorId: String) async throws {
+    public func cancelMonitor(monitorId: String) async throws(OVNManagerError) {
         let params = JSONRPCParams.array([.string(monitorId)])
 
         // RFC 7047 §4.1.7: monitor_cancel is a request; the server replies
@@ -187,6 +227,11 @@ public actor JSONRPCClient {
     /// client buffer without limit, so instead the stream throws
     /// `OVNManagerError.notificationsDropped`: updates were lost, and the only
     /// correct recovery is to restart the monitor for a fresh snapshot.
+    ///
+    /// Everything this stream can fail with is an `OVNManagerError`, but the
+    /// failure type stays `any Error`: every `AsyncThrowingStream` initializer
+    /// is constrained to `Failure == any Error`, so a typed-failure stream
+    /// cannot be built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
         let events = connection.notificationEvents()
         return AsyncThrowingStream(
