@@ -1,0 +1,51 @@
+Sources/SwiftOVN/Models/OVNLogicalSwitch.swift
+  s_3f09ac638d4170::t_089a571a4db4ad 15-18,21,30,34-35,43
+Sources/SwiftOVN/Models/OVNServiceMonitor.swift
+  s_3f09ac638d4170::t_b3371cca33585f 1-63
+Sources/SwiftOVN/Protocols/OVNManaging.swift
+  s_3f09ac638d4170::t_2f9fc3d6e1c803 217-218
+  s_3f09ac638d4170::t_a65a124e153eed 135-154
+  s_3f09ac638d4170::t_85e8366b4f32c1 193
+  s_3f09ac638d4170::t_ffebf93fac9c40 233
+Sources/SwiftOVN/Managers/OVNManager.swift
+  s_3f09ac638d4170::t_465fda32b2b1f2 1086
+  s_3f09ac638d4170::t_1fe6631e05e35e 1637-1643,1647-1655,1657,1659-1660,1664-1670,1686,1694,1702-1712,1714-1724,1726-1753,1756-1758,1768-1857,1859
+  s_3f09ac638d4170::t_8a0d758e9f9a10 1093
+  s_3f09ac638d4170::t_ba8e9d769b0fa4 1097-1306
+  s_3f09ac638d4170::t_d647971a167b22 1683-1685
+  s_3f09ac638d4170::t_537644c0e93a62 1888-1893
+  s_3f09ac638d4170::t_86597ba4c0b453 936-941,951-956,958
+  s_3f09ac638d4170::t_601519cdaa2c12 1644-1646
+  s_3f09ac638d4170::t_811ccececc0ee9 1605-1617
+Sources/SwiftOVN/Models/OVNDynamicRouting.swift
+  s_3f09ac638d4170::t_e1a8bba1056cc1 81
+Sources/SwiftOVN/Models/OVNLoadBalancerHealthCheck.swift
+  s_3f09ac638d4170::t_4e666167d96c3e 1-38
+README.md
+  s_3f09ac638d4170::t_4cf8c24706357a 164-166
+Sources/SwiftOVN/Core/OVSDBRowEncoder.swift
+  s_3f09ac638d4170::t_e20ea8f13b3490 55-57,59
+Sources/SwiftOVN/Models/OVNLoadBalancerGroup.swift
+  s_3f09ac638d4170::t_3e7ed6755bbf8a 1-38
+Tests/SwiftOVNTests/OVSDBRowCodingTests.swift
+  s_3f09ac638d4170::t_87b75a84890d6d 258-335
+  s_3f09ac638d4170::t_53afe99ff14fcd 809-924
+Sources/SwiftOVN/Models/OVNLogicalRouter.swift
+  s_3f09ac638d4170::t_4fd950867ef5d4 15-18,22,25,27-28,37,44,52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "c03ffd89cec10944fa015bcfae907ab195a62967",
+  "prompts": {},
+  "sessions": {
+    "s_3f09ac638d4170": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "58fecd4d-cd27-46f1-8515-34d08e634b5b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
