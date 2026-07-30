@@ -330,10 +330,9 @@ struct JSONRPCClientMockTests {
 
     @Test("An OVSDB operation round trips")
     func ovsdbOperationSerialization() throws {
-        let operation = OVSDBOperation(
-            op: "select",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("test"))],
+        let operation = OVSDBOperation.select(
+            from: "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("test"))],
             columns: ["name", "ports"]
         )
 
@@ -382,9 +381,8 @@ struct JSONRPCClientMockTests {
 
     @Test("An operation encodes uuid-name and the wait fields")
     func ovsdbOperationEncodesUUIDNameAndWaitFields() throws {
-        let insert = OVSDBOperation(
-            op: "insert",
-            table: "Logical_Switch_Port",
+        let insert = OVSDBOperation.insert(
+            into: "Logical_Switch_Port",
             row: ["name": .string("vm1-port")],
             uuidName: "new_lsp"
         )
@@ -394,10 +392,9 @@ struct JSONRPCClientMockTests {
         #expect(insertJSON?["uuidName"] == nil)
         #expect(insertJSON?["where"] == nil, "insert must not carry a where clause")
 
-        let wait = OVSDBOperation(
-            op: "wait",
-            table: "Logical_Switch",
-            whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("ls0"))],
+        let wait = OVSDBOperation.wait(
+            "Logical_Switch",
+            where: [OVSDBCondition(column: "name", function: "==", value: .string("ls0"))],
             columns: ["name"],
             rows: [["name": .string("ls0")]],
             until: "==",
@@ -409,6 +406,70 @@ struct JSONRPCClientMockTests {
         #expect(waitJSON?["timeout"] as? Int == 0)
         #expect((waitJSON?["rows"] as? [[String: Any]])?.first?["name"] as? String == "ls0")
         #expect((waitJSON?["where"] as? [[Any]])?.count == 1)
+    }
+
+    /// The four operations RFC 7047 defines with no table: each must encode its
+    /// own member and nothing else, since ovsdb-server rejects an operation
+    /// carrying members its `op` does not define.
+    @Test("The table-less operations encode only their own members")
+    func tableLessOperationsEncodeOnlyTheirOwnMembers() throws {
+        let cases: [(OVSDBOperation, [String: Any])] = [
+            (.commit(durable: true), ["op": "commit", "durable": true]),
+            (.commit(durable: false), ["op": "commit", "durable": false]),
+            (.abort, ["op": "abort"]),
+            (.comment("ovn-nbctl ls-add ls0"), ["op": "comment", "comment": "ovn-nbctl ls-add ls0"]),
+            (.assert(lock: "ovn_nb_lock"), ["op": "assert", "lock": "ovn_nb_lock"]),
+        ]
+
+        for (operation, expected) in cases {
+            let json = try #require(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(operation)) as? [String: Any]
+            )
+            #expect(json.keys.sorted() == expected.keys.sorted(), "unexpected members on \(operation.op)")
+            #expect(json["op"] as? String == expected["op"] as? String)
+            #expect(json["table"] == nil, "\(operation.op) must not carry a table")
+            #expect(json["durable"] as? Bool == expected["durable"] as? Bool)
+            #expect(json["comment"] as? String == expected["comment"] as? String)
+            #expect(json["lock"] as? String == expected["lock"] as? String)
+        }
+    }
+
+    /// The builders exist so the `op` and the members set can't disagree.
+    @Test("Each builder sets its own operation type and no foreign members")
+    func buildersSetTheirOwnOperationType() throws {
+        let condition = OVSDBCondition.equal(column: "name", to: "ls0")
+
+        let select = OVSDBOperation.select(from: "Logical_Switch")
+        #expect(select.op == .select)
+        // An absent where clause selects every row, so it is [] and not nil.
+        #expect(select.whereConditions == [])
+
+        let insert = OVSDBOperation.insert(into: "Logical_Switch", row: ["name": .string("ls0")])
+        #expect(insert.op == .insert)
+        #expect(insert.whereConditions == nil, "insert takes no where clause")
+        #expect(insert.uuidName == nil)
+
+        let update = OVSDBOperation.update("Logical_Switch", where: [condition], row: ["name": .string("ls1")])
+        #expect(update.op == .update)
+        #expect(update.mutations == nil)
+
+        let mutate = OVSDBOperation.mutate(
+            "Logical_Switch",
+            where: [condition],
+            mutations: [OVSDBMutation.insert(column: "ports", value: "lsp0")]
+        )
+        #expect(mutate.op == .mutate)
+        #expect(mutate.row == nil)
+
+        let delete = OVSDBOperation.delete(from: "Logical_Switch", where: [condition])
+        #expect(delete.op == .delete)
+        #expect(delete.row == nil)
+
+        #expect(OVSDBOperation.wait("Logical_Switch", where: [condition], rows: []).op == .wait)
+        #expect(OVSDBOperation.commit(durable: true).durable == true)
+        #expect(OVSDBOperation.assert(lock: "l").lock == "l")
+        #expect(OVSDBOperation.comment("c").comment == "c")
+        #expect(OVSDBOperation.abort.table == nil)
     }
 
     private func encodeOperations(_ operations: [OVSDBOperation]) throws -> [[String: Any]] {

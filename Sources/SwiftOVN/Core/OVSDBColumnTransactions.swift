@@ -33,18 +33,12 @@ public enum OVSDBColumnTransactions {
         where conditions: [OVSDBCondition] = []
     ) -> [OVSDBOperation] {
         [
-            OVSDBOperation(
-                op: "mutate",
-                table: table,
-                whereConditions: conditions,
+            .mutate(
+                table,
+                where: conditions,
                 mutations: [OVSDBMutation(column: column, mutator: "+=", value: .number(1))]
             ),
-            OVSDBOperation(
-                op: "select",
-                table: table,
-                whereConditions: conditions,
-                columns: [column]
-            )
+            .select(from: table, where: conditions, columns: [column])
         ]
     }
 

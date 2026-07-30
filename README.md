@@ -323,6 +323,47 @@ let SwiftOVN = SwiftOVN(
 )
 ```
 
+### Active/Standby Election with OVSDB Locks
+
+Running more than one instance of a controller against the same database needs
+exactly one of them writing at a time. OVSDB's locks are the supported way to
+arrange that: ownership is per-connection, released when the connection drops,
+and can be stolen by a peer that decides the owner is gone.
+
+```swift
+let connection = OVSDBConnection(socketPath: "/var/run/ovn/ovnnb_db.sock")
+try await connection.connect()
+
+// Subscribe before requesting the lock, or a promotion that lands immediately
+// has nothing watching for it.
+let ownership = connection.lockUpdates()
+
+var isActive = try await connection.lock(id: "my_controller")
+if !isActive {
+    // Queued behind the current owner; promotion arrives as a notification.
+    for try await change in ownership where change.lockID == "my_controller" {
+        isActive = change.kind == .locked
+        break
+    }
+}
+```
+
+Ownership can be taken away at any moment, so a writer should not rely on
+having checked: make the transaction itself conditional on the lock, and
+ovsdb-server aborts it rather than let a demoted writer commit.
+
+```swift
+_ = try await connection.transact(in: OVNDatabase.northbound, operations: [
+    .assert(lock: "my_controller"),
+    .insert(into: "Logical_Switch", row: ["name": .string("ls0")]),
+    .comment("created by my-controller"),
+])
+```
+
+`steal(lockID:)` takes a lock from its current owner (which is told with a
+`stolen` notification), and `unlock(id:)` releases one or withdraws a queued
+request.
+
 ### Building Complex Queries
 
 ```swift
