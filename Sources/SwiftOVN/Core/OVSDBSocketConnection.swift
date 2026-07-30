@@ -263,7 +263,16 @@ enum OVSDBChannelBootstrap {
                 try await handshake.futureResult.get()
             } catch {
                 logger.error("TLS handshake with \(endpoint) failed: \(error)")
-                asyncChannel.channel.close(promise: nil)
+                // Consume both halves before dropping the channel, rather than
+                // closing it and letting the `throw` release it. An
+                // `NIOAsyncChannel` whose outbound writer deinits without
+                // `finish()` traps — a `fatalError` in `NIOAsyncWriter`, so it
+                // takes the process down instead of reporting the failed
+                // handshake — and a fire-and-forget `close` only avoids that
+                // when it happens to finish the writer before the release wins
+                // the race. `executeThenClose` finishes the writer and closes
+                // the channel, in that order, before returning.
+                try? await asyncChannel.executeThenClose { _, _ in }
                 throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
             }
         }

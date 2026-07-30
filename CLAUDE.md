@@ -135,6 +135,36 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
   `startConditionalMonitoring`, ovsdb-server's `monitor_cond` /
   `monitor_cond_since` / `monitor_cond_change`
 
+### Southbound Naming
+
+All 39 Southbound tables are modeled, and sixteen of those table names also exist
+in the Northbound schema — with different columns in every case except `SSL`. So:
+
+- A Southbound model for a name shared with Northbound is `OVNSB`-prefixed, and
+  its getter is `getSB…`: `OVNSBLoadBalancer`/`getSBLoadBalancers()` beside
+  `OVNLoadBalancer`/`getLoadBalancers()`. `OVNSBDHCPv6Options` takes the prefix
+  for symmetry with its twin rather than because `DHCPv6_Options` collides.
+- `OVNTable` declares one constant per table *name*, not per name-and-database:
+  `getSBAddressSets()` uses `OVNTable.addressSet`. Which database a call reaches
+  is the manager's `database`, never the table name. The five shared names that
+  were not already declared northbound (`Mirror`, `Static_MAC_Binding`,
+  `Chassis_Template_Var`, `Connection`, `SSL`) sit in their own group.
+- Southbound models have **no public initializer**. These rows belong to
+  ovn-northd and ovn-controller; a caller with an initializer would be able to
+  build a row there is no way to write.
+- Every southbound getter goes through `southboundRows(_:from:describedAs:)`,
+  which rejects a northbound manager first. That guard is not redundant with
+  ovsdb-server's own error handling: for the sixteen shared names the request
+  would *succeed* against northbound and come back with the wrong row shape,
+  surfacing as a `decodingError` naming a column rather than a database.
+
+The two southbound writes (`deleteChassis(named:)` and the `Port_Binding`
+chassis setters) are under their own `MARK` at the end of `OVNManager`, separate
+from the reads. Both are documented as interventions rather than CRUD, and
+`deleteChassis` deletes `Encap`, `Chassis_Private` and `Chassis` in one
+transaction — see its doc comment for why leaving `Chassis_Private` behind breaks
+`waitForHypervisors` permanently.
+
 ### Monitor Methods
 `OVSDBConnection` negotiates monitor methods per connection, most to least
 capable: `monitor_cond_since`, `monitor_cond`, `monitor` (see

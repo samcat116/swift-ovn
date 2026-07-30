@@ -2219,59 +2219,29 @@ public final class OVNManager: OVNManaging {
     }
     
     // MARK: - Southbound Operations
-    
+
     public func getChassis() async throws(OVNManagerError) -> [OVNChassis] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Chassis operations require southbound database")
-        }
-        
-        let rows = try await connection.selectAll(from: OVNTable.chassis, in: database)
-        return try parseRows(rows, as: OVNChassis.self)
+        try await southboundRows(OVNChassis.self, from: OVNTable.chassis, describedAs: "Chassis")
     }
-    
+
     public func getChassisPrivate() async throws(OVNManagerError) -> [OVNChassisPrivate] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Chassis Private operations require southbound database")
-        }
-        
-        let rows = try await connection.selectAll(from: OVNTable.chassisPrivate, in: database)
-        return try parseRows(rows, as: OVNChassisPrivate.self)
+        try await southboundRows(OVNChassisPrivate.self, from: OVNTable.chassisPrivate, describedAs: "Chassis Private")
     }
-    
+
     public func getPortBindings() async throws(OVNManagerError) -> [OVNPortBinding] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Port Binding operations require southbound database")
-        }
-        
-        let rows = try await connection.selectAll(from: OVNTable.portBinding, in: database)
-        return try parseRows(rows, as: OVNPortBinding.self)
+        try await southboundRows(OVNPortBinding.self, from: OVNTable.portBinding, describedAs: "Port Binding")
     }
-    
+
     public func getLogicalFlows() async throws(OVNManagerError) -> [OVNLogicalFlow] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Logical Flow operations require southbound database")
-        }
-        
-        let rows = try await connection.selectAll(from: OVNTable.logicalFlow, in: database)
-        return try parseRows(rows, as: OVNLogicalFlow.self)
+        try await southboundRows(OVNLogicalFlow.self, from: OVNTable.logicalFlow, describedAs: "Logical Flow")
     }
 
     public func getAdvertisedRoutes() async throws(OVNManagerError) -> [OVNAdvertisedRoute] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Advertised Route operations require southbound database")
-        }
-
-        let rows = try await connection.selectAll(from: OVNTable.advertisedRoute, in: database)
-        return try parseRows(rows, as: OVNAdvertisedRoute.self)
+        try await southboundRows(OVNAdvertisedRoute.self, from: OVNTable.advertisedRoute, describedAs: "Advertised Route")
     }
 
     public func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Learned Route operations require southbound database")
-        }
-
-        let rows = try await connection.selectAll(from: OVNTable.learnedRoute, in: database)
-        return try parseRows(rows, as: OVNLearnedRoute.self)
+        try await southboundRows(OVNLearnedRoute.self, from: OVNTable.learnedRoute, describedAs: "Learned Route")
     }
 
     /// The Southbound `Service_Monitor` rows: one per load balancer backend
@@ -2279,12 +2249,7 @@ public final class OVNManager: OVNManaging {
     /// probing chassis reported. This is the only way to observe whether OVN
     /// currently considers a backend up.
     public func getServiceMonitors() async throws(OVNManagerError) -> [OVNServiceMonitor] {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("Service Monitor operations require southbound database")
-        }
-
-        let rows = try await connection.selectAll(from: OVNTable.serviceMonitor, in: database)
-        return try parseRows(rows, as: OVNServiceMonitor.self)
+        try await southboundRows(OVNServiceMonitor.self, from: OVNTable.serviceMonitor, describedAs: "Service Monitor")
     }
 
     /// Reads the singleton `SB_Global` row, or nil if the database has none.
@@ -2296,13 +2261,343 @@ public final class OVNManager: OVNManaging {
     /// waits on, so this is a read for inspecting the southbound side rather
     /// than a second way to run the barrier.
     public func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal? {
-        guard database == OVNDatabase.southbound else {
-            throw OVNManagerError.operationFailed("SB_Global operations require southbound database")
+        try await southboundRow(OVNSBGlobal.self, from: OVNTable.sbGlobal, describedAs: "SB_Global")
+    }
+
+    /// The `Encap` rows: how each chassis can be reached, which is what
+    /// `OVNChassis.encaps`, `OVNPortBinding.encap` and
+    /// `OVNPortBinding.additional_encap` refer to.
+    ///
+    /// A row's `chassis_name` names its owner, so grouping by that column
+    /// answers "which tunnel types is this hypervisor offering" without
+    /// resolving UUIDs at all.
+    public func getEncaps() async throws(OVNManagerError) -> [OVNEncap] {
+        try await southboundRows(OVNEncap.self, from: OVNTable.encap, describedAs: "Encap")
+    }
+
+    // MARK: Datapaths
+
+    /// The `Datapath_Binding` rows — the logical switches and routers every
+    /// port binding, logical flow and route in this database is scoped to.
+    ///
+    /// Reading this is what makes the rest of the Southbound database legible:
+    /// `OVNPortBinding.datapath`, `OVNLogicalFlow.logical_datapath`,
+    /// `OVNAdvertisedRoute.datapath`, `OVNLearnedRoute.datapath` and
+    /// `OVNMACBinding.datapath` are UUIDs into it, and only these rows say which
+    /// Northbound switch or router each one means.
+    public func getDatapathBindings() async throws(OVNManagerError) -> [OVNDatapathBinding] {
+        try await southboundRows(OVNDatapathBinding.self, from: OVNTable.datapathBinding, describedAs: "Datapath Binding")
+    }
+
+    /// The `Logical_DP_Group` rows, which resolve
+    /// `OVNLogicalFlow.logical_dp_group`.
+    ///
+    /// Needed far more often than its obscurity suggests: ovn-northd emits one
+    /// flow per *group* wherever it can, so a large share of logical flows have
+    /// `logical_datapath` unset and name a group instead. Without these rows
+    /// those flows appear to belong to no datapath at all.
+    public func getLogicalDPGroups() async throws(OVNManagerError) -> [OVNLogicalDPGroup] {
+        try await southboundRows(OVNLogicalDPGroup.self, from: OVNTable.logicalDPGroup, describedAs: "Logical DP Group")
+    }
+
+    // MARK: Address bindings
+
+    /// The `MAC_Binding` rows: IP-to-MAC bindings a logical router learned by
+    /// ARP or neighbour discovery. The dynamic counterpart of
+    /// `getSBStaticMACBindings()`.
+    public func getMACBindings() async throws(OVNManagerError) -> [OVNMACBinding] {
+        try await southboundRows(OVNMACBinding.self, from: OVNTable.macBinding, describedAs: "MAC Binding")
+    }
+
+    /// The Southbound `Static_MAC_Binding` rows: IP-to-MAC bindings configured
+    /// on a router port rather than learned.
+    public func getSBStaticMACBindings() async throws(OVNManagerError) -> [OVNSBStaticMACBinding] {
+        try await southboundRows(OVNSBStaticMACBinding.self, from: OVNTable.staticMACBinding, describedAs: "Static MAC Binding")
+    }
+
+    /// The `Advertised_MAC_Binding` rows: IP/MAC pairs OVN announces to the
+    /// outside fabric where EVPN is enabled.
+    public func getAdvertisedMACBindings() async throws(OVNManagerError) -> [OVNAdvertisedMACBinding] {
+        try await southboundRows(OVNAdvertisedMACBinding.self, from: OVNTable.advertisedMACBinding, describedAs: "Advertised MAC Binding")
+    }
+
+    /// The `FDB` rows: MACs a logical switch learned from traffic, on ports
+    /// whose port security is off.
+    ///
+    /// These rows identify their datapath and port by tunnel key rather than by
+    /// UUID, so joining them means matching `dp_key` against
+    /// `OVNDatapathBinding.tunnel_key` and `port_key` against
+    /// `OVNPortBinding.tunnel_key`.
+    public func getFDBEntries() async throws(OVNManagerError) -> [OVNFDB] {
+        try await southboundRows(OVNFDB.self, from: OVNTable.fdb, describedAs: "FDB")
+    }
+
+    // MARK: Multicast
+
+    /// The `Multicast_Group` rows ovn-northd computed from configuration.
+    public func getMulticastGroups() async throws(OVNManagerError) -> [OVNMulticastGroup] {
+        try await southboundRows(OVNMulticastGroup.self, from: OVNTable.multicastGroup, describedAs: "Multicast Group")
+    }
+
+    /// The `IGMP_Group` rows a chassis learned by snooping, one per
+    /// address/datapath/chassis combination.
+    public func getIGMPGroups() async throws(OVNManagerError) -> [OVNIGMPGroup] {
+        try await southboundRows(OVNIGMPGroup.self, from: OVNTable.igmpGroup, describedAs: "IGMP Group")
+    }
+
+    /// The `IP_Multicast` rows: per-datapath multicast snooping configuration,
+    /// and the query parameters ovn-controller originates with.
+    public func getIPMulticast() async throws(OVNManagerError) -> [OVNIPMulticast] {
+        try await southboundRows(OVNIPMulticast.self, from: OVNTable.ipMulticast, describedAs: "IP Multicast")
+    }
+
+    // MARK: Control-plane events and routing state
+
+    /// The `Controller_Event` rows ovn-controller punted to the control plane —
+    /// today `empty_lb_backends`, a packet for a load balancer VIP with nothing
+    /// left behind it.
+    ///
+    /// The table explicitly permits duplicates, so a consumer must deduplicate
+    /// on `OVNControllerEvent.seq_num` rather than assume one row per event.
+    public func getControllerEvents() async throws(OVNManagerError) -> [OVNControllerEvent] {
+        try await southboundRows(OVNControllerEvent.self, from: OVNTable.controllerEvent, describedAs: "Controller Event")
+    }
+
+    /// The `ECMP_Nexthop` rows: next hops currently active for
+    /// symmetric-reply ECMP routes.
+    public func getECMPNexthops() async throws(OVNManagerError) -> [OVNECMPNexthop] {
+        try await southboundRows(OVNECMPNexthop.self, from: OVNTable.ecmpNexthop, describedAs: "ECMP Nexthop")
+    }
+
+    /// The Southbound `BFD` rows: the sessions ovn-controller is actually
+    /// running, and their state. Distinct from `getBFDSessions()`, which reads
+    /// the Northbound requests — see `OVNSBBFD`.
+    public func getSBBFDSessions() async throws(OVNManagerError) -> [OVNSBBFD] {
+        try await southboundRows(OVNSBBFD.self, from: OVNTable.bfd, describedAs: "BFD")
+    }
+
+    // MARK: Southbound copies of northbound configuration
+
+    /// The Southbound `Load_Balancer` rows — see `OVNSBLoadBalancer`, which
+    /// records the datapaths a load balancer applies to rather than being
+    /// referenced from them.
+    public func getSBLoadBalancers() async throws(OVNManagerError) -> [OVNSBLoadBalancer] {
+        try await southboundRows(OVNSBLoadBalancer.self, from: OVNTable.loadBalancer, describedAs: "Load Balancer")
+    }
+
+    /// The Southbound `Address_Set` rows. More of these exist than there are
+    /// Northbound address sets: ovn-northd also generates one per Northbound
+    /// port group.
+    public func getSBAddressSets() async throws(OVNManagerError) -> [OVNSBAddressSet] {
+        try await southboundRows(OVNSBAddressSet.self, from: OVNTable.addressSet, describedAs: "Address Set")
+    }
+
+    /// The Southbound `Port_Group` rows, whose `ports` are logical port *names*
+    /// rather than the reference set the Northbound table holds.
+    public func getSBPortGroups() async throws(OVNManagerError) -> [OVNSBPortGroup] {
+        try await southboundRows(OVNSBPortGroup.self, from: OVNTable.portGroup, describedAs: "Port Group")
+    }
+
+    /// The Southbound `DNS` rows the `dns_lookup` action answers from.
+    public func getSBDNS() async throws(OVNManagerError) -> [OVNSBDNS] {
+        try await southboundRows(OVNSBDNS.self, from: OVNTable.dns, describedAs: "DNS")
+    }
+
+    /// The Southbound `Meter` rows, as `OVNLogicalFlow.controller_meter` names
+    /// them. A Northbound meter with `fair` set appears here once per
+    /// attachment point, under a name ovn-northd generated.
+    public func getSBMeters() async throws(OVNManagerError) -> [OVNSBMeter] {
+        try await southboundRows(OVNSBMeter.self, from: OVNTable.meter, describedAs: "Meter")
+    }
+
+    /// The Southbound `Meter_Band` rows, resolving `OVNSBMeter.bands`.
+    public func getSBMeterBands() async throws(OVNManagerError) -> [OVNSBMeterBand] {
+        try await southboundRows(OVNSBMeterBand.self, from: OVNTable.meterBand, describedAs: "Meter Band")
+    }
+
+    /// The Southbound `Mirror` rows, resolving `OVNPortBinding.mirror_rules`.
+    public func getSBMirrors() async throws(OVNManagerError) -> [OVNSBMirror] {
+        try await southboundRows(OVNSBMirror.self, from: OVNTable.mirror, describedAs: "Mirror")
+    }
+
+    /// The Southbound `Gateway_Chassis` rows, resolving
+    /// `OVNPortBinding.gateway_chassis`.
+    public func getSBGatewayChassis() async throws(OVNManagerError) -> [OVNSBGatewayChassis] {
+        try await southboundRows(OVNSBGatewayChassis.self, from: OVNTable.gatewayChassis, describedAs: "Gateway Chassis")
+    }
+
+    /// The Southbound `HA_Chassis` rows, resolving
+    /// `OVNSBHAChassisGroup.ha_chassis`.
+    public func getSBHAChassis() async throws(OVNManagerError) -> [OVNSBHAChassis] {
+        try await southboundRows(OVNSBHAChassis.self, from: OVNTable.haChassis, describedAs: "HA Chassis")
+    }
+
+    /// The Southbound `HA_Chassis_Group` rows, resolving
+    /// `OVNPortBinding.ha_chassis_group`. Their `ref_chassis` is the part with
+    /// no Northbound equivalent: the chassis whose traffic depends on the group.
+    public func getSBHAChassisGroups() async throws(OVNManagerError) -> [OVNSBHAChassisGroup] {
+        try await southboundRows(OVNSBHAChassisGroup.self, from: OVNTable.haChassisGroup, describedAs: "HA Chassis Group")
+    }
+
+    /// The Southbound `Chassis_Template_Var` rows: what each chassis resolves a
+    /// flow's `^variable` references to.
+    public func getSBChassisTemplateVars() async throws(OVNManagerError) -> [OVNSBChassisTemplateVar] {
+        try await southboundRows(OVNSBChassisTemplateVar.self, from: OVNTable.chassisTemplateVar, describedAs: "Chassis Template Var")
+    }
+
+    /// The `ACL_ID` rows: the small integers standing in for `allow-established`
+    /// ACLs. A row's own `_uuid` is the Northbound `ACL` it belongs to.
+    public func getACLIDs() async throws(OVNManagerError) -> [OVNACLID] {
+        try await southboundRows(OVNACLID.self, from: OVNTable.aclID, describedAs: "ACL ID")
+    }
+
+    /// The Southbound `DHCP_Options` rows: the dictionary of DHCPv4 options this
+    /// OVN version supports, with their codes and value types. Not DHCP
+    /// configuration — that is the Northbound table `getDHCPOptions()` reads.
+    public func getSBDHCPOptions() async throws(OVNManagerError) -> [OVNSBDHCPOptions] {
+        try await southboundRows(OVNSBDHCPOptions.self, from: OVNTable.dhcpOptions, describedAs: "DHCP Options")
+    }
+
+    /// The `DHCPv6_Options` dictionary, the IPv6 twin of `getSBDHCPOptions()`.
+    public func getSBDHCPv6Options() async throws(OVNManagerError) -> [OVNSBDHCPv6Options] {
+        try await southboundRows(OVNSBDHCPv6Options.self, from: OVNTable.dhcpv6Options, describedAs: "DHCPv6 Options")
+    }
+
+    // MARK: ovsdb-server's own configuration
+
+    /// The `Connection` rows, resolving `OVNSBGlobal.connections`. Their
+    /// `is_connected` and `status` are ephemeral columns ovsdb-server maintains
+    /// live, so this reports which configured remotes are actually up.
+    public func getConnections() async throws(OVNManagerError) -> [OVNSBConnection] {
+        try await southboundRows(OVNSBConnection.self, from: OVNTable.connection, describedAs: "Connection")
+    }
+
+    /// The singleton `SSL` row, resolving `OVNSBGlobal.ssl`, or nil if the
+    /// database has none. This is ovsdb-server's own TLS material — paths on
+    /// *its* host — not the `OVSDBTLSConfiguration` this client connects with.
+    public func getSSL() async throws(OVNManagerError) -> OVNSBSSL? {
+        try await southboundRow(OVNSBSSL.self, from: OVNTable.ssl, describedAs: "SSL")
+    }
+
+    /// The `RBAC_Role` rows: which restrictions ovsdb-server is enforcing on
+    /// each connection role.
+    public func getRBACRoles() async throws(OVNManagerError) -> [OVNRBACRole] {
+        try await southboundRows(OVNRBACRole.self, from: OVNTable.rbacRole, describedAs: "RBAC Role")
+    }
+
+    /// The `RBAC_Permission` rows, resolving `OVNRBACRole.permissions`.
+    public func getRBACPermissions() async throws(OVNManagerError) -> [OVNRBACPermission] {
+        try await southboundRows(OVNRBACPermission.self, from: OVNTable.rbacPermission, describedAs: "RBAC Permission")
+    }
+
+    // MARK: - Southbound Writes
+    //
+    // The Southbound database is ovn-northd's output, and writing what another
+    // process owns is normally a mistake: northd overwrites it on its next
+    // recompute. These two operations are the exceptions — neither has a
+    // Northbound equivalent, and each is an operational intervention rather
+    // than an edit. They are separated from the reads above for that reason.
+
+    /// Evicts a chassis, mirroring `ovn-sbctl chassis-del`: the standard way to
+    /// remove a hypervisor that is not coming back.
+    ///
+    /// Destructive, and not a way to make a *live* chassis go away —
+    /// ovn-controller re-registers its own `Chassis` row within seconds, so
+    /// against a running hypervisor this deletes rows that immediately return,
+    /// having in the meantime unbound every port on it.
+    ///
+    /// Three tables in one transaction, because nothing else cleans them up:
+    ///
+    /// - The chassis's `Encap` rows. Not a root table, so ovsdb-server would
+    ///   collect them once `Chassis.encaps` no longer referenced them; deleted
+    ///   explicitly anyway, matching `ovn-sbctl`, so the outcome does not depend
+    ///   on when collection runs.
+    /// - Its `Chassis_Private` row, which is the one that actually matters.
+    ///   `Chassis_Private` *is* a root table and is keyed by name rather than by
+    ///   a reference, so deleting the `Chassis` row leaves it behind — and
+    ///   ovn-northd derives `NB_Global.hv_cfg` from the minimum `nb_cfg` across
+    ///   every `Chassis_Private` row, skipping only ones marked remote. A
+    ///   leftover row pins that minimum at the dead chassis's last value
+    ///   forever, which stalls `waitForHypervisors(timeout:)` for good.
+    /// - The `Chassis` row itself. Every reference to it —
+    ///   `Port_Binding.chassis`, `Gateway_Chassis.chassis`, `HA_Chassis.chassis`,
+    ///   `IGMP_Group.chassis` — is weak, so those columns clear themselves
+    ///   rather than blocking the delete. Ports bound to it therefore go
+    ///   unbound, which is the point of an eviction and also its blast radius.
+    ///
+    /// Identified by name rather than UUID because name is what ties the three
+    /// tables together: `Chassis_Private` and `Encap.chassis_name` have no UUID
+    /// reference to follow back.
+    ///
+    /// Throws `operationFailed` if no chassis by that name exists.
+    public func deleteChassis(named name: String) async throws(OVNManagerError) {
+        try requireSouthbound("Chassis")
+
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let ownerCondition = OVSDBCondition(column: "chassis_name", function: "==", value: .string(name))
+
+        let operations: [OVSDBOperation] = [
+            .delete(from: OVNTable.encap, where: [ownerCondition]),
+            .delete(from: OVNTable.chassisPrivate, where: [nameCondition]),
+            .delete(from: OVNTable.chassis, where: [nameCondition]),
+        ]
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        // The `Chassis` delete is the one that decides whether the chassis
+        // existed: a chassis with no encaps and no Chassis_Private row is
+        // unusual but legal, so a zero count on either of those says nothing.
+        let chassisIndex = operations.count - 1
+        guard results.count > chassisIndex,
+              case .object(let deleteResult) = results[chassisIndex],
+              case .number(let count)? = deleteResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid delete response format")
         }
 
-        let rows = try await connection.selectAll(from: OVNTable.sbGlobal, in: database)
-        guard let firstRow = rows.first else { return nil }
-        return try parseRow(firstRow, as: OVNSBGlobal.self)
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Chassis not found: \(name)")
+        }
+
+        logger.info("Deleted chassis: \(name)")
+    }
+
+    /// Binds a port to a chassis by writing `Port_Binding.chassis` directly, or
+    /// unbinds it when `chassisName` is nil.
+    ///
+    /// This is ovn-controller's column: on the chassis where a port's VIF
+    /// appears, ovn-controller claims the port by writing itself here, and it
+    /// will re-claim a port whose binding was moved out from under it. Setting
+    /// it by hand is therefore for the cases where no ovn-controller will do it:
+    /// completing a migration whose source hypervisor died, or clearing a
+    /// binding that is stuck on a chassis that is gone. To *ask* OVN to move a
+    /// port, set `requested_chassis` instead and let ovn-controller rebind it —
+    /// see `setPortBindingRequestedChassis(logicalPort:chassisNamed:)`.
+    ///
+    /// Throws `operationFailed` if the port binding or the named chassis does
+    /// not exist.
+    public func setPortBindingChassis(logicalPort: String, chassisNamed chassisName: String?) async throws(OVNManagerError) {
+        try await setPortBindingChassisColumn("chassis", logicalPort: logicalPort, chassisNamed: chassisName)
+    }
+
+    /// Sets `Port_Binding.requested_chassis` — where the port *should* end up —
+    /// or clears it when `chassisName` is nil.
+    ///
+    /// This is how a live migration is driven from the Southbound side: the
+    /// requested chassis is the destination, `chassis` stays the current holder,
+    /// and ovn-controller moves the binding when the VIF actually appears there.
+    /// Because it expresses intent rather than fact, this is the safer of the
+    /// two writes — nothing is unbound by setting it.
+    ///
+    /// ovn-northd normally derives the column from
+    /// `Logical_Switch_Port.options:requested-chassis`, and will overwrite what
+    /// is written here on its next recompute of that port. Setting the
+    /// Northbound option is the durable way to express the same thing; this is
+    /// the immediate one.
+    ///
+    /// Throws `operationFailed` if the port binding or the named chassis does
+    /// not exist.
+    public func setPortBindingRequestedChassis(logicalPort: String, chassisNamed chassisName: String?) async throws(OVNManagerError) {
+        try await setPortBindingChassisColumn("requested_chassis", logicalPort: logicalPort, chassisNamed: chassisName)
     }
 }
 
@@ -2317,6 +2612,95 @@ private extension OVNManager {
         guard database == OVNDatabase.northbound else {
             throw OVNManagerError.operationFailed("\(description) operations require northbound database")
         }
+    }
+
+    /// The mirror image, for the southbound-only tables. Worth rejecting locally
+    /// rather than letting the request go out: eleven table names exist in both
+    /// databases with different columns, so a southbound read issued against
+    /// northbound would not fail as an unknown table — it would come back with
+    /// the wrong row shape and surface as a `decodingError` naming a column.
+    func requireSouthbound(_ description: String) throws(OVNManagerError) {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("\(description) operations require southbound database")
+        }
+    }
+
+    /// Every southbound read is the same three steps — reject a northbound
+    /// manager, select the whole table, decode each row — so they are written
+    /// once here and each getter stays a single line.
+    func southboundRows<T: Codable>(
+        _ type: T.Type,
+        from table: String,
+        describedAs description: String
+    ) async throws(OVNManagerError) -> [T] {
+        try requireSouthbound(description)
+
+        let rows = try await connection.selectAll(from: table, in: database)
+        return try parseRows(rows, as: type)
+    }
+
+    /// `southboundRows` for a `maxRows: 1` table, where "no row" is a normal
+    /// answer rather than an error.
+    func southboundRow<T: Codable>(
+        _ type: T.Type,
+        from table: String,
+        describedAs description: String
+    ) async throws(OVNManagerError) -> T? {
+        return try await southboundRows(type, from: table, describedAs: description).first
+    }
+
+    /// Writes one of `Port_Binding`'s two chassis columns, resolving the chassis
+    /// name to the UUID the column actually holds.
+    ///
+    /// Both columns are *weak* references, which is the reason for the `wait`
+    /// guard: had the chassis been deleted between the lookup and the write,
+    /// ovsdb-server would drop the dangling UUID and report the update as
+    /// succeeding, leaving the caller believing a port was bound when it had
+    /// been silently unbound instead. The guard turns that race into a failed
+    /// transaction.
+    ///
+    /// A nil `chassisName` writes the empty set, which is how RFC 7047 spells an
+    /// unset optional column; there is nothing to guard in that case.
+    func setPortBindingChassisColumn(
+        _ column: String,
+        logicalPort: String,
+        chassisNamed chassisName: String?
+    ) async throws(OVNManagerError) {
+        try requireSouthbound("Port Binding")
+
+        var guardOperations: [OVSDBOperation] = []
+        let value: JSONValue
+
+        if let chassisName {
+            let chassisCondition = OVSDBCondition(column: "name", function: "==", value: .string(chassisName))
+            guard let chassisUUID = try await rowUUID(in: OVNTable.chassis, where: chassisCondition) else {
+                throw OVNManagerError.operationFailed("Chassis not found: \(chassisName)")
+            }
+            guardOperations = rowExistenceWaitOps([chassisUUID], in: OVNTable.chassis)
+            value = .array([.string("uuid"), .string(chassisUUID)])
+        } else {
+            value = .array([.string("set"), .array([])])
+        }
+
+        let portCondition = OVSDBCondition(column: "logical_port", function: "==", value: .string(logicalPort))
+
+        var operations = guardOperations
+        let updateIndex = operations.count
+        operations.append(.update(OVNTable.portBinding, where: [portCondition], row: [column: value]))
+
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count > updateIndex,
+              case .object(let updateResult) = results[updateIndex],
+              case .number(let count)? = updateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Port binding not found: \(logicalPort)")
+        }
+
+        logger.info("Set Port_Binding.\(column) of \(logicalPort) to \(chassisName ?? "unset")")
     }
 
     /// Waits for one of `NB_Global`'s sequence-number columns to reach `target`,

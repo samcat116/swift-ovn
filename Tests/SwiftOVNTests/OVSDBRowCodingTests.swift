@@ -690,6 +690,733 @@ struct OVSDBRowDecoderTests {
         #expect(flow.table_id == 8)
     }
 
+    /// The row that makes every other Southbound row legible. `type` and
+    /// `nb_uuid` name the Northbound datapath directly; `external_ids` carries
+    /// the same answer, which is the only place it lives on an older schema.
+    @Test("A Datapath_Binding for a logical switch")
+    func datapathBindingForLogicalSwitch() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "tunnel_key": .number(7),
+            "type": .string("logical-switch"),
+            "nb_uuid": wireUUID(uuidB),
+            "load_balancers": emptySet,
+            "external_ids": wireStringMap(["logical-switch": uuidB, "name": "public"]),
+        ]
+
+        let datapath = try OVSDBRowDecoder.decode(OVNDatapathBinding.self, from: row)
+
+        #expect(datapath.uuid == uuidA)
+        #expect(datapath.tunnel_key == 7)
+        #expect(datapath.datapathType == "logical-switch")
+        // A ["uuid", ...] atom in a non-reference column still collapses to its
+        // string: nb_uuid points into the *other* database, so ovsdb-server
+        // cannot type it as a reference.
+        #expect(datapath.nb_uuid == uuidB)
+        #expect(datapath.load_balancers == nil)
+        #expect(datapath.external_ids == ["logical-switch": uuidB, "name": "public"])
+    }
+
+    /// A Southbound database predating `type`/`nb_uuid` sends neither, and the
+    /// caller has to fall back to `external_ids` — which is why those two are
+    /// optional even though a current northd always writes them.
+    @Test("A Datapath_Binding from a schema without the type columns")
+    func datapathBindingFromOlderSchema() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "tunnel_key": .number(9),
+            "load_balancers": emptySet,
+            "external_ids": wireStringMap(["logical-router": uuidC]),
+        ]
+
+        let datapath = try OVSDBRowDecoder.decode(OVNDatapathBinding.self, from: row)
+
+        #expect(datapath.datapathType == nil)
+        #expect(datapath.nb_uuid == nil)
+        #expect(datapath.external_ids == ["logical-router": uuidC])
+    }
+
+    /// A group with a single member arrives as a bare ["uuid", ...] atom rather
+    /// than a set — the shape most likely to break a reference-set column, and
+    /// one real deployments produce constantly.
+    @Test("A Logical_DP_Group's datapaths decode from every wire shape", arguments: [
+        (emptySet, nil),
+        (wireUUID(uuidB), [uuidB]),
+        (wireSet([wireUUID(uuidB), wireUUID(uuidC)]), [uuidB, uuidC]),
+    ] as [(JSONValue, [String]?)])
+    func logicalDPGroupDatapaths(wire: JSONValue, expected: [String]?) throws {
+        let row: OVSDBRow = ["_uuid": wireUUID(uuidA), "datapaths": wire]
+
+        let group = try OVSDBRowDecoder.decode(OVNLogicalDPGroup.self, from: row)
+
+        #expect(group.datapaths == expected)
+    }
+
+    @Test("A MAC_Binding row")
+    func macBindingRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp-public"),
+            "ip": .string("192.168.1.20"),
+            "mac": .string("52:54:00:12:35:02"),
+            "timestamp": .number(1_735_689_600_000),
+            "datapath": wireUUID(uuidB),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNMACBinding.self, from: row)
+
+        #expect(binding.logical_port == "lrp-public")
+        #expect(binding.ip == "192.168.1.20")
+        #expect(binding.mac == "52:54:00:12:35:02")
+        #expect(binding.timestamp == 1_735_689_600_000)
+        #expect(binding.datapath == uuidB)
+    }
+
+    /// `timestamp` postdates the table, so a database without the column omits
+    /// it entirely rather than sending 0 — the row still has to decode.
+    @Test("A MAC_Binding from a schema without timestamp")
+    func macBindingWithoutTimestamp() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp-public"),
+            "ip": .string("fd00::14"),
+            "mac": .string("52:54:00:12:35:03"),
+            "datapath": wireUUID(uuidB),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNMACBinding.self, from: row)
+
+        #expect(binding.timestamp == nil)
+        #expect(binding.ip == "fd00::14")
+    }
+
+    /// FDB identifies its datapath and port by tunnel key, not by UUID
+    /// reference — plain integers where the rest of the database sends atoms.
+    @Test("An FDB row")
+    func fdbRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "mac": .string("50:6b:8d:d1:00:07"),
+            "dp_key": .number(7),
+            "port_key": .number(3),
+            "timestamp": .number(1_735_689_600_000),
+        ]
+
+        let entry = try OVSDBRowDecoder.decode(OVNFDB.self, from: row)
+
+        #expect(entry.mac == "50:6b:8d:d1:00:07")
+        #expect(entry.dp_key == 7)
+        #expect(entry.port_key == 3)
+        #expect(entry.timestamp == 1_735_689_600_000)
+    }
+
+    @Test("A Static_MAC_Binding row")
+    func staticMACBindingRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp-public"),
+            "ip": .string("192.168.1.30"),
+            "mac": .string("52:54:00:12:35:04"),
+            "override_dynamic_mac": .boolean(true),
+            "datapath": wireUUID(uuidB),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNSBStaticMACBinding.self, from: row)
+
+        #expect(binding.override_dynamic_mac == true)
+        #expect(binding.datapath == uuidB)
+    }
+
+    @Test("An Advertised_MAC_Binding row")
+    func advertisedMACBindingRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "logical_port": wireUUID(uuidC),
+            "ip": .string("192.168.100.1"),
+            "mac": .string("52:54:00:12:35:05"),
+            "external_ids": wireMap([]),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNAdvertisedMACBinding.self, from: row)
+
+        // Unlike MAC_Binding.logical_port, which is a name, this one is a real
+        // reference and so arrives as a UUID atom.
+        #expect(binding.logical_port == uuidC)
+        #expect(binding.datapath == uuidB)
+        #expect(binding.ip == "192.168.100.1")
+    }
+
+    @Test("A Multicast_Group with a single port")
+    func multicastGroupWithSinglePort() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "name": .string("_MC_flood"),
+            "tunnel_key": .number(32768),
+            "ports": wireUUID(uuidC),
+        ]
+
+        let group = try OVSDBRowDecoder.decode(OVNMulticastGroup.self, from: row)
+
+        #expect(group.name == "_MC_flood")
+        #expect(group.tunnel_key == 32768)
+        #expect(group.ports == [uuidC])
+    }
+
+    /// `datapath` and `chassis` are weak and optional, so a group whose chassis
+    /// has gone reads as unset rather than failing to decode.
+    @Test("An IGMP_Group with a departed chassis")
+    func igmpGroupWithDepartedChassis() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "address": .string("239.0.0.1"),
+            "protocol": .string("IGMPv3"),
+            "datapath": wireUUID(uuidB),
+            "chassis": emptySet,
+            "ports": emptySet,
+            "chassis_name": .string("hv-1"),
+        ]
+
+        let group = try OVSDBRowDecoder.decode(OVNIGMPGroup.self, from: row)
+
+        #expect(group.address == "239.0.0.1")
+        #expect(group.protocolType == "IGMPv3")
+        #expect(group.datapath == uuidB)
+        #expect(group.chassis == nil)
+        #expect(group.ports == nil)
+        #expect(group.chassis_name == "hv-1")
+    }
+
+    /// Every configuration column of IP_Multicast is optional, and unset means
+    /// "the default" rather than "off" — so a row of empty sets is the normal
+    /// shape, not a broken one.
+    @Test("An IP_Multicast row with nothing configured")
+    func ipMulticastWithNothingConfigured() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "enabled": emptySet,
+            "querier": emptySet,
+            "eth_src": .string(""),
+            "ip4_src": .string(""),
+            "ip6_src": .string(""),
+            "table_size": emptySet,
+            "idle_timeout": emptySet,
+            "query_interval": emptySet,
+            "query_max_resp": emptySet,
+            "seq_no": .number(0),
+        ]
+
+        let options = try OVSDBRowDecoder.decode(OVNIPMulticast.self, from: row)
+
+        #expect(options.datapath == uuidB)
+        #expect(options.enabled == nil)
+        #expect(options.querier == nil)
+        #expect(options.table_size == nil)
+        #expect(options.idle_timeout == nil)
+        #expect(options.seq_no == 0)
+    }
+
+    @Test("An IP_Multicast row with snooping and a querier configured")
+    func ipMulticastWithSnoopingConfigured() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "datapath": wireUUID(uuidB),
+            "enabled": .boolean(true),
+            "querier": .boolean(true),
+            "eth_src": .string("50:6b:8d:d1:00:99"),
+            "ip4_src": .string("10.0.0.2"),
+            "ip6_src": .string(""),
+            "table_size": .number(4096),
+            "idle_timeout": .number(120),
+            "query_interval": .number(60),
+            "query_max_resp": .number(2),
+            "seq_no": .number(3),
+        ]
+
+        let options = try OVSDBRowDecoder.decode(OVNIPMulticast.self, from: row)
+
+        #expect(options.enabled == true)
+        #expect(options.querier == true)
+        #expect(options.table_size == 4096)
+        #expect(options.idle_timeout == 120)
+        #expect(options.query_interval == 60)
+        #expect(options.query_max_resp == 2)
+        #expect(options.seq_no == 3)
+    }
+
+    /// The empty-load-balancer-backends event, which is the whole reason this
+    /// table is worth reading.
+    @Test("A Controller_Event for empty load balancer backends")
+    func controllerEventForEmptyLoadBalancerBackends() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "event_type": .string("empty_lb_backends"),
+            "event_info": wireStringMap([
+                "vip": "10.0.0.100:80",
+                "protocol": "tcp",
+                "load_balancer": uuidB,
+            ]),
+            "chassis": wireUUID(uuidC),
+            "seq_num": .number(17),
+        ]
+
+        let event = try OVSDBRowDecoder.decode(OVNControllerEvent.self, from: row)
+
+        #expect(event.event_type == "empty_lb_backends")
+        #expect(event.event_info?["vip"] == "10.0.0.100:80")
+        #expect(event.event_info?["load_balancer"] == uuidB)
+        #expect(event.chassis == uuidC)
+        #expect(event.seq_num == 17)
+    }
+
+    @Test("An ECMP_Nexthop row")
+    func ecmpNexthopRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "nexthop": .string("172.16.0.1"),
+            "port": wireUUID(uuidB),
+            "datapath": wireUUID(uuidC),
+            "mac": .string("52:54:00:12:35:06"),
+            "external_ids": wireMap([]),
+        ]
+
+        let nexthop = try OVSDBRowDecoder.decode(OVNECMPNexthop.self, from: row)
+
+        #expect(nexthop.nexthop == "172.16.0.1")
+        #expect(nexthop.port == uuidB)
+        #expect(nexthop.datapath == uuidC)
+    }
+
+    /// An ACL_ID row is almost all `_uuid`: the row's own identity is what ties
+    /// the integer to a Northbound ACL.
+    @Test("An ACL_ID row")
+    func aclIDRow() throws {
+        let row: OVSDBRow = ["_uuid": wireUUID(uuidA), "id": .number(12)]
+
+        let aclID = try OVSDBRowDecoder.decode(OVNACLID.self, from: row)
+
+        #expect(aclID.uuid == uuidA)
+        #expect(aclID.id == 12)
+    }
+
+    /// The Southbound load balancer names the datapaths it applies to, either
+    /// individually or through a group — the opposite direction from the
+    /// Northbound row, which switches and routers reference.
+    @Test("A Southbound Load_Balancer attached through datapath groups")
+    func southboundLoadBalancerWithDatapathGroups() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("web-lb"),
+            "vips": wireStringMap(["10.0.0.100:80": "10.0.0.11:8080,10.0.0.12:8080"]),
+            "protocol": .string("tcp"),
+            "datapaths": emptySet,
+            "datapath_group": emptySet,
+            "ls_datapath_group": wireUUID(uuidB),
+            "lr_datapath_group": emptySet,
+            "options": wireStringMap(["hairpin_snat_ip": "169.254.169.5"]),
+            "external_ids": wireMap([]),
+        ]
+
+        let loadBalancer = try OVSDBRowDecoder.decode(OVNSBLoadBalancer.self, from: row)
+
+        #expect(loadBalancer.name == "web-lb")
+        #expect(loadBalancer.protocolType == "tcp")
+        #expect(loadBalancer.vips == ["10.0.0.100:80": "10.0.0.11:8080,10.0.0.12:8080"])
+        #expect(loadBalancer.datapaths == nil)
+        #expect(loadBalancer.datapath_group == nil)
+        #expect(loadBalancer.ls_datapath_group == uuidB)
+        #expect(loadBalancer.lr_datapath_group == nil)
+        #expect(loadBalancer.options == ["hairpin_snat_ip": "169.254.169.5"])
+    }
+
+    @Test("A Southbound Address_Set")
+    func southboundAddressSet() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("pg_web_ip4"),
+            "addresses": wireSet([.string("10.0.0.11"), .string("10.0.0.12")]),
+            "options": wireMap([]),
+        ]
+
+        let addressSet = try OVSDBRowDecoder.decode(OVNSBAddressSet.self, from: row)
+
+        #expect(addressSet.name == "pg_web_ip4")
+        #expect(addressSet.addresses == ["10.0.0.11", "10.0.0.12"])
+    }
+
+    /// Southbound `Port_Group.ports` holds port *names*, where the Northbound
+    /// column of the same name holds UUID references. A single member is a bare
+    /// string, which is exactly the shape a name column and a reference column
+    /// would disagree about.
+    @Test("A Southbound Port_Group with a single named member")
+    func southboundPortGroupWithSingleMember() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("web"),
+            "ports": .string("lsp-web-1"),
+        ]
+
+        let portGroup = try OVSDBRowDecoder.decode(OVNSBPortGroup.self, from: row)
+
+        #expect(portGroup.name == "web")
+        #expect(portGroup.ports == ["lsp-web-1"])
+    }
+
+    @Test("A Southbound DNS row")
+    func southboundDNSRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "records": wireStringMap(["vm1.ovn.org": "10.0.0.4 aef0::4"]),
+            "datapaths": wireUUID(uuidB),
+            "options": wireStringMap(["ovn-owned": "true"]),
+            "external_ids": wireMap([]),
+        ]
+
+        let dns = try OVSDBRowDecoder.decode(OVNSBDNS.self, from: row)
+
+        #expect(dns.records == ["vm1.ovn.org": "10.0.0.4 aef0::4"])
+        #expect(dns.datapaths == [uuidB])
+        #expect(dns.options == ["ovn-owned": "true"])
+    }
+
+    /// The Southbound meter and band have no `fair` and no `external_ids` — the
+    /// reason they are separate models from the Northbound pair rather than the
+    /// same ones read against another database.
+    @Test("A Southbound Meter and its band")
+    func southboundMeterAndBand() throws {
+        let meterRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("acl-log__\(uuidC)"),
+            "unit": .string("pktps"),
+            "bands": wireUUID(uuidB),
+        ]
+        let bandRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidB),
+            "action": .string("drop"),
+            "rate": .number(100),
+            "burst_size": .number(10),
+        ]
+
+        let meter = try OVSDBRowDecoder.decode(OVNSBMeter.self, from: meterRow)
+        let band = try OVSDBRowDecoder.decode(OVNSBMeterBand.self, from: bandRow)
+
+        #expect(meter.name == "acl-log__\(uuidC)")
+        #expect(meter.unit == "pktps")
+        #expect(meter.bands == [uuidB])
+        #expect(band.action == "drop")
+        #expect(band.rate == 100)
+        #expect(band.burst_size == 10)
+    }
+
+    @Test("A Southbound Mirror row")
+    func southboundMirrorRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("mirror-1"),
+            "filter": .string("both"),
+            "sink": .string("10.0.0.50"),
+            "type": .string("erspan"),
+            "index": .number(4),
+            "external_ids": wireMap([]),
+        ]
+
+        let mirror = try OVSDBRowDecoder.decode(OVNSBMirror.self, from: row)
+
+        #expect(mirror.name == "mirror-1")
+        #expect(mirror.filter == "both")
+        #expect(mirror.sink == "10.0.0.50")
+        #expect(mirror.mirrorType == "erspan")
+        #expect(mirror.index == 4)
+    }
+
+    /// The Southbound gateway/HA rows reference `Chassis` weakly, where their
+    /// Northbound counterparts hold a `chassis_name` string. An evicted chassis
+    /// therefore leaves these columns unset rather than dangling.
+    @Test("Southbound gateway and HA chassis rows after an eviction")
+    func southboundGatewayAndHAChassisAfterEviction() throws {
+        let gatewayRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("cr-lrp-public_hv-1"),
+            "chassis": emptySet,
+            "priority": .number(100),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+        let haRow: OVSDBRow = [
+            "_uuid": wireUUID(uuidB),
+            "chassis": wireUUID(uuidC),
+            "priority": .number(32767),
+            "external_ids": wireMap([]),
+        ]
+
+        let gateway = try OVSDBRowDecoder.decode(OVNSBGatewayChassis.self, from: gatewayRow)
+        let haChassis = try OVSDBRowDecoder.decode(OVNSBHAChassis.self, from: haRow)
+
+        #expect(gateway.name == "cr-lrp-public_hv-1")
+        #expect(gateway.chassis == nil)
+        #expect(gateway.priority == 100)
+        #expect(haChassis.chassis == uuidC)
+        #expect(haChassis.priority == 32767)
+    }
+
+    /// `ref_chassis` is the column with no Northbound equivalent: the chassis
+    /// that need tunnels to the group rather than the ones that can host it.
+    @Test("A Southbound HA_Chassis_Group with ref_chassis")
+    func southboundHAChassisGroupWithRefChassis() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("hagrp-1"),
+            "ha_chassis": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
+            "ref_chassis": wireUUID(uuidC),
+            "external_ids": wireMap([]),
+        ]
+
+        let group = try OVSDBRowDecoder.decode(OVNSBHAChassisGroup.self, from: row)
+
+        #expect(group.name == "hagrp-1")
+        #expect(group.ha_chassis == [uuidB, uuidC])
+        #expect(group.ref_chassis == [uuidC])
+    }
+
+    @Test("A Southbound Chassis_Template_Var row")
+    func southboundChassisTemplateVarRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "chassis": .string("hv-1"),
+            "variables": wireStringMap(["nat_addr": "192.168.1.10"]),
+        ]
+
+        let templateVar = try OVSDBRowDecoder.decode(OVNSBChassisTemplateVar.self, from: row)
+
+        // A chassis *name*, not a reference — so a plain string, not an atom.
+        #expect(templateVar.chassis == "hv-1")
+        #expect(templateVar.variables == ["nat_addr": "192.168.1.10"])
+    }
+
+    /// The Southbound BFD row carries the negotiated timings and wire details as
+    /// required scalars, where the Northbound request has them all optional.
+    @Test("A Southbound BFD session")
+    func southboundBFDSession() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp-public"),
+            "dst_ip": .string("172.16.0.1"),
+            "src_port": .number(49_152),
+            "disc": .number(1_234_567),
+            "min_tx": .number(1000),
+            "min_rx": .number(1000),
+            "detect_mult": .number(5),
+            "status": .string("up"),
+            "chassis_name": .string("hv-1"),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let session = try OVSDBRowDecoder.decode(OVNSBBFD.self, from: row)
+
+        #expect(session.logical_port == "lrp-public")
+        #expect(session.dst_ip == "172.16.0.1")
+        #expect(session.src_port == 49_152)
+        #expect(session.disc == 1_234_567)
+        #expect(session.min_tx == 1000)
+        #expect(session.min_rx == 1000)
+        #expect(session.detect_mult == 5)
+        #expect(session.status == "up")
+        #expect(session.chassis_name == "hv-1")
+    }
+
+    @Test("A Southbound DHCP_Options dictionary entry")
+    func southboundDHCPOptionsEntry() throws {
+        let v4Row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("router"),
+            "code": .number(3),
+            "type": .string("ipv4"),
+        ]
+        let v6Row: OVSDBRow = [
+            "_uuid": wireUUID(uuidB),
+            "name": .string("dns_server"),
+            "code": .number(23),
+            "type": .string("ipv6"),
+        ]
+
+        let v4 = try OVSDBRowDecoder.decode(OVNSBDHCPOptions.self, from: v4Row)
+        let v6 = try OVSDBRowDecoder.decode(OVNSBDHCPv6Options.self, from: v6Row)
+
+        #expect(v4.name == "router")
+        #expect(v4.code == 3)
+        #expect(v4.optionType == "ipv4")
+        #expect(v6.name == "dns_server")
+        #expect(v6.code == 23)
+        #expect(v6.optionType == "ipv6")
+    }
+
+    /// A listening remote with RBAC applied. `is_connected` and `status` are
+    /// ephemeral columns ovsdb-server fills in live, and `status`'s values are
+    /// numbers-as-strings.
+    @Test("A Connection row with live status")
+    func connectionRowWithLiveStatus() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "target": .string("pssl:9642"),
+            "max_backoff": emptySet,
+            "inactivity_probe": .number(30_000),
+            "read_only": .boolean(false),
+            "role": .string("ovn-controller"),
+            "is_connected": .boolean(true),
+            "status": wireStringMap(["n_connections": "3", "sec_since_connect": "12"]),
+            "other_config": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let connection = try OVSDBRowDecoder.decode(OVNSBConnection.self, from: row)
+
+        #expect(connection.target == "pssl:9642")
+        #expect(connection.max_backoff == nil)
+        #expect(connection.inactivity_probe == 30_000)
+        #expect(connection.read_only == false)
+        #expect(connection.role == "ovn-controller")
+        #expect(connection.is_connected == true)
+        #expect(connection.status?["n_connections"] == "3")
+    }
+
+    /// `is_connected` and `status` are ephemeral, so a row that has never had a
+    /// connection can arrive without them.
+    @Test("A Connection row with no live state yet")
+    func connectionRowWithoutLiveState() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "target": .string("ssl:10.0.0.5:6642"),
+            "max_backoff": .number(8000),
+            "inactivity_probe": emptySet,
+            "read_only": .boolean(true),
+            "role": .string(""),
+            "other_config": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let connection = try OVSDBRowDecoder.decode(OVNSBConnection.self, from: row)
+
+        #expect(connection.max_backoff == 8000)
+        #expect(connection.inactivity_probe == nil)
+        #expect(connection.read_only == true)
+        #expect(connection.role == "")
+        #expect(connection.is_connected == nil)
+        #expect(connection.status == nil)
+    }
+
+    /// The SSL row holds paths on the ovsdb-server host. `ssl_ciphersuites`
+    /// postdates the others, so a database without it must still decode.
+    @Test("An SSL row without the TLS 1.3 ciphersuite column")
+    func sslRowWithoutCiphersuites() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "private_key": .string("/etc/ovn/key.pem"),
+            "certificate": .string("/etc/ovn/cert.pem"),
+            "ca_cert": .string("/etc/ovn/cacert.pem"),
+            "bootstrap_ca_cert": .boolean(false),
+            "ssl_protocols": .string("TLSv1.2,TLSv1.3"),
+            "ssl_ciphers": .string("HIGH:!aNULL"),
+            "external_ids": wireMap([]),
+        ]
+
+        let ssl = try OVSDBRowDecoder.decode(OVNSBSSL.self, from: row)
+
+        #expect(ssl.private_key == "/etc/ovn/key.pem")
+        #expect(ssl.certificate == "/etc/ovn/cert.pem")
+        #expect(ssl.ca_cert == "/etc/ovn/cacert.pem")
+        #expect(ssl.bootstrap_ca_cert == false)
+        #expect(ssl.ssl_protocols == "TLSv1.2,TLSv1.3")
+        #expect(ssl.ssl_ciphers == "HIGH:!aNULL")
+        #expect(ssl.ssl_ciphersuites == nil)
+    }
+
+    /// `RBAC_Role.permissions` is the one map in either OVN database whose
+    /// *values* are references, so each one arrives as a ["uuid", ...] atom that
+    /// has to collapse to a string.
+    @Test("An RBAC_Role's permissions map decodes UUID values")
+    func rbacRolePermissionsMap() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("ovn-controller"),
+            "permissions": wireMap([
+                (.string("Chassis"), wireUUID(uuidB)),
+                (.string("Chassis_Private"), wireUUID(uuidC)),
+            ]),
+        ]
+
+        let role = try OVSDBRowDecoder.decode(OVNRBACRole.self, from: row)
+
+        #expect(role.name == "ovn-controller")
+        #expect(role.permissions == ["Chassis": uuidB, "Chassis_Private": uuidC])
+    }
+
+    /// The `Chassis` permission ovn-controller actually runs under: authorized
+    /// by matching the row's `name` against the client's own ID.
+    @Test("An RBAC_Permission row")
+    func rbacPermissionRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "table": .string("Chassis"),
+            "authorization": .string("name"),
+            "insert_delete": .boolean(true),
+            "update": wireSet([.string("nb_cfg"), .string("external_ids")]),
+        ]
+
+        let permission = try OVSDBRowDecoder.decode(OVNRBACPermission.self, from: row)
+
+        #expect(permission.table == "Chassis")
+        #expect(permission.authorization == ["name"])
+        #expect(permission.insert_delete == true)
+        #expect(permission.update == ["nb_cfg", "external_ids"])
+    }
+
+    /// The zero-length authorization string is special — it authorizes every
+    /// client — so it must survive decoding as a member rather than being
+    /// mistaken for an unset column.
+    @Test("An RBAC_Permission authorizing every client")
+    func rbacPermissionAuthorizingEveryClient() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "table": .string("Controller_Event"),
+            "authorization": .string(""),
+            "insert_delete": .boolean(true),
+            "update": emptySet,
+        ]
+
+        let permission = try OVSDBRowDecoder.decode(OVNRBACPermission.self, from: row)
+
+        #expect(permission.authorization == [""])
+        #expect(permission.update == nil)
+    }
+
+    /// `nb_cfg_timestamp` is what a hypervisor measures propagation latency
+    /// against; a database predating the column omits it.
+    @Test("An SB_Global row with and without nb_cfg_timestamp", arguments: [
+        (JSONValue.number(1_735_689_600_000), 1_735_689_600_000),
+        (nil, nil),
+    ] as [(JSONValue?, Int?)])
+    func sbGlobalTimestamp(wire: JSONValue?, expected: Int?) throws {
+        var row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "nb_cfg": .number(41),
+            "connections": wireUUID(uuidB),
+            "ssl": wireUUID(uuidC),
+            "ipsec": .boolean(false),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+        if let wire { row["nb_cfg_timestamp"] = wire }
+
+        let global = try OVSDBRowDecoder.decode(OVNSBGlobal.self, from: row)
+
+        #expect(global.nb_cfg_timestamp == expected)
+        #expect(global.connections == [uuidB])
+        #expect(global.ssl == uuidC)
+    }
+
     // MARK: Open_vSwitch
 
     @Test("An Interface with unset and bare scalars")
