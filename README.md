@@ -269,7 +269,6 @@ The package includes comprehensive Swift models for:
 - `OVSPort` - Bridge ports
 - `OVSInterface` - Network interfaces
 - `OVSController` - OpenFlow controllers
-- `OVSFlow` - Flow table entries
 - `OVSMirror` - Port mirroring configuration
 - `OVSQoS` - Quality of service policies (the Open_vSwitch `QoS` table, distinct from `OVNQoS`)
 
@@ -345,21 +344,22 @@ let acl = OVNACL(
 try await SwiftOVN.createACL(acl)
 ```
 
-### Flow Management with OVS
+### OpenFlow Rules Are Out of Scope
 
-```swift
-// Build OpenFlow rules using the flow builder
-let flow = ovsManager.flowBuilder()
-    .table(0)
-    .priority(1000)
-    .match("in_port=1,dl_type=0x0800")
-    .actions("output:2")
-    .idleTimeout(300)
-    .build()
+`OVSManaging` covers the `Open_vSwitch` *database*. Installing, dumping and
+deleting OpenFlow rules is OpenFlow — a separate protocol spoken to
+`ovs-vswitchd` over its own channel, not reachable through the database socket.
+So there is no `getFlows`/`addFlow`/`OVSFlowBuilder` here; use `ovs-ofctl` or a
+dedicated OpenFlow client for flows.
 
-// Note: Flow operations typically require ovs-ofctl commands
-// This package focuses on OVSDB operations
-```
+What *is* here is the database side of OpenFlow configuration:
+`OVSBridge.protocols` selects the versions a bridge speaks, and `OVSController`
+plus `createController(_:onBridge:)` point it at a controller.
+
+> Versions before this change did declare those five methods. They could not
+> work, and `getFlows` returned `[]` — which a caller could not tell apart from
+> a bridge with no flows — so they were removed rather than left to fail at
+> runtime.
 
 ## Error Handling
 

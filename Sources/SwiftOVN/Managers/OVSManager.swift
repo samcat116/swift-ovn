@@ -468,39 +468,9 @@ public final class OVSManager: OVSManaging {
         logger.info("Deleted controller: \(target)")
     }
     
-    // MARK: - Flow Operations (Note: These would typically use ovs-ofctl commands, not OVSDB)
-    
-    public func getFlows(bridge: String, table: Int? = nil) async throws(OVNManagerError) -> [OVSFlow] {
-        // This is a simplified implementation
-        // In practice, you'd use ovs-ofctl dump-flows command
-        logger.warning("Flow operations typically require ovs-ofctl commands, not OVSDB")
-        return []
-    }
-    
-    public func addFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError) {
-        // This would typically use ovs-ofctl add-flow command
-        logger.warning("Flow operations typically require ovs-ofctl commands, not OVSDB")
-        throw OVNManagerError.operationFailed("Flow operations not implemented via OVSDB")
-    }
-    
-    public func deleteFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError) {
-        // This would typically use ovs-ofctl del-flows command
-        logger.warning("Flow operations typically require ovs-ofctl commands, not OVSDB")
-        throw OVNManagerError.operationFailed("Flow operations not implemented via OVSDB")
-    }
-    
-    public func deleteAllFlows(bridge: String) async throws(OVNManagerError) {
-        // This would typically use ovs-ofctl del-flows command
-        logger.warning("Flow operations typically require ovs-ofctl commands, not OVSDB")
-        throw OVNManagerError.operationFailed("Flow operations not implemented via OVSDB")
-    }
-    
-    public func modifyFlow(bridge: String, flow: OVSFlow) async throws(OVNManagerError) {
-        // This would typically use ovs-ofctl mod-flows command
-        logger.warning("Flow operations typically require ovs-ofctl commands, not OVSDB")
-        throw OVNManagerError.operationFailed("Flow operations not implemented via OVSDB")
-    }
-    
+    // OpenFlow rules are not an OVSDB concept, so there are no flow operations
+    // here — see the note on `OVSManaging`.
+
     // MARK: - Mirror Operations
     
     public func getMirrors() async throws(OVNManagerError) -> [OVSMirror] {

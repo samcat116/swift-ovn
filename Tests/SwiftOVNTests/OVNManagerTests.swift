@@ -281,23 +281,6 @@ struct OVNManagerTests {
         #expect(clearedPort.options == ["existing": "kept"])
     }
 
-    @Test("The flow builder assembles a flow")
-    func ovsFlowBuilder() throws {
-        let flow = OVSFlowBuilder()
-            .table(0)
-            .priority(1000)
-            .match("in_port=1")
-            .actions("output:2")
-            .idleTimeout(60)
-            .build()
-
-        #expect(flow.table == 0)
-        #expect(flow.priority == 1000)
-        #expect(flow.match == "in_port=1")
-        #expect(flow.actions == "output:2")
-        #expect(flow.idle_timeout == 60)
-    }
-
     @Test("A JSON-RPC error keeps its code, message and data")
     func jsonRPCErrorHandling() throws {
         let error = JSONRPCError(
