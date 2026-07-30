@@ -1,0 +1,19 @@
+Sources/SwiftOVN/Core/OVSDBConnectionCore.swift
+  s_f65b135d9b9b85::t_5e172d356e1572 246-249,257-259,261-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "216d08f1f695246b149f88a75de393e5a45dea36",
+  "prompts": {},
+  "sessions": {
+    "s_f65b135d9b9b85": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d20059d8-84b0-427f-a6e0-9cb58fbae441",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
