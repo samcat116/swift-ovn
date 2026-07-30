@@ -177,6 +177,23 @@ public protocol OVNManaging: Sendable {
     func updateDHCPOptions(uuid: String, _ dhcp: OVNDHCPOptions) async throws(OVNManagerError)
     func deleteDHCPOptions(uuid: String) async throws(OVNManagerError)
     
+    // Global Configuration and Sync Barrier (northbound)
+    func getNBGlobal() async throws(OVNManagerError) -> OVNNBGlobal?
+    func updateNBGlobalOptions(_ options: [String: String]) async throws(OVNManagerError)
+    func removeNBGlobalOptions(_ keys: [String]) async throws(OVNManagerError)
+    func setNBGlobalIPsec(_ enabled: Bool) async throws(OVNManagerError)
+    @discardableResult
+    func incrementNBCfg() async throws(OVNManagerError) -> Int
+    /// Waits until ovn-northd has translated everything written so far.
+    /// See `OVNManager.waitForNorthd(timeout:)`; the implementation defaults
+    /// the timeout, which a protocol requirement cannot express.
+    @discardableResult
+    func waitForNorthd(timeout: TimeAmount) async throws(OVNManagerError) -> Int
+    /// Waits until every hypervisor has caught up with everything written so
+    /// far. See `OVNManager.waitForHypervisors(timeout:)`.
+    @discardableResult
+    func waitForHypervisors(timeout: TimeAmount) async throws(OVNManagerError) -> Int
+
     // Monitoring
     func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String
     func stopMonitoring(monitorId: String) async throws(OVNManagerError)
@@ -195,6 +212,7 @@ public protocol OVNManaging: Sendable {
     func getLogicalFlows() async throws(OVNManagerError) -> [OVNLogicalFlow]
     func getAdvertisedRoutes() async throws(OVNManagerError) -> [OVNAdvertisedRoute]
     func getLearnedRoutes() async throws(OVNManagerError) -> [OVNLearnedRoute]
+    func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal?
 }
 
 // MARK: - OVN Database Constants
@@ -226,7 +244,10 @@ public enum OVNTable {
     public static let qos = "QoS"
     public static let meter = "Meter"
     public static let meterBand = "Meter_Band"
-    
+    /// The singleton northbound configuration row, and the `nb_cfg`/`sb_cfg`/
+    /// `hv_cfg` sequence numbers the sync barrier is built on.
+    public static let nbGlobal = "NB_Global"
+
     // Southbound tables
     public static let chassis = "Chassis"
     public static let chassisPrivate = "Chassis_Private"
@@ -235,6 +256,8 @@ public enum OVNTable {
     public static let advertisedRoute = "Advertised_Route"
     public static let learnedRoute = "Learned_Route"
     public static let encap = "Encap"
+    /// The singleton southbound configuration row (`OVNSBGlobal`).
+    public static let sbGlobal = "SB_Global"
 }
 
 // MARK: - Helper Extensions

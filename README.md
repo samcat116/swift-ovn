@@ -138,6 +138,34 @@ growing the buffer until the process runs out of memory. Work that can lag
 behind the stream should hand updates to its own queue, and re-monitor when a
 drop is reported.
 
+### Waiting for a Write to Reach the Dataplane
+
+An OVSDB transaction returning success means the northbound database accepted
+the write, not that anything forwards packets differently yet. `NB_Global`'s
+sequence numbers are how you find out: bump `nb_cfg`, then watch how far it has
+propagated. This is what `ovn-nbctl --wait=sb` and `--wait=hv` do.
+
+```swift
+let portUUID = try await SwiftOVN.createLogicalSwitchPort(port, onSwitch: "my-switch")
+
+// ovn-northd has translated the write into southbound logical flows.
+try await SwiftOVN.waitForNorthd(timeout: .seconds(30))
+
+// Every hypervisor has installed those flows — the dataplane is current.
+// Slower, and a chassis that is down holds it back until the timeout.
+try await SwiftOVN.waitForHypervisors(timeout: .seconds(60))
+
+// Or read the counters directly.
+let global = try await SwiftOVN.getNBGlobal()
+print("nb_cfg \(global?.nb_cfg ?? 0), northd at \(global?.sb_cfg ?? 0), hypervisors at \(global?.hv_cfg ?? 0)")
+```
+
+Both helpers increment `nb_cfg` themselves and return the value the counter
+they watch reached, or throw `OVNManagerError.timeoutError`. Global options are
+changed a key at a time — `updateNBGlobalOptions(_:)` merges rather than
+replaces, because ovn-northd keeps generated state (`svc_monitor_mac`,
+`mac_prefix`) in the same map.
+
 ## Architecture
 
 ### Core Components
@@ -166,6 +194,7 @@ The package includes comprehensive Swift models for:
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
+- `OVNNBGlobal` / `OVNSBGlobal` - Global configuration, and the `nb_cfg`/`sb_cfg`/`hv_cfg` sync barrier
 
 #### OVS Models
 - `OVSBridge` - Open vSwitch bridges
