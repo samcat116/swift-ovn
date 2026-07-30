@@ -14,14 +14,52 @@ public final class OVNManager: OVNManaging {
     private let logger: Logger
     private let database: String
     
-    public init(endpoint: OVSDBEndpoint, database: String = OVNDatabase.northbound, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    /// Manages `database` over a connection to the OVSDB cluster at `remotes`.
+    ///
+    /// - Parameters:
+    ///   - remotes: The servers of one OVN database cluster, tried in order —
+    ///     the equivalent of `ovn-nbctl --db=tcp:a:6641,tcp:b:6641,tcp:c:6641`.
+    ///   - reconnect: How a lost session is re-established. See
+    ///     `OVSDBReconnectPolicy`.
+    ///   - leaderOnly: Whether to insist on the remote that reports itself the
+    ///     RAFT leader of `database`. On by default, because writes are only
+    ///     accepted by the leader; it has no effect on a single remote, and a
+    ///     server too old to answer through `_Server` is used anyway.
+    public init(
+        remotes: OVSDBRemotes,
+        database: String = OVNDatabase.northbound,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnly: Bool = true,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
         self.connection = OVSDBConnection(
-            endpoint: endpoint,
+            remotes: remotes,
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnly ? database : nil,
             eventLoopGroup: eventLoopGroup,
             logger: logger
         )
         self.database = database
         self.logger = logger ?? Logger(label: "ovn-manager.ovn")
+    }
+
+    public convenience init(
+        endpoint: OVSDBEndpoint,
+        database: String = OVNDatabase.northbound,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnly: Bool = true,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            database: database,
+            reconnect: reconnect,
+            leaderOnly: leaderOnly,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
+        )
     }
 
     public convenience init(socketPath: String, database: String = OVNDatabase.northbound, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
@@ -44,6 +82,14 @@ public final class OVNManager: OVNManaging {
         get async {
             return await connection.isConnected
         }
+    }
+
+    public nonisolated var connectionState: OVSDBConnectionState {
+        return connection.connectionState
+    }
+
+    public nonisolated func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        return connection.connectionStates()
     }
     
     // MARK: - Database Operations

@@ -43,7 +43,29 @@ public final class OVSDBSocketConnection: OVSDBTransport {
     /// responsible for shutting it down; false when the caller injected one.
     private let ownsEventLoopGroup: Bool
 
-    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
+    /// Connects to one of `remotes`, in order, and — unless `reconnect` is
+    /// disabled — keeps re-establishing that session for as long as this object
+    /// lives.
+    ///
+    /// - Parameters:
+    ///   - remotes: The servers of one OVSDB cluster, tried in order. See
+    ///     `OVSDBRemotes`.
+    ///   - reconnect: How a lost session is re-established. See
+    ///     `OVSDBReconnectPolicy`, whose documentation also covers what
+    ///     reconnection deliberately does not paper over.
+    ///   - leaderOnlyDatabase: The clustered database whose RAFT leader this
+    ///     connection must be attached to, or nil to use whichever remote
+    ///     answers. Writes are only accepted by the leader, so a connection used
+    ///     for anything but reads wants this set. Enforced only when there is
+    ///     more than one remote, and only as far as the remote's own `_Server`
+    ///     database can report it.
+    public init(
+        remotes: OVSDBRemotes,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
         if let eventLoopGroup {
             self.eventLoopGroup = eventLoopGroup
             self.ownsEventLoopGroup = false
@@ -52,9 +74,27 @@ public final class OVSDBSocketConnection: OVSDBTransport {
             self.ownsEventLoopGroup = true
         }
         self.core = OVSDBConnectionCore(
-            endpoint: endpoint,
+            remotes: remotes,
             eventLoopGroup: self.eventLoopGroup,
-            logger: logger ?? Logger(label: "ovn-manager.socket")
+            logger: logger ?? Logger(label: "ovn-manager.socket"),
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase
+        )
+    }
+
+    public convenience init(
+        endpoint: OVSDBEndpoint,
+        reconnect: OVSDBReconnectPolicy = .default,
+        leaderOnlyDatabase: String? = nil,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil
+    ) {
+        self.init(
+            remotes: OVSDBRemotes(endpoint),
+            reconnect: reconnect,
+            leaderOnlyDatabase: leaderOnlyDatabase,
+            eventLoopGroup: eventLoopGroup,
+            logger: logger
         )
     }
 
@@ -63,14 +103,22 @@ public final class OVSDBSocketConnection: OVSDBTransport {
     }
 
     deinit {
+        // The reconnect supervisor holds the core strongly and, with the default
+        // policy, retries forever: without this it would outlive the last
+        // reference to this object and keep re-establishing a session nobody can
+        // use. Asynchronously, because `deinit` cannot await.
+        let core = self.core
+        let eventLoopGroup = self.eventLoopGroup
         // Only shut down a group we created; an injected one is the caller's
         // to manage. Without this, each connection created with no injected
-        // group leaks its event-loop thread. Shut down asynchronously: if the
-        // last reference is released by one of the group's own EventLoop
-        // callbacks, `deinit` runs on that EventLoop, where the synchronous
-        // variant would fatally trap.
-        if ownsEventLoopGroup {
-            eventLoopGroup.shutdownGracefully { _ in }
+        // group leaks its event-loop thread. After the core, since it makes
+        // promises on that group while stopping.
+        let ownsEventLoopGroup = self.ownsEventLoopGroup
+        Task {
+            await core.shutdown()
+            if ownsEventLoopGroup {
+                eventLoopGroup.shutdownGracefully { _ in }
+            }
         }
     }
 
@@ -128,6 +176,11 @@ public final class OVSDBSocketConnection: OVSDBTransport {
                         }
                     case .dropped(let count):
                         logger.warning("Discarded \(count) notification(s): the consumer of notifications() is not keeping up. Use notificationEvents() to observe this in-stream.")
+                    case .reconnected:
+                        // The stream carries notifications only, so the reconnect
+                        // is reported rather than delivered. A consumer that has
+                        // to act on it wants notificationEvents().
+                        logger.info("Connection re-established; monitors from the previous session are gone. Use notificationEvents() to observe this in-stream.")
                     }
                 }
                 continuation.finish()
@@ -145,8 +198,32 @@ public final class OVSDBSocketConnection: OVSDBTransport {
         return core.notificationHub.subscribe()
     }
 
+    /// Whether a session is up *right now*.
+    ///
+    /// With reconnection enabled this flickers: it is false for the duration of
+    /// a leader election and true again once the new leader answers, and nothing
+    /// in a boolean distinguishes that from a connection that has given up. It
+    /// keeps its original meaning — a request issued while it is false fails —
+    /// but for anything that acts on the answer, prefer `connectionState`.
     public var isConnectionActive: Bool {
         return core.isConnected
+    }
+
+    /// The connection's lifecycle state, including where reconnection has got
+    /// to. See `OVSDBConnectionState`.
+    public var connectionState: OVSDBConnectionState {
+        return core.stateHub.current
+    }
+
+    /// Streams every connection-state transition, starting with the current
+    /// state so a subscriber never has to guess where things stand.
+    ///
+    /// This is how up/down transitions are observed rather than inferred from a
+    /// thrown error. The stream finishes when this connection is released; a
+    /// consumer that falls behind loses intermediate transitions but never the
+    /// latest state.
+    public func connectionStates() -> AsyncStream<OVSDBConnectionState> {
+        return core.stateHub.subscribe()
     }
 }
 

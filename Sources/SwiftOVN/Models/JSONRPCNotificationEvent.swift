@@ -28,4 +28,16 @@ public enum JSONRPCNotificationEvent: Sendable {
     /// the monitor (`startMonitoring` returns a fresh snapshot) rather than
     /// carrying on.
     case dropped(count: Int)
+
+    /// The connection dropped and was automatically re-established (see
+    /// `OVSDBReconnectPolicy`). The stream itself survives, but nothing the
+    /// previous session held does: monitors live in the server's per-connection
+    /// state, so every monitor was gone at this point and any change made while
+    /// the connection was down went unreported.
+    ///
+    /// `OVSDBConnection` restarts its monitors when it sees this, so the flow of
+    /// updates resumes on its own; what it cannot do is fill the gap, which is
+    /// why anything replicating rows must re-read them. Resuming a monitor
+    /// exactly where it left off needs `monitor_cond_since`.
+    case reconnected
 }
