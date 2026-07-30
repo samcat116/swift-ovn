@@ -80,7 +80,9 @@ public extension OVNLogicalRouter {
             load_balancer: load_balancer,
             enabled: enabled,
             options: options,
-            external_ids: external_ids
+            external_ids: external_ids,
+            load_balancer_group: load_balancer_group,
+            copp: copp
         )
     }
 }

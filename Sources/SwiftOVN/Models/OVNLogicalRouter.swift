@@ -12,8 +12,9 @@ public struct OVNLogicalRouter: Codable, Sendable {
     public let policies: [String]?
     public let nat: [String]?
     public let load_balancer: [String]?
-    /// `Load_Balancer_Group` references. That table is not modeled yet, so
-    /// these stay UUID strings.
+    /// UUIDs of the `OVNLoadBalancerGroup` rows applied to this router. Unlike
+    /// `load_balancer`, which is a weak reference set, these are *strong*
+    /// references: a group cannot be deleted while a router still names it.
     public let load_balancer_group: [String]?
     /// `Copp` (control-plane protection) reference. That table is not modeled
     /// yet, so this stays a UUID string.
