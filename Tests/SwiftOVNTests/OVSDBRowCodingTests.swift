@@ -456,6 +456,125 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.external_ids == route.external_ids)
     }
 
+    /// `output_port` is a weak `Logical_Router_Port` reference in
+    /// `Logical_Router_Policy` and a plain port-name string in
+    /// `Logical_Router_Static_Route`, so the hints have to be table-scoped: the
+    /// policy's column becomes a UUID atom, the static route's stays a string
+    /// even when the same hints are asked for.
+    @Test("A router policy's output_port encodes as a UUID atom")
+    func routerPolicyOutputPortEncodesUUIDAtom() throws {
+        let policy = OVNLogicalRouterPolicy(
+            priority: 1000,
+            match: "ip4.src == 10.0.0.0/24",
+            action: "reroute",
+            nexthop: "192.168.1.1",
+            output_port: uuidB,
+            bfd_sessions: [uuidC]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(
+            from: policy,
+            hints: .ovn(table: OVNTable.logicalRouterPolicy)
+        )
+
+        #expect(row["output_port"] == wireUUID(uuidB))
+        #expect(row["bfd_sessions"] == wireSet([wireUUID(uuidC)]))
+        #expect(row["nexthop"] == .string("192.168.1.1"))
+        #expect(row["match"] == .string("ip4.src == 10.0.0.0/24"))
+        #expect(row["action"] == .string("reroute"))
+        #expect(row["priority"] == .number(1000))
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// The other half of that scoping: `output_port` must stay a plain string
+    /// under the hints a static route is written with — both the shared `.ovn`
+    /// set and the (empty) table-scoped addition for its own table. Only the
+    /// policy table opts into the UUID form.
+    @Test("A static route's output_port stays a string", arguments: [
+        OVSDBRowEncoder.ColumnHints.ovn,
+        .ovn(table: OVNTable.logicalRouterStaticRoute),
+    ] as [OVSDBRowEncoder.ColumnHints])
+    func staticRouteOutputPortStaysAString(hints: OVSDBRowEncoder.ColumnHints) throws {
+        let route = OVNLogicalRouterStaticRoute(
+            ip_prefix: "10.0.0.0/24",
+            nexthop: "192.168.1.1",
+            output_port: uuidB  // a port *name* that happens to look like a UUID
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: route, hints: hints)
+
+        #expect(row["output_port"] == .string(uuidB))
+    }
+
+    @Test("A router policy round trips")
+    func routerPolicyRoundTrip() throws {
+        let policy = OVNLogicalRouterPolicy(
+            priority: 32767,
+            match: "inport == \"lrp0\" && ip6",
+            action: "jump",
+            nexthops: ["fd00::1", "fd00::2"],
+            output_port: uuidB,
+            chain: "main",
+            jump_chain: "chain0",
+            bfd_sessions: [uuidA, uuidC],
+            options: ["pkt_mark": "42"],
+            external_ids: ["owner": "test"]
+        )
+
+        let hints = OVSDBRowEncoder.ColumnHints.ovn(table: OVNTable.logicalRouterPolicy)
+        let row = try OVSDBRowEncoder.makeRow(from: policy, hints: hints)
+        // nexthops is a plain string set; bfd_sessions is a reference set.
+        #expect(row["nexthops"] == wireSet([.string("fd00::1"), .string("fd00::2")]))
+        #expect(row["bfd_sessions"] == wireSet([wireUUID(uuidA), wireUUID(uuidC)]))
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterPolicy.self, from: row)
+
+        #expect(decoded.priority == policy.priority)
+        #expect(decoded.match == policy.match)
+        #expect(decoded.action == policy.action)
+        #expect(decoded.nexthop == nil)
+        #expect(decoded.nexthops == policy.nexthops)
+        #expect(decoded.output_port == policy.output_port)
+        #expect(decoded.chain == policy.chain)
+        #expect(decoded.jump_chain == policy.jump_chain)
+        #expect(decoded.bfd_sessions == policy.bfd_sessions)
+        #expect(decoded.options == policy.options)
+        #expect(decoded.external_ids == policy.external_ids)
+    }
+
+    /// A policy fresh from `ovn-nbctl lr-policy-add` has every optional column
+    /// transmitted as the empty set, and a single-element `nexthops` arrives as
+    /// the bare atom rather than a one-element set.
+    @Test("A Logical_Router_Policy with unset optional columns")
+    func routerPolicyWithUnsetOptionalColumns() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "priority": .number(100),
+            "match": .string("ip4.dst == 10.0.0.0/8"),
+            "action": .string("reroute"),
+            "nexthop": emptySet,
+            "nexthops": .string("172.16.0.1"),
+            "output_port": emptySet,
+            "chain": emptySet,
+            "jump_chain": emptySet,
+            "bfd_sessions": emptySet,
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let policy = try OVSDBRowDecoder.decode(OVNLogicalRouterPolicy.self, from: row)
+
+        #expect(policy.uuid == uuidA)
+        #expect(policy.priority == 100)
+        #expect(policy.action == "reroute")
+        #expect(policy.nexthop == nil)
+        #expect(policy.nexthops == ["172.16.0.1"])
+        #expect(policy.output_port == nil)
+        #expect(policy.chain == nil)
+        #expect(policy.jump_chain == nil)
+        #expect(policy.bfd_sessions == nil)
+        #expect(policy.options == [:])
+    }
+
     @Test("A logical router port round trips with IPv6 RA configs")
     func logicalRouterPortRoundTripWithIPv6RAConfigs() throws {
         let port = OVNLogicalRouterPort(
