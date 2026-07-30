@@ -1,0 +1,24 @@
+Tests/SwiftOVNTests/MessageRoutingTests.swift
+  s_6922798de3c6c2::t_7e868c3010429b 23-33,286-287,301-302,314
+Tests/SwiftOVNTests/TCPTransportTests.swift
+  s_6922798de3c6c2::t_7e868c3010429b 109-144,167-191
+  s_6922798de3c6c2::t_3509f34203b738 192-193
+Sources/SwiftOVN/Core/OVSDBSocketConnection.swift
+  s_6922798de3c6c2::t_7e868c3010429b 38-43,159-161,310-326,717-719,721
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.17",
+  "base_commit_sha": "547dd9c16a626ea64ae9a2586706926a8e8bfb78",
+  "prompts": {},
+  "sessions": {
+    "s_6922798de3c6c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "87c8570e-f65f-4a94-b54b-4042b023ee27",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Sam Schmitt <sam@samschmitt.com>"
+    }
+  }
+}
