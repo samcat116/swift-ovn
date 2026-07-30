@@ -77,6 +77,57 @@ public enum OVSDBReferenceTransactions {
         return operations
     }
 
+    /// Operations for creating a parent row together with the child rows its
+    /// reference column must point at: `insert`(child, with `uuid-name`) per
+    /// child, then `insert`(parent) with `referenceColumn` set to the children's
+    /// `named-uuid` references. The parent insert is last, so its result is the
+    /// last of the transaction's results.
+    ///
+    /// This is the shape a column with a schema minimum of one needs — a
+    /// `Meter`, whose `bands` cannot be empty, so the meter and its first band
+    /// have to commit together (`ovn-nbctl meter-add`). The children are in a
+    /// non-root table and are only reachable through the parent, so inserting
+    /// them in a separate transaction would just create rows that are
+    /// garbage-collected at commit.
+    ///
+    /// Whatever `row` holds for `referenceColumn` is overwritten with the
+    /// inserted children, and child `uuid-name`s are `<prefix>0`, `<prefix>1`, …
+    public static func insertWithChildren(
+        row: OVSDBRow,
+        into table: String,
+        uuidName: String,
+        referenceColumn: String,
+        childRows: [OVSDBRow],
+        childTable: String,
+        childUUIDNamePrefix: String
+    ) -> [OVSDBOperation] {
+        let childUUIDNames = childRows.indices.map { "\(childUUIDNamePrefix)\($0)" }
+
+        var operations = zip(childRows, childUUIDNames).map { childRow, childUUIDName in
+            OVSDBOperation(
+                op: "insert",
+                table: childTable,
+                row: childRow,
+                uuidName: childUUIDName
+            )
+        }
+
+        var row = row
+        row[referenceColumn] = .array([
+            .string("set"),
+            .array(childUUIDNames.map { .array([.string("named-uuid"), .string($0)]) })
+        ])
+
+        operations.append(OVSDBOperation(
+            op: "insert",
+            table: table,
+            row: row,
+            uuidName: uuidName
+        ))
+
+        return operations
+    }
+
     /// Operations for deleting a child row: one `mutate` per parent reference
     /// removing the UUID from the parent's column (matching zero parents is
     /// fine — the row may be an orphan or attached elsewhere), then the row

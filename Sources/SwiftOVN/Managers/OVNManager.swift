@@ -1369,6 +1369,185 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted QoS rule: \(uuid)")
     }
 
+    // MARK: - Meter Operations
+
+    public func getMeters() async throws(OVNManagerError) -> [OVNMeter] {
+        let rows = try await connection.selectAll(from: OVNTable.meter, in: database)
+        return try parseRows(rows, as: OVNMeter.self)
+    }
+
+    public func getMeter(named name: String) async throws(OVNManagerError) -> OVNMeter? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.meter, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNMeter.self)
+    }
+
+    /// Creates a meter and its bands in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl meter-add`. `Meter` is a root table, but `Meter.bands` has a
+    /// schema minimum of one, so a band-less meter is a constraint violation
+    /// ovsdb-server refuses — hence bands are a parameter of the create rather
+    /// than something attached afterwards, and there is no create that takes a
+    /// meter alone. Whatever `meter.bands` holds is ignored: the column is
+    /// written with the bands inserted here.
+    ///
+    /// The name check is only there for a better error message. `Meter.name` is
+    /// indexed, so ovsdb-server rejects a duplicate that races in after the
+    /// check; no `wait` op is needed to close the window (unlike
+    /// `createLogicalSwitch`, whose table has no index on `name`).
+    public func createMeter(_ meter: OVNMeter, withBands bands: [OVNMeterBand]) async throws(OVNManagerError) -> String {
+        guard !bands.isEmpty else {
+            throw OVNManagerError.operationFailed("Meter needs at least one band: \(meter.name)")
+        }
+
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(meter.name))
+
+        guard try await rowUUID(in: OVNTable.meter, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Meter already exists: \(meter.name)")
+        }
+
+        // A loop rather than `map`: `Sequence.map` is `rethrows`, which erases
+        // the typed throw back to `any Error`.
+        var bandRows: [OVSDBRow] = []
+        bandRows.reserveCapacity(bands.count)
+        for band in bands {
+            bandRows.append(try createRow(from: band))
+        }
+
+        let uuidValue = try await connection.insertWithChildren(
+            into: OVNTable.meter,
+            in: database,
+            row: try createRow(from: meter),
+            uuidName: "new_meter",
+            referenceColumn: "bands",
+            childRows: bandRows,
+            childTable: OVNTable.meterBand,
+            childUUIDNamePrefix: "new_meter_band_"
+        )
+
+        logger.info("Created meter: \(meter.name) with \(bands.count) band(s)")
+        return uuidValue
+    }
+
+    /// The single-band case, which is what ACL log rate limiting needs: one
+    /// meter, one `drop` band. See `createMeter(_:withBands:)`.
+    public func createMeter(_ meter: OVNMeter, withBand band: OVNMeterBand) async throws(OVNManagerError) -> String {
+        return try await createMeter(meter, withBands: [band])
+    }
+
+    /// Updates a meter's columns. A nil column on the model is left untouched;
+    /// note that passing an empty `bands` would clear a column whose schema
+    /// minimum is one, which ovsdb-server rejects. Use
+    /// `createMeterBand(_:onMeter:)` and `deleteMeterBand(uuid:)` to change the
+    /// band set.
+    public func updateMeter(uuid: String, _ meter: OVNMeter) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: meter)
+
+        let count = try await connection.update(table: OVNTable.meter, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(uuid)")
+        }
+
+        logger.info("Updated meter: \(meter.name)")
+    }
+
+    /// Deletes a meter. Its bands become unreferenced and are
+    /// garbage-collected with it, and `OVNACL.meter` holds a meter *name*
+    /// rather than a reference, so no ACL column has to be detached — a
+    /// dangling name just stops rate-limiting that ACL's logs.
+    ///
+    /// `Copp.meters` does hold strong references to `Meter`, so ovsdb-server
+    /// refuses to delete a meter a Copp row still names. That reference has to
+    /// be removed first; SwiftOVN has no Copp model to do it with.
+    public func deleteMeter(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.meter, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(uuid)")
+        }
+
+        logger.info("Deleted meter: \(uuid)")
+    }
+
+    public func deleteMeter(named name: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let count = try await connection.delete(from: OVNTable.meter, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(name)")
+        }
+
+        logger.info("Deleted meter: \(name)")
+    }
+
+    // MARK: - Meter Band Operations
+
+    public func getMeterBands() async throws(OVNManagerError) -> [OVNMeterBand] {
+        let rows = try await connection.selectAll(from: OVNTable.meterBand, in: database)
+        return try parseRows(rows, as: OVNMeterBand.self)
+    }
+
+    /// Adds a band to an existing meter (`Meter.bands`) in a single OVSDB
+    /// transaction. `Meter_Band` is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits — there is deliberately
+    /// no unattached create.
+    public func createMeterBand(_ band: OVNMeterBand, onMeter meterName: String) async throws(OVNManagerError) -> String {
+        let meterCondition = OVSDBCondition(column: "name", function: "==", value: .string(meterName))
+
+        guard try await rowUUID(in: OVNTable.meter, where: meterCondition) != nil else {
+            throw OVNManagerError.operationFailed("Meter not found: \(meterName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.meterBand,
+            in: database,
+            row: try createRow(from: band),
+            uuidName: "new_meter_band",
+            parentTable: OVNTable.meter,
+            parentColumn: "bands",
+            parentCondition: meterCondition
+        )
+
+        logger.info("Created meter band on meter: \(meterName)")
+        return uuidValue
+    }
+
+    public func updateMeterBand(uuid: String, _ band: OVNMeterBand) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: band)
+
+        let count = try await connection.update(table: OVNTable.meterBand, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter band not found: \(uuid)")
+        }
+
+        logger.info("Updated meter band: \(uuid)")
+    }
+
+    /// Detaches the band from its meter and deletes it in one transaction. A
+    /// meter's *last* band cannot be removed this way: emptying `Meter.bands`
+    /// violates its schema minimum of one, so ovsdb-server aborts the
+    /// transaction — delete the meter instead.
+    public func deleteMeterBand(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.meterBand,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.meter, column: "bands")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter band not found: \(uuid)")
+        }
+
+        logger.info("Deleted meter band: \(uuid)")
+    }
+
     // MARK: - DHCP Operations
 
     public func getDHCPOptions() async throws(OVNManagerError) -> [OVNDHCPOptions] {

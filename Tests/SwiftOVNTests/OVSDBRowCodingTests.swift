@@ -177,6 +177,69 @@ struct OVSDBRowDecoderTests {
         #expect(qos.bandwidth == [:])
     }
 
+    /// A meter fresh from `ovn-nbctl meter-add` has exactly one band, so
+    /// `bands` arrives as the bare UUID atom, and `fair` — the one optional
+    /// column — as the empty set.
+    @Test("A Meter with a single band and no fairness setting")
+    func meterWithSingleBandAndNoFairness() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("acl-log-meter"),
+            "unit": .string("pktps"),
+            "bands": wireUUID(uuidB),
+            "fair": emptySet,
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let meter = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(meter.uuid == uuidA)
+        #expect(meter.name == "acl-log-meter")
+        #expect(meter.unit == "pktps")
+        #expect(meter.bands == [uuidB])
+        #expect(meter.fair == nil)
+        #expect(meter.external_ids == ["owner": "test"])
+    }
+
+    @Test("A Meter with several bands and fairness set")
+    func meterWithSeveralBandsAndFairnessSet() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("copp-meter"),
+            "unit": .string("kbps"),
+            "bands": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
+            "fair": .boolean(true),
+            "external_ids": wireMap([]),
+        ]
+
+        let meter = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(meter.bands == [uuidB, uuidC])
+        #expect(meter.fair == true)
+        #expect(meter.external_ids == [:])
+    }
+
+    /// `action`, `rate` and `burst_size` are all required scalars, so a band row
+    /// never carries the empty set for them.
+    @Test("A Meter_Band row")
+    func meterBandRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidB),
+            "action": .string("drop"),
+            "rate": .number(100),
+            "burst_size": .number(25),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let band = try OVSDBRowDecoder.decode(OVNMeterBand.self, from: row)
+
+        #expect(band.uuid == uuidB)
+        #expect(band.action == "drop")
+        #expect(band.rate == 100)
+        #expect(band.burst_size == 25)
+        #expect(band.external_ids == ["owner": "test"])
+    }
+
     @Test("A Chassis with a non-optional string set")
     func chassisWithNonOptionalStringSet() throws {
         let row: OVSDBRow = [
@@ -923,6 +986,82 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.action == qos.action)
         #expect(decoded.bandwidth == qos.bandwidth)
         #expect(decoded.external_ids == qos.external_ids)
+    }
+
+    /// `bands` is a strong reference set, so its elements become UUID atoms;
+    /// `fair` must stay a boolean rather than being coerced into a number.
+    @Test("A Meter's bands encode as UUID atoms")
+    func meterBandsEncodeAsUUIDAtoms() throws {
+        let meter = OVNMeter(
+            name: "acl-log-meter",
+            unit: "pktps",
+            bands: [uuidB, uuidC],
+            fair: true,
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: meter, hints: .ovn)
+
+        #expect(row["bands"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["name"] == .string("acl-log-meter"))
+        #expect(row["unit"] == .string("pktps"))
+        #expect(row["fair"] == .boolean(true))
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// A meter created band-less carries no `bands` column at all, so the
+    /// create's own set of `named-uuid` references is what lands there — the
+    /// column has a schema minimum of one and an empty set would be rejected.
+    @Test("A Meter without bands omits the column")
+    func meterWithoutBandsOmitsTheColumn() throws {
+        let row = try OVSDBRowEncoder.makeRow(from: OVNMeter(name: "m0", unit: "kbps"), hints: .ovn)
+
+        #expect(row["bands"] == nil)
+        #expect(row["fair"] == nil)
+    }
+
+    @Test("A Meter round trips")
+    func meterRoundTrip() throws {
+        let meter = OVNMeter(name: "m1", unit: "kbps", bands: [uuidB], fair: false, external_ids: ["owner": "test"])
+
+        let row = try OVSDBRowEncoder.makeRow(from: meter, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(decoded.name == meter.name)
+        #expect(decoded.unit == meter.unit)
+        #expect(decoded.bands == meter.bands)
+        #expect(decoded.fair == meter.fair)
+        #expect(decoded.external_ids == meter.external_ids)
+    }
+
+    /// The band's rates are integer columns: they must stay JSON numbers, and
+    /// `action` must stay a plain string (it is an enum, not a reference).
+    @Test("A Meter_Band round trips")
+    func meterBandRoundTrip() throws {
+        let band = OVNMeterBand(rate: 100, burst_size: 25, external_ids: ["owner": "test"])
+
+        let row = try OVSDBRowEncoder.makeRow(from: band, hints: .ovn)
+        #expect(row["action"] == .string("drop"))
+        #expect(row["rate"] == .number(100))
+        #expect(row["burst_size"] == .number(25))
+        #expect(row["_uuid"] == nil)
+
+        let decoded = try OVSDBRowDecoder.decode(OVNMeterBand.self, from: row)
+
+        #expect(decoded.action == band.action)
+        #expect(decoded.rate == band.rate)
+        #expect(decoded.burst_size == band.burst_size)
+        #expect(decoded.external_ids == band.external_ids)
+    }
+
+    /// `burst_size` is a required column with no OVSDB default of its own, so
+    /// the omitted-burst case has to be written explicitly as 0 — the value
+    /// `ovn-nbctl meter-add` uses when no burst is given.
+    @Test("A Meter_Band defaults burst_size to zero")
+    func meterBandDefaultsBurstSizeToZero() throws {
+        let row = try OVSDBRowEncoder.makeRow(from: OVNMeterBand(rate: 1), hints: .ovn)
+
+        #expect(row["burst_size"] == .number(0))
     }
 
     @Test("QoS round trips")
