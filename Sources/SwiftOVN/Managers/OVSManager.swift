@@ -187,35 +187,23 @@ public final class OVSManager: OVSManaging {
         var portRow = try createRow(from: port)
         portRow["interfaces"] = .array([.string("named-uuid"), .string("new_interface")])
 
-        let operations = [
+        let operations: [OVSDBOperation] = [
             // Abort the whole transaction if the bridge vanished between the
             // check above and this transaction, so the inserts below can
             // never commit as orphans.
-            OVSDBOperation(
-                op: "wait",
-                table: OVSTable.bridge,
-                whereConditions: [bridgeCondition],
+            .wait(
+                OVSTable.bridge,
+                where: [bridgeCondition],
                 columns: ["name"],
                 rows: [["name": .string(bridgeName)]],
                 until: "==",
                 timeout: 0
             ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVSTable.interface,
-                row: interfaceRow,
-                uuidName: "new_interface"
-            ),
-            OVSDBOperation(
-                op: "insert",
-                table: OVSTable.port,
-                row: portRow,
-                uuidName: "new_port"
-            ),
-            OVSDBOperation(
-                op: "mutate",
-                table: OVSTable.bridge,
-                whereConditions: [bridgeCondition],
+            .insert(into: OVSTable.interface, row: interfaceRow, uuidName: "new_interface"),
+            .insert(into: OVSTable.port, row: portRow, uuidName: "new_port"),
+            .mutate(
+                OVSTable.bridge,
+                where: [bridgeCondition],
                 mutations: [OVSDBMutation(
                     column: "ports",
                     mutator: "insert",
