@@ -678,11 +678,13 @@ final class ClusterConnectionTests {
         try await connection.disconnect()
     }
 
-    @Test("A monitor stream is told the reconnect left a hole")
-    func monitorStreamIsToldTheReconnectLeftAHole() async throws {
-        // The updates that happened while the connection was down were sent to
-        // nobody, so continuing the stream silently would hand the consumer an
-        // incomplete view. Resuming without a gap needs monitor_cond_since.
+    @Test("A restarted monitor's snapshot reaches the stream before the new session's updates")
+    func restartedMonitorsSnapshotPrecedesTheNewSessionsUpdates() async throws {
+        // The ordering the whole pipeline exists for. A re-established monitor's
+        // reply is the answer to a request while its live updates come from the
+        // notification hub, so without one place seeing both, a consumer could be
+        // handed the new session's changes and only then the snapshot they are
+        // changes to — leaving it with rows from before the reconnect.
         let server = try await startServer()
         let connection = OVSDBConnection(
             remotes: OVSDBRemotes(server.endpoint),
@@ -691,7 +693,7 @@ final class ClusterConnectionTests {
         )
         try await connection.connect()
 
-        let updates = connection.monitorUpdates()
+        let batches = connection.monitorTableUpdates()
         _ = try await connection.startMonitoring(
             database: Self.database,
             tables: ["Logical_Switch": OVSDBMonitorRequest()]
@@ -699,22 +701,180 @@ final class ClusterConnectionTests {
 
         // Drained by one task with a deadline: a stream that neither yields nor
         // fails must show up as a failure, not as a hung test run.
-        let drained = Task {
-            var tables: [String] = []
-            for try await update in updates {
-                tables.append(update.table)
+        let collected = Task {
+            var seen: [(OVSDBTableUpdates.Origin, String?)] = []
+            for try await batch in batches {
+                seen.append((batch.origin, batch.updates.first?.new?["name"]?.stringValue))
+                if seen.count == 3 { break }
             }
-            return tables
+            return seen
         }
 
         // The stub pushes one update per monitor, the way ovsdb-server does.
         #expect(await eventually { server.monitors.count == 1 })
         await dropSessions(of: server)
 
+        let seen = try await withDeadline { try await collected.value }
+        #expect(seen.map(\.0) == [.live, .snapshot, .live])
+        #expect(
+            seen.map(\.1) == ["ls1", "ls0", "ls1"],
+            "The restarted monitor's rows must arrive before the new session's, saw \(seen)"
+        )
+
+        try await connection.disconnect()
+    }
+
+    @Test("A resumed monitor delivers exactly the changes made while the connection was down")
+    func resumedMonitorDeliversTheChangesMissed() async throws {
+        // What `monitor_cond_since` is for: the consumer keeps the rows it has
+        // and applies a delta, instead of the server re-sending a Southbound
+        // database on every leader election.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates(monitorId: "flows")
+        _ = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+
+        // The first reply is returned to the caller, not streamed, so the first
+        // batch here is the one the reconnect produced.
+        let first = Task { () -> OVSDBTableUpdates? in
+            for try await batch in batches { return batch }
+            return nil
+        }
+        await dropSessions(of: server)
+
+        let batch = try #require(try await withDeadline { try await first.value })
+        #expect(batch.origin == .resumed)
+        #expect(batch.monitorId == "flows")
+        #expect(batch.lastTransactionId == ClusterStubServer.transactionId)
+        #expect(batch.updates.first?.kind == .modify)
+        #expect(batch.updates.first?.diff == ["name": .string("ls0-renamed")])
+
+        try await connection.disconnect()
+    }
+
+    @Test("A monitor that could not be resumed delivers a snapshot")
+    func monitorThatCouldNotBeResumedDeliversASnapshot() async throws {
+        // A different member of the cluster, or one that compacted the requested
+        // transaction away, answers `found: false` with the rows themselves. The
+        // consumer has to be able to tell: merging a snapshot would leave rows
+        // deleted during the outage in place forever.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates(monitorId: "flows")
+        _ = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+
+        let first = Task { () -> OVSDBTableUpdates? in
+            for try await batch in batches { return batch }
+            return nil
+        }
+        server.stopResumingMonitors()
+        await dropSessions(of: server)
+
+        let batch = try #require(try await withDeadline { try await first.value })
+        #expect(batch.origin == .snapshot)
+        #expect(batch.updates.first?.kind == .initial)
+        #expect(batch.updates.first?.new == ["name": .string("ls0")])
+
+        try await connection.disconnect()
+    }
+
+    @Test("A monitor the new session refuses ends its stream")
+    func monitorTheNewSessionRefusesEndsItsStream() async throws {
+        // The one reconnect a consumer still has to be told about: the monitor is
+        // not coming back, so leaving the stream open would leave it waiting for
+        // updates that will never arrive.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates(monitorId: "flows")
+        let otherBatches = connection.monitorTableUpdates(monitorId: "elsewhere")
+        _ = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+
+        let drained = Task {
+            for try await _ in batches {}
+        }
+        server.refuseMonitors()
+        await dropSessions(of: server)
+
         let error = await #expect(throws: OVNManagerError.self) {
             try await withDeadline { try await drained.value }
         }
         #expect(error?.errorCase == .monitorInterrupted)
+        // Abandoned rather than retried against every session from here on.
+        #expect(await connection.monitorMethod(forMonitor: "flows") == nil)
+
+        // A stream following a different monitor has no reason to end, and must
+        // not be taken down with this one. The deadline is the assertion here
+        // rather than the safety net: running out of it is the pass.
+        await #expect(throws: ClusterDeadlineExceeded.self) {
+            try await withDeadline(0.2) { for try await _ in otherBatches {} }
+        }
+
+        try await connection.disconnect()
+    }
+
+    @Test("A monitor whose restart dies with the session is restarted on the next one")
+    func monitorWhoseRestartDiesWithTheSessionIsRestartedOnTheNextOne() async throws {
+        // A monitor request that fails because the session went away says nothing
+        // about the monitor: the supervisor is already fetching another session,
+        // and forgetting it here would mean no session ever restores it.
+        let first = try await startServer()
+        let second = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(first.endpoint, second.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        _ = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+        #expect(first.monitors.count == 1)
+
+        // A pass that fails starts the next one at the following remote, so the
+        // recovery lands on `second` — which loses the session rather than
+        // answering — and only then comes back round to `first`.
+        second.dropSessionOnMonitor()
+        await dropSessions(of: first)
+
+        #expect(await eventually { second.monitors.count == 1 },
+                "The recovery should have reached the second remote")
+        let restarted = await eventually { first.monitors.count == 2 }
+        #expect(restarted, "The monitor should have been restarted on a later session")
+        #expect(first.monitors.last?.since == ClusterStubServer.transactionId)
+        #expect(await connection.monitorMethod(forMonitor: "flows") == .monitorCondSince)
 
         try await connection.disconnect()
     }
@@ -742,27 +902,134 @@ final class ClusterConnectionTests {
             tables: ["Logical_Switch": OVSDBMonitorRequest()]
         )
 
+        // Two rows from the first session (the monitor's own update) and the
+        // second (its restarted monitor's snapshot), which is as far as this has
+        // to run to prove a `_Server` row is not among them.
         let drained = Task {
             var tables: [String] = []
-            do {
-                for try await update in updates {
-                    tables.append(update.table)
-                }
-            } catch {
-                return (tables, error as? OVNManagerError)
+            for try await update in updates {
+                tables.append(update.table)
+                if tables.count == 2 { break }
             }
-            return (tables, nil)
+            return tables
         }
 
         #expect(await eventually { first.monitors.count == 1 })
         // This pushes a `_Server` update, then loses the session.
         first.handBackLeadership()
 
-        let (tables, error) = try await withDeadline { await drained.value }
-        #expect(error?.errorCase == .monitorInterrupted)
-        #expect(tables == ["Logical_Switch"], "A _Server row leaked into the caller's stream")
+        let tables = try await withDeadline { try await drained.value }
+        #expect(tables == ["Logical_Switch", "Logical_Switch"],
+                "A _Server row leaked into the caller's stream")
 
         try await connection.disconnect()
+    }
+
+    // MARK: Pipeline lifecycle
+
+    @Test("A stream taken before connect() sees the first session's updates")
+    func streamTakenBeforeConnectSeesTheFirstSessionsUpdates() async throws {
+        // The pipeline subscribes to the transport when the stream is created,
+        // not when the connection comes up, so there is no window in which a
+        // monitor's first update has nothing listening for it.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+
+        let batches = connection.monitorTableUpdates()
+        try await connection.connect()
+        _ = try await connection.startMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest()]
+        )
+
+        let first = Task { () -> OVSDBTableUpdates? in
+            for try await batch in batches { return batch }
+            return nil
+        }
+        let batch = try #require(try await withDeadline { try await first.value })
+        #expect(batch.origin == .live)
+        #expect(batch.updates.first?.table == "Logical_Switch")
+
+        try await connection.disconnect()
+    }
+
+    @Test("A stream taken after the connection closed for good is already finished")
+    func streamTakenAfterTheConnectionClosedIsAlreadyFinished() async throws {
+        // The failure mode this guards against is a hang: a stream nothing will
+        // ever publish to and nothing will ever finish.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: .disabled,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+        await dropSessions(of: server)
+
+        #expect(await eventually {
+            if case .closed = connection.connectionState { return true }
+            return false
+        })
+
+        let batches = connection.monitorTableUpdates()
+        let received = try await withDeadline { () -> OVSDBTableUpdates? in
+            for try await batch in batches { return batch }
+            return nil
+        }
+        #expect(received == nil, "A stream created after the close must be finished")
+    }
+
+    @Test("Disconnecting finishes the streams it handed out")
+    func disconnectingFinishesTheStreamsItHandedOut() async throws {
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates()
+        let drained = Task {
+            for try await _ in batches {}
+        }
+        try await connection.disconnect()
+
+        // Finished, not failed: a disconnect the caller asked for is not a gap
+        // in anyone's view of the rows.
+        try await withDeadline { try await drained.value }
+    }
+
+    @Test("Disconnecting while a monitor is being restarted does not wait for the reply")
+    func disconnectingWhileAMonitorIsBeingRestartedDoesNotWaitForTheReply() async throws {
+        // `disconnect()` waits for the pipeline to unwind, and the pipeline may
+        // be parked on a monitor request. Cancelling that task does not free it
+        // — NIO's future `get()` ignores cancellation — so the transport has to
+        // be closed first, or this takes the request's full 30s timeout.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+
+        _ = try await connection.startConditionalMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest(columns: ["name"])],
+            monitorId: "flows"
+        )
+
+        // The next session accepts the restart request and never answers it.
+        server.ignoreMonitors()
+        await dropSessions(of: server)
+        #expect(await eventually { server.monitors.count == 2 })
+
+        try await withDeadline { try await connection.disconnect() }
     }
 }
 
@@ -796,6 +1063,19 @@ final class ClusterStubServer: @unchecked Sendable {
     private var requestCounts: [String: Int] = [:]
     private var connections = 0
     private var isLeader: Bool
+    /// Whether `monitor_cond_since` resumes from the id the client sends, or
+    /// answers `found: false` with a full snapshot — what a member that does not
+    /// have the requested transaction in its history does.
+    private var resumesMonitors = true
+    /// Whether a caller's monitor request is refused outright, as a server whose
+    /// schema no longer has the requested table does.
+    private var refusesMonitors = false
+    /// Whether a caller's monitor request loses the connection instead of being
+    /// answered — a session that dies while its monitors are being restored.
+    private var dropsSessionOnMonitor = false
+    /// Whether a caller's monitor request is simply never answered, leaving the
+    /// client parked on a reply until the request times out.
+    private var ignoresMonitors = false
 
     init(database: String, isLeader: Bool, answersServerDatabase: Bool = true) {
         self.database = database
@@ -891,6 +1171,33 @@ final class ClusterStubServer: @unchecked Sendable {
         }
     }
 
+    /// Makes every later `monitor_cond_since` answer `found: false` with a
+    /// snapshot instead of resuming, as a member that has compacted the
+    /// requested transaction away does.
+    func stopResumingMonitors() {
+        lock.withLock { resumesMonitors = false }
+    }
+
+    /// Makes every later caller monitor request fail. The error is deliberately
+    /// not an "unknown method" one, which the client would answer by falling back
+    /// to a less capable method rather than by giving up.
+    func refuseMonitors() {
+        lock.withLock { refusesMonitors = true }
+    }
+
+    /// Makes every later caller monitor request close the connection it arrived
+    /// on, without a reply.
+    func dropSessionOnMonitor() {
+        lock.withLock { dropsSessionOnMonitor = true }
+    }
+
+    /// Makes every later caller monitor request go unanswered on a connection
+    /// that stays up, so the client waits for a reply that only its own timeout
+    /// will end.
+    func ignoreMonitors() {
+        lock.withLock { ignoresMonitors = true }
+    }
+
     /// Reports, on every `_Server` monitor of this server, that it is no longer
     /// the leader.
     func handBackLeadership() {
@@ -955,16 +1262,20 @@ final class ClusterStubServer: @unchecked Sendable {
         let requestedDatabase = params.first as? String ?? ""
         let monitorId = params.dropFirst().first as? String ?? ""
         let since = params.count > 3 ? params[3] as? String : nil
-        let found = since != nil && since != "00000000-0000-0000-0000-000000000000"
 
         lock.withLock {
             recordedMonitors.append(
                 RecordedMonitor(database: requestedDatabase, monitorId: monitorId, since: since)
             )
         }
+        guard !answerMonitorAbnormally(id: id, on: channel) else { return }
+
+        let found = lock.withLock { resumesMonitors }
+            && since != nil
+            && since != OVSDBMonitorMethod.initialTransactionId
         write([
             "id": id,
-            "result": [found, Self.transactionId, [String: Any]()] as [Any],
+            "result": [found, Self.transactionId, Self.tableUpdates2(resumed: found)] as [Any],
             "error": NSNull()
         ], to: channel)
     }
@@ -972,6 +1283,47 @@ final class ClusterStubServer: @unchecked Sendable {
     /// The transaction id this stub reports as its latest, i.e. the point a
     /// reconnect should resume from.
     static let transactionId = "6c6ee2f0-0000-0000-0000-000000000001"
+
+    /// The row UUID every `Logical_Switch` row this stub reports carries.
+    static let rowUUID = "3f2e-uuid"
+
+    /// What a `monitor_cond_since` reply carries: the change made since the
+    /// requested transaction when it resumed, and the row itself — as `initial`,
+    /// the form ovsdb-server(7) gives a snapshot — when it did not.
+    private static func tableUpdates2(resumed: Bool) -> [String: Any] {
+        let rowUpdate: [String: Any] = resumed
+            ? ["modify": ["name": "ls0-renamed"]]
+            : ["initial": ["name": "ls0"]]
+        return ["Logical_Switch": [rowUUID: rowUpdate]]
+    }
+
+    /// Handles the two ways this stub can be told to answer a caller's monitor
+    /// request badly, returning true when it did one of them.
+    ///
+    /// The refusal is deliberately *not* an unknown-method error, which the
+    /// client would answer by falling back to a less capable method rather than
+    /// by giving up on the monitor.
+    private func answerMonitorAbnormally(id: Any, on channel: Channel) -> Bool {
+        let (refuses, drops, ignores) = lock.withLock {
+            (refusesMonitors, dropsSessionOnMonitor, ignoresMonitors)
+        }
+        if drops {
+            channel.close(promise: nil)
+            return true
+        }
+        if ignores {
+            return true
+        }
+        if refuses {
+            write([
+                "id": id,
+                "result": NSNull(),
+                "error": ["error": "constraint violation", "details": "no such table"]
+            ], to: channel)
+            return true
+        }
+        return false
+    }
 
     private func respondToMonitor(params: [Any], id: Any, on channel: Channel) {
         let requestedDatabase = params.first as? String ?? ""
@@ -981,13 +1333,21 @@ final class ClusterStubServer: @unchecked Sendable {
             lock.withLock {
                 recordedMonitors.append(RecordedMonitor(database: requestedDatabase, monitorId: monitorId))
             }
-            write(["id": id, "result": [String: Any](), "error": NSNull()], to: channel)
-            // RFC 7047 §4.1.5: the reply is followed by `update` notifications as
-            // rows change. One is enough to prove the path.
+            guard !answerMonitorAbnormally(id: id, on: channel) else { return }
+            // RFC 7047 §4.1.5: the reply is the monitored rows, and `update`
+            // notifications follow as they change. One of each is enough to prove
+            // the path — and to pin their order, since the reply of a monitor
+            // re-established after a reconnect has to reach a consumer before the
+            // updates of the session it was established on.
+            write([
+                "id": id,
+                "result": ["Logical_Switch": [Self.rowUUID: ["new": ["name": "ls0"]]]],
+                "error": NSNull()
+            ], to: channel)
             write([
                 "id": NSNull(),
                 "method": "update",
-                "params": [monitorId, ["Logical_Switch": ["3f2e-uuid": ["new": ["name": "ls0"]]]]]
+                "params": [monitorId, ["Logical_Switch": [Self.rowUUID: ["new": ["name": "ls1"]]]]]
             ], to: channel)
             return
         }

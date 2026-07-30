@@ -367,13 +367,32 @@ By default this connection:
 
 Every monitor this connection started is re-established on the new session under
 the same ID — a `monitor_cond_since` one from the last transaction ID delivered,
-so the server sends what changed instead of the database again.
+so the server sends what changed instead of the database again — and what it
+replies with is delivered on the same `monitorTableUpdates()` stream, ahead of
+the new session's live updates. The stream does not end, so a consumer keeps
+reading; what it must do is check each batch's `origin`:
 
-Reconnection deliberately does not hide the drop, though. Requests in flight when
-the session ends still fail, and an update stream ends with
-`OVNManagerError.monitorInterrupted`: the changes made while the connection was
-down were delivered to nobody, so a consumer replicating rows has to re-read them
-and take a new stream. `isConnected` keeps its meaning — a session is up right
+```swift
+for try await batch in manager.monitorTableUpdates() {
+    switch batch.origin {
+    case .live, .resumed:
+        // A running monitor's changes, or exactly the ones missed while the
+        // connection was down: apply them to the rows already held.
+        apply(batch.updates)
+    case .snapshot:
+        // The monitor could not be resumed, so this is every row there is.
+        // Whatever was held has to be discarded, not merged: rows deleted
+        // during the outage are simply absent here.
+        replaceAll(with: batch.updates)
+    }
+}
+```
+
+Reconnection deliberately does not hide the drop entirely. Requests in flight
+when the session ends still fail, and a monitor the new server *refuses* is
+abandoned rather than retried forever — its streams end with
+`OVNManagerError.monitorInterrupted`, and recovering means starting a new monitor
+and re-reading the rows. `isConnected` keeps its meaning — a session is up right
 now — which with reconnection is a value that flickers; to act on it, observe the
 lifecycle instead:
 

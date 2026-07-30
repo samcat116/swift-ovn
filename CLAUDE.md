@@ -230,16 +230,41 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
 - **The notification hub survives a recoverable drop.** `tearDown` only calls
   `finishAll()` when nothing is going to reconnect; otherwise subscribers stay and
   get a `.reconnected` event, published between sessions (before any monitor
-  exists on the new one, so no update can overtake it). `OVSDBConnection` restarts
-  its stored monitors when it sees that event — resuming a `monitor_cond_since`
-  one from the transaction id it last delivered — while the update streams get
-  `monitorInterrupted`.
-  The re-established monitor's own reply (a resumed delta or a fresh snapshot) is
-  discarded rather than delivered: it and the new monitor's live updates would
-  reach a consumer by two different paths, with no ordering between them.
-  Delivering it means routing every consumer's updates through `OVSDBConnection`
-  instead of straight from the transport, so that one place can interleave them —
-  worth doing, and the reason `monitorInterrupted` exists in the meantime.
+  exists on the new one, so no update can overtake it).
+- **One pipeline per connection, and it is what makes a reconnect invisible.**
+  `OVSDBConnection` does not let its `monitorTableUpdates()` /`monitorUpdates()`
+  streams subscribe to the transport. A single task (`startPipeline`) consumes
+  the hub's events, parses them, and re-publishes into a connection-owned
+  `OVSDBMonitorBroadcaster` the streams subscribe to instead. On `.reconnected`
+  that same task re-establishes every stored monitor — resuming a
+  `monitor_cond_since` one from the transaction id last delivered — and publishes
+  each reply *before* the live updates of the new session, which are meanwhile
+  piling up unread in the hub's bounded buffer behind it. That ordering is the
+  whole reason the pipeline exists: a reply is the answer to a request and the
+  live updates come from the hub, so only a place that sees both can interleave
+  them. Things that follow from it:
+  - **`origin` is not decoration.** A resumed reply is a delta to apply, a
+    non-resumed one is a snapshot that *replaces* the consumer's rows — merging
+    it leaves rows deleted during the outage in place forever. That is why the
+    reply is published even when it carries no rows.
+  - **A re-establishment that fails is only terminal if the session is up.** A
+    server that refuses the monitor means it is never coming back, so it is
+    forgotten and its streams get `monitorInterrupted`; a session that died
+    mid-recovery means the supervisor is already fetching another one that will
+    run the same recovery, so reporting then would kill streams about to work.
+  - **`startPipeline` is `nonisolated` and takes the hub subscription under its
+    own lock.** Streams can be created before `connect()`, and the subscription
+    has to exist before the caller's next line starts a monitor. `connect()`
+    starts it too, because monitors are re-created whether or not anyone is
+    reading their updates; `disconnect()` stops it and closes the broadcaster, so
+    a stream taken afterwards comes back finished instead of hanging.
+  - **`disconnect()` closes the transport before it awaits the pipeline.** The
+    pipeline may be parked on a re-establishment's monitor request, and
+    cancelling the task does not free it — NIO's `EventLoopFuture.get()` ignores
+    cancellation — so awaiting first costs the request's full 30s timeout.
+  - **`JSONRPCClient`'s own streams still end on a reconnect.** That layer does
+    not track monitors, so it cannot put anything back — `monitorInterrupted`
+    there means what it always did.
 - **A released connection must stop reconnecting.** The supervisor holds the core
   strongly, so `OVSDBSocketConnection.deinit` spawns a task that shuts the core
   down and only then shuts down an owned event-loop group.

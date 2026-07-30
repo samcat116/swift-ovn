@@ -542,8 +542,9 @@ public actor JSONRPCClient {
     /// The stream also throws `OVNManagerError.monitorInterrupted` when the
     /// transport reconnects, because monitors live in the server's
     /// per-connection state and did not survive it. This client does not track
-    /// monitors, so re-creating them is the caller's job; `OVSDBConnection` does
-    /// it for you.
+    /// monitors, so re-creating them is the caller's job — use
+    /// `OVSDBConnection`, which does track them, for a stream that carries on
+    /// across a reconnect instead.
     ///
     /// Everything this stream can fail with is an `OVNManagerError`, but the
     /// failure type stays `any Error`: every `AsyncThrowingStream` initializer
@@ -590,36 +591,7 @@ public actor JSONRPCClient {
     /// `OVSDBSocketConnection.notificationBufferSize` gets
     /// `OVNManagerError.notificationsDropped`.
     nonisolated public func monitorNotifications() -> AsyncThrowingStream<OVSDBMonitorNotification, Error> {
-        return notificationStream { notification in
-            guard let method = OVSDBMonitorMethod(notificationMethod: notification.method),
-                  case .array(let paramsArray)? = notification.params,
-                  case .string(let monitorId)? = paramsArray.first else {
-                return nil
-            }
-
-            switch method {
-            case .monitor, .monitorCond:
-                // [<monitor-id>, <table-updates>]
-                guard paramsArray.count >= 2 else { return nil }
-                return OVSDBMonitorNotification(
-                    monitorId: monitorId,
-                    method: method,
-                    tableUpdates: paramsArray[1]
-                )
-            case .monitorCondSince:
-                // [<monitor-id>, <last-txn-id>, <table-updates2>]
-                guard paramsArray.count >= 3,
-                      case .string(let transactionId) = paramsArray[1] else {
-                    return nil
-                }
-                return OVSDBMonitorNotification(
-                    monitorId: monitorId,
-                    method: method,
-                    lastTransactionId: transactionId,
-                    tableUpdates: paramsArray[2]
-                )
-            }
-        }
+        return notificationStream { OVSDBMonitorNotification($0) }
     }
 
     /// Builds one bounded stream over the transport's notifications, keeping the
@@ -644,11 +616,18 @@ public actor JSONRPCClient {
                         continuation.finish(throwing: OVNManagerError.notificationsDropped(count: count))
                         return
                     case .reconnected:
-                        // The monitors of the previous session are gone, so this
-                        // stream's view has a hole no later notification fills —
-                        // the same situation as a drop, reported separately
-                        // because the recovery differs (see `monitorInterrupted`).
-                        continuation.finish(throwing: OVNManagerError.monitorInterrupted)
+                        // Monitors and locks live in the server's per-connection
+                        // state, so nothing this stream was following survived —
+                        // and this layer does not track what it was, so it
+                        // cannot put any of it back. `OVSDBConnection` does; a
+                        // stream from there survives a reconnect.
+                        continuation.finish(throwing: OVNManagerError.monitorInterrupted(
+                            """
+                            The OVSDB connection was re-established: the monitors and locks of the \
+                            previous session are gone, and the changes made while it was down were \
+                            reported to nobody. Re-create them and re-read the rows.
+                            """
+                        ))
                         return
                     case .notification(let notification):
                         guard let element = transform(notification) else { continue }

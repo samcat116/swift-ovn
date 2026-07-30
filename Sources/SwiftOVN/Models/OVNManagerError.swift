@@ -27,14 +27,21 @@ public enum OVNManagerError: Error, Sendable {
     /// stream it was reading no longer describes every change. Restart the
     /// monitor to get a fresh snapshot.
     case notificationsDropped(count: Int)
-    /// The connection dropped and was re-established, so the monitor whose
-    /// updates were being streamed no longer exists on the server and the
-    /// changes made while the connection was down went unreported.
+    /// A monitor whose updates were being streamed stopped for good, because the
+    /// connection was re-established and the monitor could not be put back on
+    /// the new session. Nothing more will arrive for it, which is why this is
+    /// reported rather than leaving the consumer waiting.
     ///
-    /// `OVSDBConnection` restarts its monitors automatically, so recovering means
-    /// re-reading the rows (the gap cannot be filled) and taking a new
-    /// `monitorUpdates()` stream — not calling `startMonitoring` again.
-    case monitorInterrupted
+    /// An ordinary reconnect does *not* end an `OVSDBConnection` stream: the
+    /// monitor is re-established and its reply is delivered as an
+    /// `OVSDBTableUpdates` batch whose `origin` says whether it resumed or is a
+    /// fresh snapshot. This case is what is left — a server that refused the
+    /// monitor request — and recovering from it means starting a new monitor and
+    /// re-reading the rows.
+    ///
+    /// `JSONRPCClient`'s own streams throw it on any reconnect, because that
+    /// layer does not track monitors and so cannot re-create them.
+    case monitorInterrupted(String)
 }
 
 extension OVNManagerError {
@@ -88,8 +95,8 @@ extension OVNManagerError: LocalizedError {
             return message
         case .notificationsDropped(let count):
             return "Dropped \(count) OVSDB notification(s) because the consumer fell behind; the monitor's view is incomplete and the monitor must be restarted"
-        case .monitorInterrupted:
-            return "The OVSDB connection was re-established; the monitor was restarted, so its view is incomplete and the rows must be re-read"
+        case .monitorInterrupted(let message):
+            return message
         }
     }
 }

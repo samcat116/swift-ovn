@@ -35,9 +35,10 @@ public enum JSONRPCNotificationEvent: Sendable {
     /// state, so every monitor was gone at this point and any change made while
     /// the connection was down went unreported.
     ///
-    /// `OVSDBConnection` restarts its monitors when it sees this, so the flow of
-    /// updates resumes on its own; what it cannot do is fill the gap, which is
-    /// why anything replicating rows must re-read them. Resuming a monitor
-    /// exactly where it left off needs `monitor_cond_since`.
+    /// `OVSDBConnection` restarts its monitors when it sees this and publishes
+    /// what they reply with to its own update streams, so the gap is filled as
+    /// well as it can be: exactly, for a `monitor_cond_since` monitor the server
+    /// could resume, and otherwise with a fresh snapshot that replaces the
+    /// consumer's rows. A consumer of *this* stream is doing that job itself.
     case reconnected
 }

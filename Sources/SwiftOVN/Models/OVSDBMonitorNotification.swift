@@ -29,3 +29,36 @@ public struct OVSDBMonitorNotification: Sendable {
         self.tableUpdates = tableUpdates
     }
 }
+
+extension OVSDBMonitorNotification {
+    /// Parses an `update`, `update2` or `update3` notification.
+    ///
+    /// Returns nil for a notification that is not one of those three, and for
+    /// one that is but whose params are not the shape ovsdb-server(7) gives it,
+    /// so a caller can filter a mixed notification stream with it.
+    public init?(_ notification: JSONRPCNotification) {
+        guard let method = OVSDBMonitorMethod(notificationMethod: notification.method),
+              case .array(let params)? = notification.params,
+              case .string(let monitorId)? = params.first else {
+            return nil
+        }
+
+        switch method {
+        case .monitor, .monitorCond:
+            // [<monitor-id>, <table-updates>]
+            guard params.count >= 2 else { return nil }
+            self.init(monitorId: monitorId, method: method, tableUpdates: params[1])
+        case .monitorCondSince:
+            // [<monitor-id>, <last-txn-id>, <table-updates2>]
+            guard params.count >= 3, case .string(let transactionId) = params[1] else {
+                return nil
+            }
+            self.init(
+                monitorId: monitorId,
+                method: method,
+                lastTransactionId: transactionId,
+                tableUpdates: params[2]
+            )
+        }
+    }
+}
