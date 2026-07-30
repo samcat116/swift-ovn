@@ -160,6 +160,7 @@ The package includes comprehensive Swift models for:
 - `OVNLogicalRouterPort` - Ports on logical routers
 - `OVNACL` - Access control lists
 - `OVNPortGroup` - Port groups for scalable security-group ACLs
+- `OVNAddressSet` - Named address sets referenced from ACL match strings as `$name`
 - `OVNLoadBalancer` - Load balancing rules
 - `OVNNAT` - Network address translation rules
 - `OVNQoS` - Logical switch rate limiting and DSCP marking

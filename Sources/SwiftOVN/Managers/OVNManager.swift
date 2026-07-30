@@ -1037,6 +1037,102 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted port group: \(name)")
     }
 
+    // MARK: - Address Set Operations
+
+    public func getAddressSets() async throws(OVNManagerError) -> [OVNAddressSet] {
+        let rows = try await connection.selectAll(from: OVNTable.addressSet, in: database)
+        return try parseRows(rows, as: OVNAddressSet.self)
+    }
+
+    public func getAddressSet(named name: String) async throws(OVNManagerError) -> OVNAddressSet? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.addressSet, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNAddressSet.self)
+    }
+
+    /// Creates an address set. `Address_Set` is a root table, so the row
+    /// persists until it is explicitly deleted, and `addresses` holds plain
+    /// strings rather than references — no attach or existence guard is needed.
+    ///
+    /// The name check ahead of the insert is only there for the error message:
+    /// the NB schema indexes `name`, so a duplicate racing in behind the check
+    /// is rejected by ovsdb-server rather than creating a second set.
+    public func createAddressSet(_ addressSet: OVNAddressSet) async throws(OVNManagerError) -> String {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(addressSet.name))
+
+        guard try await rowUUID(in: OVNTable.addressSet, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Address set already exists: \(addressSet.name)")
+        }
+
+        let row = try createRow(from: addressSet)
+        let result = try await connection.insert(into: OVNTable.addressSet, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created address set: \(addressSet.name)")
+        return uuidValue
+    }
+
+    /// Replaces the whole row, including the `addresses` set. Use
+    /// `addAddresses(_:toAddressSet:)`/`removeAddresses(_:fromAddressSet:)` for
+    /// a membership change, so a concurrent writer's members are not lost.
+    public func updateAddressSet(uuid: String, _ addressSet: OVNAddressSet) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: addressSet)
+
+        let count = try await connection.update(table: OVNTable.addressSet, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(uuid)")
+        }
+
+        logger.info("Updated address set: \(addressSet.name)")
+    }
+
+    /// Adds addresses to the set's membership without rewriting the whole
+    /// `addresses` column, mirroring `ovn-nbctl add Address_Set ... addresses`.
+    /// Inserting an address that is already a member is a no-op, as it is for
+    /// any OVSDB set.
+    public func addAddresses(_ addresses: [String], toAddressSet name: String) async throws(OVNManagerError) {
+        try await mutateAddresses(addresses, addressSet: name, mutator: "insert")
+    }
+
+    /// Removes addresses from the set's membership without rewriting the whole
+    /// `addresses` column. Removing an address that is not a member is a no-op.
+    public func removeAddresses(_ addresses: [String], fromAddressSet name: String) async throws(OVNManagerError) {
+        try await mutateAddresses(addresses, addressSet: name, mutator: "delete")
+    }
+
+    public func deleteAddressSet(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.addressSet, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(uuid)")
+        }
+
+        logger.info("Deleted address set: \(uuid)")
+    }
+
+    public func deleteAddressSet(named name: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let count = try await connection.delete(from: OVNTable.addressSet, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(name)")
+        }
+
+        logger.info("Deleted address set: \(name)")
+    }
+
     // MARK: - Load Balancer Operations
     
     public func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer] {
@@ -1545,6 +1641,33 @@ private extension OVNManager {
         }
         if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Port group not found: \(name)")
+        }
+    }
+
+    /// Inserts or deletes addresses in an address set's `addresses` column via
+    /// a single mutate op, so incremental membership changes never
+    /// read-modify-write the whole set. A no-op (empty list) is skipped so the
+    /// caller never issues an empty mutation.
+    ///
+    /// Unlike `Port_Group.ports`, this column holds plain strings rather than
+    /// references, so there is nothing whose existence needs guarding: a
+    /// member's validity is checked by ovsdb-server against the column type,
+    /// and by ovn-northd when it translates the referencing match.
+    func mutateAddresses(_ addresses: [String], addressSet name: String, mutator: String) async throws(OVNManagerError) {
+        guard !addresses.isEmpty else { return }
+
+        let addressSetValue = JSONValue.array([.string("set"), .array(addresses.map { .string($0) })])
+        let setCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+
+        let count = try await connection.mutate(
+            table: OVNTable.addressSet,
+            in: database,
+            where: [setCondition],
+            mutations: [OVSDBMutation(column: "addresses", mutator: mutator, value: addressSetValue)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(name)")
         }
     }
 
