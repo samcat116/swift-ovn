@@ -445,15 +445,24 @@ public final class OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
         }
 
-        let uuidValue = try await connection.insertAttached(
-            into: OVNTable.logicalRouterStaticRoute,
-            in: database,
+        // bfd is a weak reference: a session UUID that is stale at commit would
+        // be dropped from the insert, leaving the route unmonitored with no
+        // error to show for it.
+        let guardOps = rowExistenceWaitOps(route.bfd.map { [$0] } ?? [], in: OVNTable.bfd)
+        let attachOps = OVSDBReferenceTransactions.insertAttached(
             row: try createRow(from: route),
+            into: OVNTable.logicalRouterStaticRoute,
             uuidName: "new_route",
             parentTable: OVNTable.logicalRouter,
             parentColumn: "static_routes",
             parentCondition: routerCondition
         )
+
+        let results = try await connection.transact(in: database, operations: guardOps + attachOps)
+
+        // attachOps is wait(router) → insert → mutate, so the insert's result
+        // sits one past the guards.
+        let uuidValue = try OVSDBConnection.uuid(fromInsertResults: results, at: guardOps.count + 1)
 
         logger.info("Created static route: \(route.ip_prefix) on router: \(routerName)")
         return uuidValue
@@ -463,9 +472,25 @@ public final class OVNManager: OVNManaging {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: route)
 
-        let count = try await connection.update(table: OVNTable.logicalRouterStaticRoute, in: database, where: [condition], row: row)
+        // A full-row update rewrites the weak-reference bfd, so guard it
+        // exactly as create does.
+        var operations = rowExistenceWaitOps(route.bfd.map { [$0] } ?? [], in: OVNTable.bfd)
+        let updateIndex = operations.count
+        operations.append(OVSDBOperation(
+            op: "update",
+            table: OVNTable.logicalRouterStaticRoute,
+            whereConditions: [condition],
+            row: row
+        ))
 
-        if count == 0 {
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count > updateIndex,
+              case .object(let updateResult) = results[updateIndex],
+              case .number(let count)? = updateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid update response format")
+        }
+        if Int(count) == 0 {
             throw OVNManagerError.operationFailed("Static route not found: \(uuid)")
         }
 
@@ -505,10 +530,12 @@ public final class OVNManager: OVNManaging {
             throw OVNManagerError.operationFailed("Logical router not found: \(routerName)")
         }
 
-        // output_port is a weak reference, so a UUID whose router port is stale
-        // at commit would be dropped from the insert — leaving a reroute policy
-        // with no egress port and no error to show for it.
+        // output_port and bfd_sessions are weak references, so a UUID whose row
+        // is stale at commit would be dropped from the insert — leaving a
+        // reroute policy with no egress port, or an unmonitored next hop, and
+        // no error to show for either.
         let guardOps = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
+            + rowExistenceWaitOps(policy.bfd_sessions ?? [], in: OVNTable.bfd)
         let attachOps = OVSDBReferenceTransactions.insertAttached(
             row: try createRow(from: policy, in: OVNTable.logicalRouterPolicy),
             into: OVNTable.logicalRouterPolicy,
@@ -532,9 +559,10 @@ public final class OVNManager: OVNManaging {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: policy, in: OVNTable.logicalRouterPolicy)
 
-        // A full-row update rewrites the weak-reference output_port, so guard it
-        // exactly as create does.
+        // A full-row update rewrites the weak references output_port and
+        // bfd_sessions, so guard them exactly as create does.
         var operations = rowExistenceWaitOps(policy.output_port.map { [$0] } ?? [], in: OVNTable.logicalRouterPort)
+            + rowExistenceWaitOps(policy.bfd_sessions ?? [], in: OVNTable.bfd)
         let updateIndex = operations.count
         operations.append(OVSDBOperation(
             op: "update",
@@ -998,6 +1026,102 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted port group: \(name)")
     }
 
+    // MARK: - Address Set Operations
+
+    public func getAddressSets() async throws(OVNManagerError) -> [OVNAddressSet] {
+        let rows = try await connection.selectAll(from: OVNTable.addressSet, in: database)
+        return try parseRows(rows, as: OVNAddressSet.self)
+    }
+
+    public func getAddressSet(named name: String) async throws(OVNManagerError) -> OVNAddressSet? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.addressSet, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNAddressSet.self)
+    }
+
+    /// Creates an address set. `Address_Set` is a root table, so the row
+    /// persists until it is explicitly deleted, and `addresses` holds plain
+    /// strings rather than references — no attach or existence guard is needed.
+    ///
+    /// The name check ahead of the insert is only there for the error message:
+    /// the NB schema indexes `name`, so a duplicate racing in behind the check
+    /// is rejected by ovsdb-server rather than creating a second set.
+    public func createAddressSet(_ addressSet: OVNAddressSet) async throws(OVNManagerError) -> String {
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(addressSet.name))
+
+        guard try await rowUUID(in: OVNTable.addressSet, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Address set already exists: \(addressSet.name)")
+        }
+
+        let row = try createRow(from: addressSet)
+        let result = try await connection.insert(into: OVNTable.addressSet, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created address set: \(addressSet.name)")
+        return uuidValue
+    }
+
+    /// Replaces the whole row, including the `addresses` set. Use
+    /// `addAddresses(_:toAddressSet:)`/`removeAddresses(_:fromAddressSet:)` for
+    /// a membership change, so a concurrent writer's members are not lost.
+    public func updateAddressSet(uuid: String, _ addressSet: OVNAddressSet) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: addressSet)
+
+        let count = try await connection.update(table: OVNTable.addressSet, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(uuid)")
+        }
+
+        logger.info("Updated address set: \(addressSet.name)")
+    }
+
+    /// Adds addresses to the set's membership without rewriting the whole
+    /// `addresses` column, mirroring `ovn-nbctl add Address_Set ... addresses`.
+    /// Inserting an address that is already a member is a no-op, as it is for
+    /// any OVSDB set.
+    public func addAddresses(_ addresses: [String], toAddressSet name: String) async throws(OVNManagerError) {
+        try await mutateAddresses(addresses, addressSet: name, mutator: "insert")
+    }
+
+    /// Removes addresses from the set's membership without rewriting the whole
+    /// `addresses` column. Removing an address that is not a member is a no-op.
+    public func removeAddresses(_ addresses: [String], fromAddressSet name: String) async throws(OVNManagerError) {
+        try await mutateAddresses(addresses, addressSet: name, mutator: "delete")
+    }
+
+    public func deleteAddressSet(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.addressSet, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(uuid)")
+        }
+
+        logger.info("Deleted address set: \(uuid)")
+    }
+
+    public func deleteAddressSet(named name: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let count = try await connection.delete(from: OVNTable.addressSet, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(name)")
+        }
+
+        logger.info("Deleted address set: \(name)")
+    }
+
     // MARK: - Load Balancer Operations
     
     public func getLoadBalancers() async throws(OVNManagerError) -> [OVNLoadBalancer] {
@@ -1083,14 +1207,14 @@ public final class OVNManager: OVNManaging {
     /// Detaches a load balancer from the named logical switch, mirroring
     /// `ovn-nbctl ls-lb-del`. The load balancer row itself is kept.
     public func detachLoadBalancer(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
-        try await detachReference(uuid: uuid, column: "load_balancer", parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
         logger.info("Detached load balancer \(uuid) from switch: \(switchName)")
     }
 
     /// Detaches a load balancer from the named logical router, mirroring
     /// `ovn-nbctl lr-lb-del`. The load balancer row itself is kept.
     public func detachLoadBalancer(uuid: String, fromRouter routerName: String) async throws(OVNManagerError) {
-        try await detachReference(uuid: uuid, column: "load_balancer", parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        try await detachLoadBalancer(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
         logger.info("Detached load balancer \(uuid) from router: \(routerName)")
     }
 
@@ -1293,14 +1417,14 @@ public final class OVNManager: OVNManaging {
     /// Detaches a load balancer group from the named logical switch. The group
     /// row itself is kept.
     public func detachLoadBalancerGroup(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
-        try await detachReference(uuid: uuid, column: "load_balancer_group", parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
+        try await detachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalSwitch, parentDescription: "Logical switch", parentName: switchName)
         logger.info("Detached load balancer group \(uuid) from switch: \(switchName)")
     }
 
     /// Detaches a load balancer group from the named logical router. The group
     /// row itself is kept.
     public func detachLoadBalancerGroup(uuid: String, fromRouter routerName: String) async throws(OVNManagerError) {
-        try await detachReference(uuid: uuid, column: "load_balancer_group", parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
+        try await detachLoadBalancerGroup(uuid: uuid, parentTable: OVNTable.logicalRouter, parentDescription: "Logical router", parentName: routerName)
         logger.info("Detached load balancer group \(uuid) from router: \(routerName)")
     }
 
@@ -1442,6 +1566,331 @@ public final class OVNManager: OVNManaging {
         }
 
         logger.info("Deleted QoS rule: \(uuid)")
+    }
+
+    // MARK: - BFD Operations
+
+    /// Rows of the Northbound `BFD` table — the sessions referenced by
+    /// `Logical_Router_Static_Route.bfd` and `Logical_Router_Policy.bfd_sessions`.
+    public func getBFDSessions() async throws(OVNManagerError) -> [OVNBFD] {
+        let rows = try await connection.selectAll(from: OVNTable.bfd, in: database)
+        return try parseRows(rows, as: OVNBFD.self)
+    }
+
+    /// Creates a BFD session. `BFD` is a root table, so the row stands on its
+    /// own — but it monitors nothing until a static route or a router policy
+    /// references it.
+    ///
+    /// The schema indexes `(logical_port, dst_ip)`: a second session for a pair
+    /// that already has one is rejected by ovsdb-server, surfacing as
+    /// `operationFailed` carrying the constraint violation.
+    public func createBFDSession(_ bfd: OVNBFD) async throws(OVNManagerError) -> String {
+        let row = try createRow(from: bfd)
+        let result = try await connection.insert(into: OVNTable.bfd, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created BFD session: \(bfd.logical_port) -> \(bfd.dst_ip)")
+        return uuidValue
+    }
+
+    /// Rewrites a BFD session. `status` is never written — see `OVNBFD.status`.
+    public func updateBFDSession(uuid: String, _ bfd: OVNBFD) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: bfd)
+
+        let count = try await connection.update(table: OVNTable.bfd, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("BFD session not found: \(uuid)")
+        }
+
+        logger.info("Updated BFD session: \(uuid)")
+    }
+
+    /// Deletes a BFD session. Both columns that reference one are *weak*, so
+    /// ovsdb-server drops the reference from any static route or router policy
+    /// still naming this session rather than rejecting the delete — no
+    /// detaching transaction is needed, but whatever the session monitored is
+    /// left unmonitored.
+    public func deleteBFDSession(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.bfd, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("BFD session not found: \(uuid)")
+        }
+
+        logger.info("Deleted BFD session: \(uuid)")
+    }
+
+    // MARK: - DNS Operations
+
+    /// Rows of the Northbound `DNS` table. Each row is a *set* of records, not
+    /// a single one.
+    public func getDNS() async throws(OVNManagerError) -> [OVNDNS] {
+        let rows = try await connection.selectAll(from: OVNTable.dns, in: database)
+        return try parseRows(rows, as: OVNDNS.self)
+    }
+
+    /// Creates a DNS record set. `DNS` is a root table, so the row survives
+    /// unattached — `attachDNS(uuid:toSwitch:)` is what puts it in front of a
+    /// switch's queries.
+    public func createDNS(_ dns: OVNDNS) async throws(OVNManagerError) -> String {
+        let row = try createRow(from: dns)
+        let result = try await connection.insert(into: OVNTable.dns, in: database, row: row)
+
+        guard case .object(let resultObject) = result,
+              let uuid = resultObject["uuid"],
+              case .array(let uuidArray) = uuid,
+              uuidArray.count == 2,
+              case .string(let uuidValue) = uuidArray[1] else {
+            throw OVNManagerError.invalidResponse("Invalid UUID in insert response")
+        }
+
+        logger.info("Created DNS record set with \(dns.records.count) record(s)")
+        return uuidValue
+    }
+
+    public func updateDNS(uuid: String, _ dns: OVNDNS) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: dns)
+
+        let count = try await connection.update(table: OVNTable.dns, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("DNS record set not found: \(uuid)")
+        }
+
+        logger.info("Updated DNS record set: \(uuid)")
+    }
+
+    /// Deletes a DNS record set. `Logical_Switch.dns_records` is a weak
+    /// reference set, so ovsdb-server drops the UUID from every switch still
+    /// naming it instead of rejecting the delete.
+    public func deleteDNS(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.dns, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("DNS record set not found: \(uuid)")
+        }
+
+        logger.info("Deleted DNS record set: \(uuid)")
+    }
+
+    /// Attaches an existing DNS record set to the named logical switch
+    /// (`Logical_Switch.dns_records`), which is what makes OVN answer that
+    /// switch's ports with those records.
+    public func attachDNS(uuid: String, toSwitch switchName: String) async throws(OVNManagerError) {
+        try await attachReference(
+            uuid: uuid,
+            childTable: OVNTable.dns,
+            childDescription: "DNS record set",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "dns_records",
+            parentDescription: "Logical switch",
+            parentName: switchName
+        )
+        logger.info("Attached DNS record set \(uuid) to switch: \(switchName)")
+    }
+
+    /// Detaches a DNS record set from the named logical switch. The `DNS` row
+    /// itself is kept.
+    public func detachDNS(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError) {
+        try await detachReference(
+            uuid: uuid,
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "dns_records",
+            parentDescription: "Logical switch",
+            parentName: switchName
+        )
+        logger.info("Detached DNS record set \(uuid) from switch: \(switchName)")
+    }
+
+    // MARK: - Meter Operations
+
+    public func getMeters() async throws(OVNManagerError) -> [OVNMeter] {
+        let rows = try await connection.selectAll(from: OVNTable.meter, in: database)
+        return try parseRows(rows, as: OVNMeter.self)
+    }
+
+    public func getMeter(named name: String) async throws(OVNManagerError) -> OVNMeter? {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let rows = try await connection.select(from: OVNTable.meter, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNMeter.self)
+    }
+
+    /// Creates a meter and its bands in a single OVSDB transaction, mirroring
+    /// `ovn-nbctl meter-add`. `Meter` is a root table, but `Meter.bands` has a
+    /// schema minimum of one, so a band-less meter is a constraint violation
+    /// ovsdb-server refuses — hence bands are a parameter of the create rather
+    /// than something attached afterwards, and there is no create that takes a
+    /// meter alone. Whatever `meter.bands` holds is ignored: the column is
+    /// written with the bands inserted here.
+    ///
+    /// The name check is only there for a better error message. `Meter.name` is
+    /// indexed, so ovsdb-server rejects a duplicate that races in after the
+    /// check; no `wait` op is needed to close the window (unlike
+    /// `createLogicalSwitch`, whose table has no index on `name`).
+    public func createMeter(_ meter: OVNMeter, withBands bands: [OVNMeterBand]) async throws(OVNManagerError) -> String {
+        guard !bands.isEmpty else {
+            throw OVNManagerError.operationFailed("Meter needs at least one band: \(meter.name)")
+        }
+
+        let nameCondition = OVSDBCondition(column: "name", function: "==", value: .string(meter.name))
+
+        guard try await rowUUID(in: OVNTable.meter, where: nameCondition) == nil else {
+            throw OVNManagerError.operationFailed("Meter already exists: \(meter.name)")
+        }
+
+        // A loop rather than `map`: `Sequence.map` is `rethrows`, which erases
+        // the typed throw back to `any Error`.
+        var bandRows: [OVSDBRow] = []
+        bandRows.reserveCapacity(bands.count)
+        for band in bands {
+            bandRows.append(try createRow(from: band))
+        }
+
+        let uuidValue = try await connection.insertWithChildren(
+            into: OVNTable.meter,
+            in: database,
+            row: try createRow(from: meter),
+            uuidName: "new_meter",
+            referenceColumn: "bands",
+            childRows: bandRows,
+            childTable: OVNTable.meterBand,
+            childUUIDNamePrefix: "new_meter_band_"
+        )
+
+        logger.info("Created meter: \(meter.name) with \(bands.count) band(s)")
+        return uuidValue
+    }
+
+    /// The single-band case, which is what ACL log rate limiting needs: one
+    /// meter, one `drop` band. See `createMeter(_:withBands:)`.
+    public func createMeter(_ meter: OVNMeter, withBand band: OVNMeterBand) async throws(OVNManagerError) -> String {
+        return try await createMeter(meter, withBands: [band])
+    }
+
+    /// Updates a meter's columns. A nil column on the model is left untouched;
+    /// note that passing an empty `bands` would clear a column whose schema
+    /// minimum is one, which ovsdb-server rejects. Use
+    /// `createMeterBand(_:onMeter:)` and `deleteMeterBand(uuid:)` to change the
+    /// band set.
+    public func updateMeter(uuid: String, _ meter: OVNMeter) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: meter)
+
+        let count = try await connection.update(table: OVNTable.meter, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(uuid)")
+        }
+
+        logger.info("Updated meter: \(meter.name)")
+    }
+
+    /// Deletes a meter. Its bands become unreferenced and are
+    /// garbage-collected with it, and `OVNACL.meter` holds a meter *name*
+    /// rather than a reference, so no ACL column has to be detached — a
+    /// dangling name just stops rate-limiting that ACL's logs.
+    ///
+    /// `Copp.meters` does hold strong references to `Meter`, so ovsdb-server
+    /// refuses to delete a meter a Copp row still names. That reference has to
+    /// be removed first; SwiftOVN has no Copp model to do it with.
+    public func deleteMeter(uuid: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let count = try await connection.delete(from: OVNTable.meter, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(uuid)")
+        }
+
+        logger.info("Deleted meter: \(uuid)")
+    }
+
+    public func deleteMeter(named name: String) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+        let count = try await connection.delete(from: OVNTable.meter, in: database, where: [condition])
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter not found: \(name)")
+        }
+
+        logger.info("Deleted meter: \(name)")
+    }
+
+    // MARK: - Meter Band Operations
+
+    public func getMeterBands() async throws(OVNManagerError) -> [OVNMeterBand] {
+        let rows = try await connection.selectAll(from: OVNTable.meterBand, in: database)
+        return try parseRows(rows, as: OVNMeterBand.self)
+    }
+
+    /// Adds a band to an existing meter (`Meter.bands`) in a single OVSDB
+    /// transaction. `Meter_Band` is not a root table, so an unreferenced row is
+    /// garbage-collected when the transaction commits — there is deliberately
+    /// no unattached create.
+    public func createMeterBand(_ band: OVNMeterBand, onMeter meterName: String) async throws(OVNManagerError) -> String {
+        let meterCondition = OVSDBCondition(column: "name", function: "==", value: .string(meterName))
+
+        guard try await rowUUID(in: OVNTable.meter, where: meterCondition) != nil else {
+            throw OVNManagerError.operationFailed("Meter not found: \(meterName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.meterBand,
+            in: database,
+            row: try createRow(from: band),
+            uuidName: "new_meter_band",
+            parentTable: OVNTable.meter,
+            parentColumn: "bands",
+            parentCondition: meterCondition
+        )
+
+        logger.info("Created meter band on meter: \(meterName)")
+        return uuidValue
+    }
+
+    public func updateMeterBand(uuid: String, _ band: OVNMeterBand) async throws(OVNManagerError) {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let row = try createRow(from: band)
+
+        let count = try await connection.update(table: OVNTable.meterBand, in: database, where: [condition], row: row)
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter band not found: \(uuid)")
+        }
+
+        logger.info("Updated meter band: \(uuid)")
+    }
+
+    /// Detaches the band from its meter and deletes it in one transaction. A
+    /// meter's *last* band cannot be removed this way: emptying `Meter.bands`
+    /// violates its schema minimum of one, so ovsdb-server aborts the
+    /// transaction — delete the meter instead.
+    public func deleteMeterBand(uuid: String) async throws(OVNManagerError) {
+        let count = try await connection.deleteDetaching(
+            from: OVNTable.meterBand,
+            in: database,
+            uuid: uuid,
+            parentReferences: [OVSDBParentReference(table: OVNTable.meter, column: "bands")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Meter band not found: \(uuid)")
+        }
+
+        logger.info("Deleted meter band: \(uuid)")
     }
 
     // MARK: - DHCP Operations
@@ -1634,39 +2083,88 @@ private extension OVNManager {
         return uuidValue
     }
 
-    /// Adds a row's UUID to a parent row's reference column via a single
-    /// mutate, guarded by a wait op that re-checks the referenced row still
-    /// exists at commit.
+    /// Binds the `load_balancer` column of whichever parent table the caller
+    /// named — `Logical_Switch` or `Logical_Router` — to the shared
+    /// reference helpers below.
+    func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await attachReference(
+            uuid: uuid,
+            childTable: OVNTable.loadBalancer,
+            childDescription: "Load balancer",
+            parentTable: parentTable,
+            parentColumn: "load_balancer",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
+    func detachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await detachReference(
+            uuid: uuid,
+            parentTable: parentTable,
+            parentColumn: "load_balancer",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
+    /// The same binding for `load_balancer_group`, which sits beside
+    /// `load_balancer` on both parent tables.
+    func attachLoadBalancerGroup(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await attachReference(
+            uuid: uuid,
+            childTable: OVNTable.loadBalancerGroup,
+            childDescription: "Load balancer group",
+            parentTable: parentTable,
+            parentColumn: "load_balancer_group",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
+    func detachLoadBalancerGroup(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+        try await detachReference(
+            uuid: uuid,
+            parentTable: parentTable,
+            parentColumn: "load_balancer_group",
+            parentDescription: parentDescription,
+            parentName: parentName
+        )
+    }
+
+    /// Adds a root-table row's UUID to a name-keyed parent's reference column
+    /// (`Logical_Switch.load_balancer`, `Logical_Switch.dns_records`,
+    /// `Logical_Router.load_balancer_group`, …).
     ///
-    /// The guard is what a weak column needs: mutating a UUID into
-    /// `load_balancer` after its row has gone is silently dropped rather than
-    /// rejected, so without it the attach would report success and change
-    /// nothing. A strong column (`load_balancer_group`) would instead be
-    /// rejected by ovsdb-server at commit; the wait op just gets there first,
-    /// aborting the transaction either way.
+    /// Most such columns are weak references: mutating in a UUID whose row no
+    /// longer exists at commit is silently dropped rather than rejected, so
+    /// the child's existence is re-checked with a wait op inside the same
+    /// transaction. `load_balancer_group` is the strong one, which
+    /// ovsdb-server would reject at commit instead — the wait op just gets
+    /// there first, aborting the transaction either way.
     func attachReference(
         uuid: String,
-        referencedTable: String,
-        referencedDescription: String,
-        column: String,
+        childTable: String,
+        childDescription: String,
         parentTable: String,
+        parentColumn: String,
         parentDescription: String,
         parentName: String
     ) async throws(OVNManagerError) {
         let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
-        let rowCondition = OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)
+        let childCondition = OVSDBCondition(column: "_uuid", function: "==", value: uuidAtom)
 
-        guard try await rowUUID(in: referencedTable, where: rowCondition) != nil else {
-            throw OVNManagerError.operationFailed("\(referencedDescription) not found: \(uuid)")
+        guard try await rowUUID(in: childTable, where: childCondition) != nil else {
+            throw OVNManagerError.operationFailed("\(childDescription) not found: \(uuid)")
         }
 
         let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
-        var operations = rowExistenceWaitOps([uuid], in: referencedTable)
+        var operations = rowExistenceWaitOps([uuid], in: childTable)
         operations.append(OVSDBOperation(
             op: "mutate",
             table: parentTable,
             whereConditions: [parentCondition],
-            mutations: [OVSDBMutation(column: column, mutator: "insert", value: uuidAtom)]
+            mutations: [OVSDBMutation(column: parentColumn, mutator: "insert", value: uuidAtom)]
         ))
 
         let results = try await connection.transact(in: database, operations: operations)
@@ -1680,10 +2178,16 @@ private extension OVNManager {
         }
     }
 
-    /// Removes a UUID from a parent row's reference column. Neither a weak nor
-    /// a strong column needs an existence guard here: removing a UUID that
-    /// names no row is a harmless no-op.
-    func detachReference(uuid: String, column: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
+    /// Removes a UUID from a parent's reference column. No existence guard on
+    /// the child, weak or strong: deleting a stale UUID from a set is a
+    /// harmless no-op.
+    func detachReference(
+        uuid: String,
+        parentTable: String,
+        parentColumn: String,
+        parentDescription: String,
+        parentName: String
+    ) async throws(OVNManagerError) {
         let uuidAtom = JSONValue.array([.string("uuid"), .string(uuid)])
         let parentCondition = OVSDBCondition(column: "name", function: "==", value: .string(parentName))
 
@@ -1691,36 +2195,12 @@ private extension OVNManager {
             table: parentTable,
             in: database,
             where: [parentCondition],
-            mutations: [OVSDBMutation(column: column, mutator: "delete", value: uuidAtom)]
+            mutations: [OVSDBMutation(column: parentColumn, mutator: "delete", value: uuidAtom)]
         )
 
         if count == 0 {
             throw OVNManagerError.operationFailed("\(parentDescription) not found: \(parentName)")
         }
-    }
-
-    func attachLoadBalancer(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
-        try await attachReference(
-            uuid: uuid,
-            referencedTable: OVNTable.loadBalancer,
-            referencedDescription: "Load balancer",
-            column: "load_balancer",
-            parentTable: parentTable,
-            parentDescription: parentDescription,
-            parentName: parentName
-        )
-    }
-
-    func attachLoadBalancerGroup(uuid: String, parentTable: String, parentDescription: String, parentName: String) async throws(OVNManagerError) {
-        try await attachReference(
-            uuid: uuid,
-            referencedTable: OVNTable.loadBalancerGroup,
-            referencedDescription: "Load balancer group",
-            column: "load_balancer_group",
-            parentTable: parentTable,
-            parentDescription: parentDescription,
-            parentName: parentName
-        )
     }
 
     /// Inserts or deletes a set of UUIDs in a weak reference column of the row
@@ -1795,6 +2275,33 @@ private extension OVNManager {
             description: "Load balancer group",
             mutator: mutator
         )
+    }
+
+    /// Inserts or deletes addresses in an address set's `addresses` column via
+    /// a single mutate op, so incremental membership changes never
+    /// read-modify-write the whole set. A no-op (empty list) is skipped so the
+    /// caller never issues an empty mutation.
+    ///
+    /// Unlike `Port_Group.ports`, this column holds plain strings rather than
+    /// references, so there is nothing whose existence needs guarding: a
+    /// member's validity is checked by ovsdb-server against the column type,
+    /// and by ovn-northd when it translates the referencing match.
+    func mutateAddresses(_ addresses: [String], addressSet name: String, mutator: String) async throws(OVNManagerError) {
+        guard !addresses.isEmpty else { return }
+
+        let addressSetValue = JSONValue.array([.string("set"), .array(addresses.map { .string($0) })])
+        let setCondition = OVSDBCondition(column: "name", function: "==", value: .string(name))
+
+        let count = try await connection.mutate(
+            table: OVNTable.addressSet,
+            in: database,
+            where: [setCondition],
+            mutations: [OVSDBMutation(column: "addresses", mutator: mutator, value: addressSetValue)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("Address set not found: \(name)")
+        }
     }
 
     /// Inserts a row into a table whose `name` column the schema indexes,

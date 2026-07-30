@@ -18,7 +18,11 @@ public struct OVNLogicalRouterStaticRoute: Codable, Sendable {
     public let output_port: String?
     /// Routing policy: `"dst-ip"` (default) or `"src-ip"`.
     public let policy: String?
-    /// UUID reference to a `BFD` session monitoring `nexthop`.
+    /// UUID reference to the `OVNBFD` session monitoring `nexthop`.
+    ///
+    /// A *weak* reference: ovsdb-server silently drops a UUID whose session row
+    /// no longer exists rather than failing the write, so `OVNManager` guards
+    /// it with a `wait` op on create and update.
     public let bfd: String?
     /// Named route table this route belongs to (empty string is the main table).
     public let route_table: String?

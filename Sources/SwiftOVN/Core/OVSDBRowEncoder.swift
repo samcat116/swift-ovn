@@ -73,6 +73,8 @@ enum OVSDBRowEncoder {
                 "ha_chassis",
                 // Load_Balancer
                 "health_check",
+                // Meter
+                "bands",
                 // NAT (weak references to Address_Set)
                 "allowed_ext_ips", "exempted_ext_ips",
             ]

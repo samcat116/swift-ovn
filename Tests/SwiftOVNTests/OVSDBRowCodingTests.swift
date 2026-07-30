@@ -177,6 +177,131 @@ struct OVSDBRowDecoderTests {
         #expect(qos.bandwidth == [:])
     }
 
+    /// A BFD session as ovsdb-server sends it: the optional integer columns are
+    /// empty sets when unset and bare numbers when set, and `status` — which
+    /// ovn-northd writes, not the client — arrives as a bare string.
+    @Test("A BFD session with set and unset optional scalars")
+    func bfdSessionWithSetAndUnsetOptionalScalars() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lrp0"),
+            "dst_ip": .string("192.168.1.1"),
+            "min_tx": .number(250),
+            "min_rx": emptySet,
+            "detect_mult": .number(5),
+            "options": wireMap([]),
+            "status": .string("up"),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let bfd = try OVSDBRowDecoder.decode(OVNBFD.self, from: row)
+
+        #expect(bfd.uuid == uuidA)
+        #expect(bfd.logical_port == "lrp0")
+        #expect(bfd.dst_ip == "192.168.1.1")
+        #expect(bfd.min_tx == 250)
+        #expect(bfd.min_rx == nil)
+        #expect(bfd.detect_mult == 5)
+        #expect(bfd.status == "up")
+        #expect(bfd.external_ids == ["owner": "test"])
+    }
+
+    @Test("A DNS row's records decode as a map")
+    func dnsRecordsDecodeAsAMap() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "records": wireStringMap(["vm1.ovn.org": "10.0.0.11", "vm2.ovn.org": "10.0.0.12"]),
+            "options": wireMap([]),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let dns = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(dns.uuid == uuidA)
+        #expect(dns.records == ["vm1.ovn.org": "10.0.0.11", "vm2.ovn.org": "10.0.0.12"])
+        #expect(dns.external_ids == ["owner": "test"])
+    }
+
+    /// A record set created empty and filled later: `records` has min 0, so it
+    /// arrives as an empty map and decodes to `[:]` rather than failing the
+    /// non-optional property.
+    @Test("A DNS row with no records")
+    func dnsRowWithNoRecords() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "records": wireMap([]),
+            "options": wireMap([]),
+            "external_ids": wireMap([]),
+        ]
+
+        let dns = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(dns.records == [:])
+    }
+
+    /// A meter fresh from `ovn-nbctl meter-add` has exactly one band, so
+    /// `bands` arrives as the bare UUID atom, and `fair` — the one optional
+    /// column — as the empty set.
+    @Test("A Meter with a single band and no fairness setting")
+    func meterWithSingleBandAndNoFairness() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("acl-log-meter"),
+            "unit": .string("pktps"),
+            "bands": wireUUID(uuidB),
+            "fair": emptySet,
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let meter = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(meter.uuid == uuidA)
+        #expect(meter.name == "acl-log-meter")
+        #expect(meter.unit == "pktps")
+        #expect(meter.bands == [uuidB])
+        #expect(meter.fair == nil)
+        #expect(meter.external_ids == ["owner": "test"])
+    }
+
+    @Test("A Meter with several bands and fairness set")
+    func meterWithSeveralBandsAndFairnessSet() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("copp-meter"),
+            "unit": .string("kbps"),
+            "bands": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
+            "fair": .boolean(true),
+            "external_ids": wireMap([]),
+        ]
+
+        let meter = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(meter.bands == [uuidB, uuidC])
+        #expect(meter.fair == true)
+        #expect(meter.external_ids == [:])
+    }
+
+    /// `action`, `rate` and `burst_size` are all required scalars, so a band row
+    /// never carries the empty set for them.
+    @Test("A Meter_Band row")
+    func meterBandRow() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidB),
+            "action": .string("drop"),
+            "rate": .number(100),
+            "burst_size": .number(25),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let band = try OVSDBRowDecoder.decode(OVNMeterBand.self, from: row)
+
+        #expect(band.uuid == uuidB)
+        #expect(band.action == "drop")
+        #expect(band.rate == 100)
+        #expect(band.burst_size == 25)
+        #expect(band.external_ids == ["owner": "test"])
+    }
+
     @Test("A Chassis with a non-optional string set")
     func chassisWithNonOptionalStringSet() throws {
         let row: OVSDBRow = [
@@ -922,6 +1047,65 @@ struct OVSDBRowEncoderTests {
         #expect(row["protocol"] == .string("tcp"))
     }
 
+    @Test("An address set's addresses encode as plain strings")
+    func addressSetAddressesEncodeAsPlainStrings() throws {
+        // `addresses` is a plain string set, so it must not be rewritten into
+        // UUID atoms — the NAT columns that *reference* Address_Set rows
+        // (allowed_ext_ips, exempted_ext_ips) are the reference-typed ones.
+        let addressSet = OVNAddressSet(
+            name: "web_tier",
+            addresses: ["10.0.0.1", "10.0.1.0/24"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: addressSet, hints: .ovn)
+
+        #expect(row["addresses"] == wireSet([.string("10.0.0.1"), .string("10.0.1.0/24")]))
+        #expect(row["name"] == .string("web_tier"))
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// A UUID-shaped member must survive as a string: an address set can hold
+    /// arbitrary strings, and nothing about its shape makes it a reference.
+    @Test("An address set round trips")
+    func addressSetRoundTrip() throws {
+        let addressSet = OVNAddressSet(
+            name: "db_tier",
+            addresses: [uuidB, "fd12:3456:789a::/64"],
+            options: ["k": "v"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: addressSet, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNAddressSet.self, from: row)
+
+        #expect(decoded.name == addressSet.name)
+        #expect(decoded.addresses == addressSet.addresses)
+        #expect(decoded.options == addressSet.options)
+        #expect(decoded.external_ids == addressSet.external_ids)
+    }
+
+    /// A fresh address set has `addresses` sent as the empty set and a
+    /// single-member one as the bare string atom; both must decode to the
+    /// model's array shape.
+    @Test("An address set decodes empty and single-member membership",
+          arguments: [(emptySet, nil), (JSONValue.string("10.0.0.1"), ["10.0.0.1"])]
+            as [(JSONValue, [String]?)])
+    func addressSetMembershipShapes(wire: JSONValue, expected: [String]?) throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("as0"),
+            "addresses": wire,
+            "options": wireMap([]),
+        ]
+
+        let addressSet = try OVSDBRowDecoder.decode(OVNAddressSet.self, from: row)
+
+        #expect(addressSet.name == "as0")
+        #expect(addressSet.addresses == expected)
+        #expect(addressSet.options == [:])
+    }
+
     @Test("A Gateway_Chassis encodes chassis_name as a string and priority as a number")
     func gatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
         let chassis = OVNGatewayChassis(
@@ -1058,6 +1242,171 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.action == qos.action)
         #expect(decoded.bandwidth == qos.bandwidth)
         #expect(decoded.external_ids == qos.external_ids)
+    }
+
+    /// `logical_port` is a port *name* in this table, not a reference, and the
+    /// interval columns are plain numbers.
+    @Test("A BFD session encodes its port name as a string")
+    func bfdSessionEncodesPortNameAsAString() throws {
+        let bfd = OVNBFD(
+            logical_port: uuidB,  // a port name that happens to look like a UUID
+            dst_ip: "192.168.1.1",
+            min_tx: 250,
+            detect_mult: 5
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+
+        #expect(row["logical_port"] == .string(uuidB))
+        #expect(row["dst_ip"] == .string("192.168.1.1"))
+        #expect(row["min_tx"] == .number(250))
+        #expect(row["detect_mult"] == .number(5))
+        #expect(row["min_rx"] == nil)
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// `status` is ovn-northd's to write, so a session built in Swift carries
+    /// none and no create or update ever sends the column.
+    @Test("A constructed BFD session sends no status")
+    func constructedBFDSessionSendsNoStatus() throws {
+        let bfd = OVNBFD(logical_port: "lrp0", dst_ip: "192.168.1.1")
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+
+        #expect(bfd.status == nil)
+        #expect(row["status"] == nil)
+    }
+
+    @Test("A BFD session round trips")
+    func bfdSessionRoundTrip() throws {
+        let bfd = OVNBFD(
+            logical_port: "lrp0",
+            dst_ip: "fd00::1",
+            min_tx: 100,
+            min_rx: 100,
+            detect_mult: 3,
+            options: ["foo": "bar"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: bfd, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNBFD.self, from: row)
+
+        #expect(decoded.logical_port == bfd.logical_port)
+        #expect(decoded.dst_ip == bfd.dst_ip)
+        #expect(decoded.min_tx == bfd.min_tx)
+        #expect(decoded.min_rx == bfd.min_rx)
+        #expect(decoded.detect_mult == bfd.detect_mult)
+        #expect(decoded.options == bfd.options)
+        #expect(decoded.external_ids == bfd.external_ids)
+        #expect(decoded.status == nil)
+    }
+
+    @Test("A DNS record set round trips")
+    func dnsRecordSetRoundTrip() throws {
+        let dns = OVNDNS(
+            records: ["vm1.ovn.org": "10.0.0.11"],
+            options: ["foo": "bar"],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: dns, hints: .ovn)
+        #expect(row["records"] == wireStringMap(["vm1.ovn.org": "10.0.0.11"]))
+
+        let decoded = try OVSDBRowDecoder.decode(OVNDNS.self, from: row)
+
+        #expect(decoded.records == dns.records)
+        #expect(decoded.options == dns.options)
+        #expect(decoded.external_ids == dns.external_ids)
+    }
+
+    /// `Logical_Switch.dns_records` is a reference set, so a switch written
+    /// with DNS rows attached must send UUID atoms — the same treatment
+    /// `load_balancer` and `acls` get.
+    @Test("A logical switch's dns_records encodes UUID atoms")
+    func logicalSwitchDNSRecordsEncodeUUIDAtoms() throws {
+        let logicalSwitch = OVNLogicalSwitch(name: "ls0", dnsRecords: [uuidB, uuidC])
+
+        let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
+
+        #expect(row["dns_records"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["name"] == .string("ls0"))
+    }
+
+    /// `bands` is a strong reference set, so its elements become UUID atoms;
+    /// `fair` must stay a boolean rather than being coerced into a number.
+    @Test("A Meter's bands encode as UUID atoms")
+    func meterBandsEncodeAsUUIDAtoms() throws {
+        let meter = OVNMeter(
+            name: "acl-log-meter",
+            unit: "pktps",
+            bands: [uuidB, uuidC],
+            fair: true,
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: meter, hints: .ovn)
+
+        #expect(row["bands"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["name"] == .string("acl-log-meter"))
+        #expect(row["unit"] == .string("pktps"))
+        #expect(row["fair"] == .boolean(true))
+        #expect(row["_uuid"] == nil)
+    }
+
+    /// A meter created band-less carries no `bands` column at all, so the
+    /// create's own set of `named-uuid` references is what lands there — the
+    /// column has a schema minimum of one and an empty set would be rejected.
+    @Test("A Meter without bands omits the column")
+    func meterWithoutBandsOmitsTheColumn() throws {
+        let row = try OVSDBRowEncoder.makeRow(from: OVNMeter(name: "m0", unit: "kbps"), hints: .ovn)
+
+        #expect(row["bands"] == nil)
+        #expect(row["fair"] == nil)
+    }
+
+    @Test("A Meter round trips")
+    func meterRoundTrip() throws {
+        let meter = OVNMeter(name: "m1", unit: "kbps", bands: [uuidB], fair: false, external_ids: ["owner": "test"])
+
+        let row = try OVSDBRowEncoder.makeRow(from: meter, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNMeter.self, from: row)
+
+        #expect(decoded.name == meter.name)
+        #expect(decoded.unit == meter.unit)
+        #expect(decoded.bands == meter.bands)
+        #expect(decoded.fair == meter.fair)
+        #expect(decoded.external_ids == meter.external_ids)
+    }
+
+    /// The band's rates are integer columns: they must stay JSON numbers, and
+    /// `action` must stay a plain string (it is an enum, not a reference).
+    @Test("A Meter_Band round trips")
+    func meterBandRoundTrip() throws {
+        let band = OVNMeterBand(rate: 100, burst_size: 25, external_ids: ["owner": "test"])
+
+        let row = try OVSDBRowEncoder.makeRow(from: band, hints: .ovn)
+        #expect(row["action"] == .string("drop"))
+        #expect(row["rate"] == .number(100))
+        #expect(row["burst_size"] == .number(25))
+        #expect(row["_uuid"] == nil)
+
+        let decoded = try OVSDBRowDecoder.decode(OVNMeterBand.self, from: row)
+
+        #expect(decoded.action == band.action)
+        #expect(decoded.rate == band.rate)
+        #expect(decoded.burst_size == band.burst_size)
+        #expect(decoded.external_ids == band.external_ids)
+    }
+
+    /// `burst_size` is a required column with no OVSDB default of its own, so
+    /// the omitted-burst case has to be written explicitly as 0 — the value
+    /// `ovn-nbctl meter-add` uses when no burst is given.
+    @Test("A Meter_Band defaults burst_size to zero")
+    func meterBandDefaultsBurstSizeToZero() throws {
+        let row = try OVSDBRowEncoder.makeRow(from: OVNMeterBand(rate: 1), hints: .ovn)
+
+        #expect(row["burst_size"] == .number(0))
     }
 
     @Test("QoS round trips")
