@@ -243,8 +243,10 @@ actor OVSDBConnectionCore {
     }
 
     private func encodeFrame<T: Encodable>(_ message: T) throws -> ByteBuffer {
-        // Encoded straight into the buffer: the old path went
-        // Data → String → String + "\n" → ByteBuffer, re-encoding UTF-8 twice.
+        // Encoded straight into the buffer the channel writes. Going via
+        // `String` — encode, decode the UTF-8, concatenate the newline, re-encode
+        // — cost two more full copies of the payload, wasted work on exactly the
+        // writes that are already large.
         var buffer = ByteBufferAllocator().buffer(capacity: 512)
         do {
             try encoder.encode(message, into: &buffer)
@@ -252,9 +254,13 @@ actor OVSDBConnectionCore {
             logger.error("Failed to encode message: \(error)")
             throw OVNManagerError.encodingError(error)
         }
-        // RFC 7047 needs no delimiter, but ovsdb-server's own clients send one
-        // and it keeps a captured stream readable.
+        // The trailing newline is not needed for framing (the peer parses a
+        // stream of JSON objects, as does `OVSDBJSONFrameDecoder`), but it keeps
+        // the wire readable in a packet capture, so it stays.
         buffer.writeInteger(UInt8(ascii: "\n"))
+        // `debug` takes an autoclosure, so the payload is only rendered when
+        // debug logging is actually enabled.
+        logger.debug("Sending message: \(String(buffer: buffer))")
         return buffer
     }
 
