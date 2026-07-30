@@ -8,25 +8,32 @@ import Logging
 /// Preserved name from when the connection was Unix-socket only.
 public typealias UnixSocketConnection = OVSDBSocketConnection
 
-public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
+/// A JSON-RPC transport to an OVSDB server over a Unix domain socket, TCP or
+/// TLS.
+///
+/// All mutable state lives in `OVSDBConnectionCore`, an actor, so this type is
+/// `Sendable` by inspection rather than by assertion: every stored property is
+/// an immutable `let` holding a `Sendable` value.
+public final class OVSDBSocketConnection: OVSDBTransport {
+    /// Default bound on how far a `notifications()` consumer may fall behind.
+    public static let defaultNotificationBufferSize = 1024
+
+    private let core: OVSDBConnectionCore
     private let eventLoopGroup: EventLoopGroup
     /// True when we created `eventLoopGroup` ourselves and are therefore
     /// responsible for shutting it down; false when the caller injected one.
     private let ownsEventLoopGroup: Bool
-    private let logger: Logger
-    private var channel: Channel?
-    private let endpoint: OVSDBEndpoint
-    private var isConnected: Bool = false
-    private var responseRouter: JSONRPCResponseRouter?
-    /// The in-flight `connect()` future, if any. Guards against concurrent
-    /// `connect()` calls each bootstrapping their own channel (which would
-    /// leak all but the last). All access is under `connectionLock`.
-    private var inFlightConnect: EventLoopFuture<Void>?
-    private let connectionLock = NSLock()
-    private let notificationHub = JSONRPCNotificationHub()
 
-    public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
-        self.endpoint = endpoint
+    /// - Parameter notificationBufferSize: How many notifications may queue up
+    ///   for one `notifications()` consumer before its stream is terminated with
+    ///   `OVNManagerError.notificationsDropped`. Raise it for consumers that do
+    ///   slow work per update; lowering it surfaces a lagging consumer sooner.
+    public init(
+        endpoint: OVSDBEndpoint,
+        eventLoopGroup: EventLoopGroup? = nil,
+        logger: Logger? = nil,
+        notificationBufferSize: Int = OVSDBSocketConnection.defaultNotificationBufferSize
+    ) {
         if let eventLoopGroup {
             self.eventLoopGroup = eventLoopGroup
             self.ownsEventLoopGroup = false
@@ -34,7 +41,12 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
             self.ownsEventLoopGroup = true
         }
-        self.logger = logger ?? Logger(label: "ovn-manager.socket")
+        self.core = OVSDBConnectionCore(
+            endpoint: endpoint,
+            eventLoopGroup: self.eventLoopGroup,
+            logger: logger ?? Logger(label: "ovn-manager.socket"),
+            notificationBufferSize: notificationBufferSize
+        )
     }
 
     public convenience init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
@@ -53,71 +65,80 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
         }
     }
 
-    public func connect() -> EventLoopFuture<Void> {
-        connectionLock.lock()
-        if isConnected {
-            connectionLock.unlock()
-            logger.debug("Already connected to \(endpoint)")
-            return eventLoopGroup.next().makeSucceededFuture(())
-        }
-        if let inFlightConnect {
-            connectionLock.unlock()
-            logger.debug("connect() already in progress for \(endpoint), reusing it")
-            return inFlightConnect
-        }
-        // Reserve the in-flight slot with a promise so concurrent callers
-        // dedup, then release the lock *before* wiring up the real future.
-        // `makeConnectFuture()` can return an already-completed future (missing
-        // socket, invalid TLS); cascading it — and the slot-clearing callback —
-        // would otherwise run synchronously while we still hold the
-        // non-reentrant lock and deadlock when called on the group's EventLoop.
-        let promise = eventLoopGroup.next().makePromise(of: Void.self)
-        inFlightConnect = promise.futureResult
-        connectionLock.unlock()
-
-        // Clear the in-flight slot once this attempt settles so a later
-        // reconnect can start fresh.
-        promise.futureResult.whenComplete { [weak self] _ in
-            guard let self else { return }
-            self.connectionLock.lock()
-            self.inFlightConnect = nil
-            self.connectionLock.unlock()
-        }
-        makeConnectFuture().cascade(to: promise)
-        return promise.futureResult
+    public func connect() async throws {
+        try await core.connect()
     }
 
-    private func makeConnectFuture() -> EventLoopFuture<Void> {
-        logger.info("Connecting to OVSDB endpoint: \(endpoint)")
+    public func disconnect() async {
+        await core.disconnect()
+    }
 
-        // Created here (not in the channel initializer) so it can be assigned
-        // to `responseRouter` under the lock once the connection succeeds.
-        let router = JSONRPCResponseRouter(
-            logger: logger,
-            eventLoopGroup: eventLoopGroup,
-            notificationHub: notificationHub
-        )
+    public func send<T: Codable & Sendable>(_ message: T) async throws {
+        try await core.send(message)
+    }
 
-        // TLS state that must exist before the pipeline is built.
-        let sslContext: NIOSSLContext?
-        let sslServerHostname: String?
+    public func sendRequest<Request: Codable & Sendable, Response: Codable & Sendable>(
+        _ request: Request,
+        id: JSONRPCIdentifier,
+        responseType: Response.Type,
+        timeout: TimeAmount
+    ) async throws -> Response {
+        return try await core.sendRequest(request, id: id, responseType: responseType, timeout: timeout)
+    }
+
+    /// Returns a buffered stream of server-initiated JSON-RPC notifications
+    /// (messages with a `method` and a null or absent `id`, e.g. `update`).
+    ///
+    /// The stream buffers notifications from the moment this call returns, so
+    /// subscribe *before* issuing the request that triggers them (e.g.
+    /// `monitor`) and no notification is lost while the consumer is busy.
+    /// Subscribing is valid before `connect()`, and multiple subscribers each
+    /// receive every notification.
+    ///
+    /// The stream finishes when the connection closes, and throws
+    /// `OVNManagerError.notificationsDropped` if the consumer falls further than
+    /// this connection's notification buffer behind. A subscription taken out
+    /// after the connection has closed is returned already finished.
+    public func notifications() -> AsyncThrowingStream<JSONRPCNotification, Error> {
+        return core.notifications.subscribe()
+    }
+
+    public var isConnectionActive: Bool {
+        return core.isConnected
+    }
+}
+
+// MARK: - Channel Bootstrap
+
+/// Builds the `NIOAsyncChannel` for an endpoint: pipeline, TLS, and the
+/// endpoint-specific connect call.
+enum OVSDBChannelBootstrap {
+    /// Connects and returns the wrapped channel. For `ssl:` endpoints the
+    /// returned channel has completed its TLS handshake, so a certificate that
+    /// fails verification surfaces here rather than on a later request.
+    static func connect(
+        endpoint: OVSDBEndpoint,
+        eventLoopGroup: EventLoopGroup,
+        logger: Logger
+    ) async throws -> NIOAsyncChannel<ByteBuffer, ByteBuffer> {
+        let tls: (context: NIOSSLContext, serverHostname: String?)?
+
         switch endpoint {
         case .unix(let path):
-            if !FileManager.default.fileExists(atPath: path) {
+            guard FileManager.default.fileExists(atPath: path) else {
                 logger.error("Socket file does not exist at path: \(path)")
-                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Socket file not found: \(path)"))
+                throw OVNManagerError.connectionFailed("Socket file not found: \(path)")
             }
-            sslContext = nil
-            sslServerHostname = nil
+            tls = nil
         case .tcp:
-            sslContext = nil
-            sslServerHostname = nil
-        case .ssl(let host, _, let tls):
+            tls = nil
+        case .ssl(let host, _, let configuration):
+            let context: NIOSSLContext
             do {
-                sslContext = try Self.makeSSLContext(tls)
+                context = try makeSSLContext(configuration)
             } catch {
                 logger.error("Failed to build TLS context: \(error)")
-                return eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)"))
+                throw OVNManagerError.connectionFailed("Invalid TLS configuration: \(error)")
             }
             // NIOSSL rejects IP literals as SNI hostnames (RFC 6066), so pass
             // nil for them. This does not weaken verification: under
@@ -125,79 +146,78 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             // hostname by matching the connection's remote address against
             // the certificate's IP SANs (NIOSSLHandler.validateHostname →
             // validIdentityForService), and fails the handshake on no match.
-            let hostname = tls.serverHostname ?? host
-            sslServerHostname = Self.isIPAddressLiteral(hostname) ? nil : hostname
+            let hostname = configuration.serverHostname ?? host
+            tls = (context, isIPAddressLiteral(hostname) ? nil : hostname)
         }
+
+        // The handshake promise is created outside the pipeline so the handler
+        // itself holds no state that has to cross a concurrency domain.
+        let handshake = tls == nil ? nil : eventLoopGroup.any().makePromise(of: Void.self)
 
         let bootstrap = ClientBootstrap(group: eventLoopGroup)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .channelInitializer { channel in
-                self.logger.debug("Initializing channel pipeline...")
 
-                var handlers: [ChannelHandler] = []
-                if let sslContext {
-                    do {
-                        handlers.append(try NIOSSLClientHandler(context: sslContext, serverHostname: sslServerHostname))
-                    } catch {
-                        self.logger.error("Failed to create TLS handler: \(error)")
-                        return channel.eventLoop.makeFailedFuture(error)
-                    }
-                    handlers.append(TLSHandshakeWaitHandler())
+        let initializer: @Sendable (Channel) -> EventLoopFuture<NIOAsyncChannel<ByteBuffer, ByteBuffer>> = { channel in
+            channel.eventLoop.makeCompletedFuture {
+                let operations = channel.pipeline.syncOperations
+                if let tls, let handshake {
+                    try operations.addHandler(
+                        NIOSSLClientHandler(context: tls.context, serverHostname: tls.serverHostname)
+                    )
+                    try operations.addHandler(TLSHandshakeWaitHandler(handshake: handshake))
                 }
-                handlers.append(contentsOf: [
-                    ByteToMessageHandler(OVSDBJSONFrameDecoder()),
-                    MessageToByteHandler(StringToByteEncoder()),
-                    router
-                ] as [ChannelHandler])
-                return channel.pipeline.addHandlers(handlers).map { _ in
-                    self.logger.debug("Channel pipeline initialized successfully")
-                }.flatMapError { error in
-                    self.logger.error("Failed to initialize channel pipeline: \(error)")
-                    return channel.eventLoop.makeFailedFuture(error)
-                }
+                // No outbound handler: frames are written as ByteBuffers, so
+                // there is nothing left to encode on the way out.
+                try operations.addHandler(ByteToMessageHandler(OVSDBJSONFrameDecoder()))
+                return try NIOAsyncChannel(
+                    wrappingChannelSynchronously: channel,
+                    configuration: NIOAsyncChannel.Configuration(
+                        // The default watermarks (low 2, high 10) are the
+                        // backpressure the old pipeline had none of: once that
+                        // many framed messages are waiting for the consumer, the
+                        // channel stops issuing reads and the server's socket
+                        // buffer — not this process's memory — holds the backlog.
+                        inboundType: ByteBuffer.self,
+                        outboundType: ByteBuffer.self
+                    )
+                )
             }
-
-        let connectFuture: EventLoopFuture<Channel>
-        switch endpoint {
-        case .unix(let path):
-            connectFuture = bootstrap.connect(unixDomainSocketPath: path)
-        case .tcp(let host, let port), .ssl(let host, let port, _):
-            connectFuture = bootstrap.connect(host: host, port: port)
         }
 
-        return connectFuture
-            .flatMap { channel -> EventLoopFuture<Channel> in
-                // For ssl: endpoints the TCP connect completing is not enough;
-                // certificate verification happens during the TLS handshake,
-                // so hold the connect future until the handshake finishes and
-                // fail it if verification fails.
-                guard sslContext != nil else {
-                    return channel.eventLoop.makeSucceededFuture(channel)
-                }
-                return channel.pipeline.handler(type: TLSHandshakeWaitHandler.self)
-                    .flatMap { handler in
-                        handler.handshakeFuture ?? channel.eventLoop.makeSucceededFuture(())
-                    }
-                    .map { channel }
+        let asyncChannel: NIOAsyncChannel<ByteBuffer, ByteBuffer>
+        do {
+            switch endpoint {
+            case .unix(let path):
+                asyncChannel = try await bootstrap.connect(
+                    unixDomainSocketPath: path,
+                    channelInitializer: initializer
+                )
+            case .tcp(let host, let port), .ssl(let host, let port, _):
+                asyncChannel = try await bootstrap.connect(
+                    host: host,
+                    port: port,
+                    channelInitializer: initializer
+                )
             }
-            .map { channel in
-                self.logger.debug("Raw connection established, setting up channel...")
-                self.connectionLock.lock()
-                self.channel = channel
-                self.responseRouter = router
-                self.isConnected = true
-                self.connectionLock.unlock()
-                self.logger.info("Successfully connected to \(self.endpoint)")
-                self.logger.debug("Channel active: \(channel.isActive), writable: \(channel.isWritable)")
+        } catch {
+            logger.error("Failed to connect to \(endpoint): \(error)")
+            if let ioError = error as? IOError {
+                logger.error("IO error code: \(ioError.errnoCode)")
             }
-            .flatMapError { error in
-                self.logger.error("Failed to connect to \(self.endpoint): \(error)")
-                self.logger.error("Error type: \(type(of: error))")
-                if let ioError = error as? IOError {
-                    self.logger.error("IO error code: \(ioError.errnoCode)")
-                }
-                return self.eventLoopGroup.next().makeFailedFuture(OVNManagerError.connectionFailed("Failed to connect to \(self.endpoint): \(error)"))
+            throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
+        }
+
+        if let handshake {
+            do {
+                try await handshake.futureResult.get()
+            } catch {
+                logger.error("TLS handshake with \(endpoint) failed: \(error)")
+                asyncChannel.channel.close(promise: nil)
+                throw OVNManagerError.connectionFailed("Failed to connect to \(endpoint): \(error)")
             }
+        }
+
+        return asyncChannel
     }
 
     private static func makeSSLContext(_ tls: OVSDBTLSConfiguration) throws -> NIOSSLContext {
@@ -224,119 +244,39 @@ public final class OVSDBSocketConnection: OVSDBTransport, @unchecked Sendable {
             inet_pton(AF_INET, pointer, &ipv4) == 1 || inet_pton(AF_INET6, pointer, &ipv6) == 1
         }
     }
-
-    public func disconnect() -> EventLoopFuture<Void> {
-        connectionLock.lock()
-        guard let channel = channel, isConnected else {
-            connectionLock.unlock()
-            return eventLoopGroup.next().makeSucceededFuture(())
-        }
-
-        logger.info("Disconnecting from \(endpoint)")
-        self.isConnected = false
-        self.responseRouter = nil
-        connectionLock.unlock()
-
-        // Closing the channel fires channelInactive on the router, which fails
-        // all in-flight requests and finishes the notification streams.
-        return channel.close().map {
-            self.connectionLock.lock()
-            self.channel = nil
-            self.connectionLock.unlock()
-            self.logger.info("Successfully disconnected from \(self.endpoint)")
-        }
-    }
-
-    public func send<T: Codable & Sendable>(_ message: T) -> EventLoopFuture<Void> {
-        connectionLock.lock()
-        guard let channel = channel, isConnected else {
-            connectionLock.unlock()
-            return eventLoopGroup.next().makeFailedFuture(
-                OVNManagerError.connectionFailed("Not connected to socket")
-            )
-        }
-        connectionLock.unlock()
-
-        do {
-            let encoder = Foundation.JSONEncoder()
-            let data = try encoder.encode(message)
-            guard let jsonString = String(data: data, encoding: .utf8) else {
-                throw OVNManagerError.encodingError(
-                    NSError(domain: "OVSDBSocketConnection", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert data to string"])
-                )
-            }
-
-            logger.debug("Sending message: \(jsonString)")
-            return channel.writeAndFlush(jsonString + "\n")
-        } catch {
-            logger.error("Failed to encode message: \(error)")
-            return eventLoopGroup.next().makeFailedFuture(OVNManagerError.encodingError(error))
-        }
-    }
-
-    public func receive<T: Codable & Sendable>(as type: T.Type, requestId: JSONRPCIdentifier, timeout: TimeAmount = .seconds(30)) -> EventLoopFuture<T> {
-        connectionLock.lock()
-        guard let responseRouter = responseRouter, isConnected else {
-            connectionLock.unlock()
-            return eventLoopGroup.next().makeFailedFuture(
-                OVNManagerError.connectionFailed("Not connected to socket")
-            )
-        }
-        connectionLock.unlock()
-
-        return responseRouter.waitForResponse(requestId: requestId, type: T.self, timeout: timeout)
-    }
-
-    /// Returns a buffered stream of server-initiated JSON-RPC notifications
-    /// (messages with a `method` and a null or absent `id`, e.g. `update`).
-    ///
-    /// The stream buffers notifications from the moment it is created, so
-    /// subscribe *before* issuing the request that triggers them (e.g.
-    /// `monitor`) and no notification is lost even while the consumer is busy.
-    /// The stream finishes when the connection closes. Subscribing is valid
-    /// before `connect()` and multiple subscribers each receive every
-    /// notification.
-    public func notifications() -> AsyncStream<JSONRPCNotification> {
-        return notificationHub.subscribe()
-    }
-
-    public var isConnectionActive: Bool {
-        connectionLock.lock()
-        defer { connectionLock.unlock() }
-        return isConnected && channel?.isActive == true
-    }
 }
 
 // MARK: - TLS Handshake Wait
 
-/// Surfaces TLS handshake completion as a future, so `connect()` on an `ssl:`
-/// endpoint succeeds only after certificate verification instead of at TCP
-/// establishment. All members are accessed on the channel's event loop.
-final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable {
+/// Surfaces TLS handshake completion on a caller-supplied promise, so
+/// `connect()` on an `ssl:` endpoint succeeds only after certificate
+/// verification instead of at TCP establishment.
+///
+/// The promise is the handler's only link to the outside world, which is what
+/// lets this be an ordinary (non-`Sendable`) handler: everything else it owns is
+/// touched on the channel's event loop only, and the one closure that leaves the
+/// handler — the timeout task — reaches back through `NIOLoopBound`.
+final class TLSHandshakeWaitHandler: ChannelInboundHandler {
     typealias InboundIn = Any
 
+    private let handshake: EventLoopPromise<Void>
     private let timeout: TimeAmount
-    private var promise: EventLoopPromise<Void>?
     private var timeoutTask: Scheduled<Void>?
     private var isComplete = false
 
-    init(timeout: TimeAmount = .seconds(30)) {
+    init(handshake: EventLoopPromise<Void>, timeout: TimeAmount = .seconds(30)) {
+        self.handshake = handshake
         self.timeout = timeout
     }
 
-    /// nil only before the handler is added to a pipeline.
-    var handshakeFuture: EventLoopFuture<Void>? {
-        return promise?.futureResult
-    }
-
     func handlerAdded(context: ChannelHandlerContext) {
-        promise = context.eventLoop.makePromise(of: Void.self)
         // A server that accepts TCP but never answers the ClientHello (e.g. an
         // ssl: endpoint pointed at a cleartext port) would otherwise hang the
         // connect forever.
         let channel = context.channel
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         timeoutTask = context.eventLoop.scheduleTask(in: timeout) {
-            self.complete(.failure(OVNManagerError.connectionFailed("TLS handshake timed out")))
+            handler.value.complete(.failure(OVNManagerError.connectionFailed("TLS handshake timed out")))
             channel.close(promise: nil)
         }
     }
@@ -368,392 +308,9 @@ final class TLSHandshakeWaitHandler: ChannelInboundHandler, @unchecked Sendable 
         timeoutTask?.cancel()
         switch result {
         case .success:
-            promise?.succeed(())
+            handshake.succeed(())
         case .failure(let error):
-            promise?.fail(error)
+            handshake.fail(error)
         }
-    }
-}
-
-// MARK: - Notification Hub
-
-/// Fans server-initiated notifications out to any number of subscribers.
-///
-/// Each subscriber gets an unbounded `AsyncStream`, so notifications that
-/// arrive while the consumer is between iterations are buffered rather than
-/// dropped. Outlives the channel handler so subscriptions can be created
-/// before the connection is established.
-final class JSONRPCNotificationHub: @unchecked Sendable {
-    private let lock = NSLock()
-    private var subscribers: [UUID: AsyncStream<JSONRPCNotification>.Continuation] = [:]
-
-    func subscribe() -> AsyncStream<JSONRPCNotification> {
-        let id = UUID()
-        let (stream, continuation) = AsyncStream.makeStream(of: JSONRPCNotification.self)
-        continuation.onTermination = { [weak self] _ in
-            self?.removeSubscriber(id)
-        }
-        lock.lock()
-        subscribers[id] = continuation
-        lock.unlock()
-        return stream
-    }
-
-    func publish(_ notification: JSONRPCNotification) {
-        lock.lock()
-        let continuations = Array(subscribers.values)
-        lock.unlock()
-
-        for continuation in continuations {
-            continuation.yield(notification)
-        }
-    }
-
-    func finishAll() {
-        lock.lock()
-        let continuations = Array(subscribers.values)
-        subscribers.removeAll()
-        lock.unlock()
-
-        for continuation in continuations {
-            continuation.finish()
-        }
-    }
-
-    private func removeSubscriber(_ id: UUID) {
-        lock.lock()
-        subscribers.removeValue(forKey: id)
-        lock.unlock()
-    }
-}
-
-// MARK: - JSON-RPC Response Router
-
-/// Routes each inbound JSON-RPC message to the right consumer:
-///
-/// - Messages with a `method` and a real `id` are server-to-client *requests*.
-///   RFC 7047 §4.1.11 requires `echo` to be answered (ovsdb-server's
-///   inactivity probe closes the connection otherwise), so those are replied
-///   to inline.
-/// - Messages with a `method` and a null/absent `id` are *notifications*
-///   (`update` etc.) and are published to the notification hub.
-/// - Messages with an `id` and no `method` are *responses* to our requests
-///   and complete the matching pending promise.
-final class JSONRPCResponseRouter: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
-    typealias InboundIn = String
-
-    private let logger: Logger
-    private let decoder = Foundation.JSONDecoder()
-    private var pendingRequests: [JSONRPCIdentifier: PendingRequestProtocol] = [:]
-    private let lock = NSLock()
-    private var eventLoop: EventLoop?
-    private let eventLoopGroup: EventLoopGroup
-    private let notificationHub: JSONRPCNotificationHub
-
-    init(logger: Logger, eventLoopGroup: EventLoopGroup, notificationHub: JSONRPCNotificationHub) {
-        self.logger = logger
-        self.eventLoopGroup = eventLoopGroup
-        self.notificationHub = notificationHub
-    }
-
-    func handlerAdded(context: ChannelHandlerContext) {
-        eventLoop = context.eventLoop
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let message = unwrapInboundIn(data)
-        logger.debug("Received raw message: \(message)")
-
-        guard let messageData = message.data(using: .utf8) else {
-            logger.error("Failed to convert message to UTF-8 data")
-            return
-        }
-
-        guard let jsonObject = (try? JSONSerialization.jsonObject(with: messageData, options: [])) as? [String: Any] else {
-            logger.error("Failed to parse inbound message as a JSON object")
-            return
-        }
-
-        let idValue = jsonObject["id"]
-        let hasRealId = idValue != nil && !(idValue is NSNull)
-
-        if let method = jsonObject["method"] as? String {
-            if hasRealId {
-                // Server-to-client request; a reply is expected.
-                handleServerRequest(context: context, method: method, jsonObject: jsonObject)
-            } else {
-                // JSON-RPC marks notifications with a null (or absent) id.
-                handleNotification(messageData: messageData, method: method)
-            }
-        } else if hasRealId {
-            let responseId: JSONRPCIdentifier
-            if let idNumber = idValue as? Int {
-                responseId = .number(idNumber)
-            } else if let idString = idValue as? String {
-                responseId = .string(idString)
-            } else {
-                logger.debug("Received response with unsupported ID type, ignoring")
-                return
-            }
-
-            logger.debug("Processing response for request ID: \(responseId)")
-            handleResponse(responseId: responseId, messageData: messageData)
-        } else {
-            logger.debug("Received message with neither method nor id, ignoring")
-        }
-    }
-
-    private func handleServerRequest(context: ChannelHandlerContext, method: String, jsonObject: [String: Any]) {
-        guard method == "echo" else {
-            logger.warning("Received unsupported server-to-client request '\(method)', ignoring")
-            return
-        }
-
-        // RFC 7047 §4.1.11: the echo reply's result mirrors the request params.
-        let reply: [String: Any] = [
-            "id": jsonObject["id"] ?? NSNull(),
-            "result": jsonObject["params"] ?? [Any](),
-            "error": NSNull()
-        ]
-
-        do {
-            let data = try JSONSerialization.data(withJSONObject: reply)
-            guard let jsonString = String(data: data, encoding: .utf8) else {
-                logger.error("Failed to encode echo reply as UTF-8")
-                return
-            }
-            logger.debug("Replying to server echo request")
-            context.writeAndFlush(NIOAny(jsonString + "\n"), promise: nil)
-        } catch {
-            logger.error("Failed to serialize echo reply: \(error)")
-        }
-    }
-
-    private func handleNotification(messageData: Data, method: String) {
-        do {
-            let inbound = try decoder.decode(InboundNotificationMessage.self, from: messageData)
-            logger.debug("Dispatching notification: \(method)")
-            notificationHub.publish(JSONRPCNotification(method: inbound.method, params: inbound.params))
-        } catch {
-            logger.error("Failed to decode notification '\(method)': \(error)")
-        }
-    }
-
-    private func handleResponse(responseId: JSONRPCIdentifier, messageData: Data) {
-        lock.lock()
-        let pendingRequest = pendingRequests.removeValue(forKey: responseId)
-        lock.unlock()
-
-        if let pendingRequest {
-            logger.debug("Found matching pending request for ID: \(responseId)")
-            pendingRequest.timeoutTask.cancel()
-            pendingRequest.fulfill(with: messageData, decoder: decoder)
-        } else {
-            logger.debug("No pending request found for response ID: \(responseId)")
-        }
-    }
-
-    func waitForResponse<T: Codable & Sendable>(requestId: JSONRPCIdentifier, type: T.Type, timeout: TimeAmount) -> EventLoopFuture<T> {
-        guard let eventLoop = eventLoop else {
-            let failedPromise = eventLoopGroup.next().makePromise(of: T.self)
-            failedPromise.fail(OVNManagerError.connectionFailed("Event loop not available"))
-            return failedPromise.futureResult
-        }
-
-        let promise = eventLoop.makePromise(of: T.self)
-
-        let timeoutTask = eventLoop.scheduleTask(in: timeout) {
-            self.lock.lock()
-            let removed = self.pendingRequests.removeValue(forKey: requestId)
-            self.lock.unlock()
-            // Only fail if the request was still pending; a response may have
-            // already fulfilled the promise on another path.
-            if removed != nil {
-                promise.fail(OVNManagerError.timeoutError)
-            }
-        }
-
-        let pendingRequest = PendingRequestWrapper<T>(
-            promise: promise,
-            timeoutTask: timeoutTask
-        )
-
-        lock.lock()
-        pendingRequests[requestId] = pendingRequest
-        lock.unlock()
-
-        logger.debug("Added pending request for ID: \(requestId)")
-
-        return promise.futureResult
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        logger.info("Channel became inactive, failing in-flight requests and finishing notification streams")
-        failAllPending(with: OVNManagerError.connectionFailed("Connection closed"))
-        notificationHub.finishAll()
-        context.fireChannelInactive()
-    }
-
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.error("Channel error caught: \(error)")
-        failAllPending(with: error)
-        context.fireErrorCaught(error)
-    }
-
-    private func failAllPending(with error: Error) {
-        lock.lock()
-        let allPendingRequests = Array(pendingRequests.values)
-        pendingRequests.removeAll()
-        lock.unlock()
-
-        for request in allPendingRequests {
-            request.timeoutTask.cancel()
-            request.fail(with: error)
-        }
-    }
-}
-
-private struct InboundNotificationMessage: Decodable {
-    let method: String
-    let params: JSONValue?
-}
-
-private protocol PendingRequestProtocol {
-    var timeoutTask: Scheduled<Void> { get }
-    func fulfill(with data: Data, decoder: JSONDecoder)
-    func fail(with error: Error)
-}
-
-private struct PendingRequestWrapper<T: Codable & Sendable>: PendingRequestProtocol {
-    let promise: EventLoopPromise<T>
-    let timeoutTask: Scheduled<Void>
-
-    func fulfill(with data: Data, decoder: JSONDecoder) {
-        do {
-            let response = try decoder.decode(T.self, from: data)
-            promise.succeed(response)
-        } catch {
-            promise.fail(OVNManagerError.decodingError(error))
-        }
-    }
-
-    func fail(with error: Error) {
-        promise.fail(error)
-    }
-}
-
-// MARK: - Frame Handling
-
-/// Frames a byte stream into individual JSON-RPC objects.
-///
-/// OVSDB (RFC 7047) streams JSON-RPC objects with no delimiters — the server may
-/// concatenate several objects in a single read, or split one object across reads.
-/// A newline-based framer therefore mis-frames these messages. This decoder instead
-/// tracks `{`/`}` nesting depth to emit exactly one complete top-level object per
-/// message, ignoring braces that appear inside JSON strings and honoring `\` escapes.
-///
-/// The scan position and brace state persist across `decode` calls. `decode` is
-/// re-invoked on every arriving chunk, so restarting the scan at the beginning
-/// each time would re-examine the whole accumulated message — O(N·k) for a
-/// message of N bytes delivered in k reads. That is quadratic for the
-/// multi-megabyte `monitor` updates ovsdb-server sends for large tables
-/// (Southbound `Logical_Flow` in particular). Resuming where the previous call
-/// stopped keeps framing linear in the message size.
-struct OVSDBJSONFrameDecoder: ByteToMessageDecoder {
-    typealias InboundOut = String
-
-    /// Brace-nesting depth within the object currently being scanned.
-    private var depth = 0
-    private var inString = false
-    private var escaped = false
-    /// Offset from the reader index of the `{` opening the object currently
-    /// being scanned; nil while between objects.
-    private var objectStartOffset: Int?
-    /// How many bytes from the reader index have already been examined.
-    private var scannedOffset = 0
-
-    mutating func decode(context: ChannelHandlerContext, buffer: inout ByteBuffer) throws -> DecodingState {
-        let view = buffer.readableBytesView
-
-        // Clamped defensively: the scan cursor is only ever advanced over bytes
-        // that remain buffered, so it cannot exceed the readable range, but a
-        // stale cursor would trap rather than merely re-scan.
-        let resumeOffset = min(scannedOffset, view.count)
-
-        var offset = resumeOffset
-        var index = view.index(view.startIndex, offsetBy: resumeOffset)
-        while index < view.endIndex {
-            let byte = view[index]
-
-            if inString {
-                if escaped {
-                    escaped = false
-                } else if byte == UInt8(ascii: "\\") {
-                    escaped = true
-                } else if byte == UInt8(ascii: "\"") {
-                    inString = false
-                }
-            } else {
-                switch byte {
-                case UInt8(ascii: "\""):
-                    inString = true
-                case UInt8(ascii: "{"):
-                    if depth == 0 {
-                        objectStartOffset = offset
-                    }
-                    depth += 1
-                case UInt8(ascii: "}"):
-                    if depth > 0 {
-                        depth -= 1
-                        if depth == 0, let leading = objectStartOffset {
-                            // A complete top-level object spans leading...offset inclusive.
-                            let length = offset - leading + 1
-
-                            // Everything up to and including this object leaves the
-                            // buffer, so the next scan starts clean at the new reader
-                            // index regardless of which branch below is taken.
-                            resetScanState()
-
-                            // Discard any leading whitespace/delimiters before the object,
-                            // then read the object itself and fire it downstream.
-                            buffer.moveReaderIndex(forwardBy: leading)
-                            guard let objectString = buffer.readString(length: length) else {
-                                return .needMoreData
-                            }
-                            context.fireChannelRead(wrapInboundOut(objectString))
-
-                            // Keep any trailing bytes buffered for the next object.
-                            return .continue
-                        }
-                    }
-                default:
-                    break
-                }
-            }
-
-            index = view.index(after: index)
-            offset += 1
-        }
-
-        // No complete object yet — remember how far we got so the next chunk
-        // resumes here instead of re-scanning from the start.
-        scannedOffset = offset
-        return .needMoreData
-    }
-
-    private mutating func resetScanState() {
-        depth = 0
-        inString = false
-        escaped = false
-        objectStartOffset = nil
-        scannedOffset = 0
-    }
-}
-
-private struct StringToByteEncoder: MessageToByteEncoder {
-    typealias OutboundIn = String
-
-    func encode(data: String, out: inout ByteBuffer) throws {
-        out.writeString(data)
     }
 }

@@ -9,6 +9,11 @@ public enum OVNManagerError: Error, Sendable {
     case rpcError(JSONRPCError)
     case invalidSocket(String)
     case operationFailed(String)
+    /// A `notifications()` consumer fell more than `bufferSize` notifications
+    /// behind, so its stream was terminated instead of buffering without bound.
+    /// Whatever the consumer had built from those updates is now incomplete: it
+    /// has to subscribe again and re-issue its monitor to resynchronize.
+    case notificationsDropped(bufferSize: Int)
 }
 
 // Without an explicit `errorDescription`, bridging to `NSError` discards the
@@ -35,6 +40,8 @@ extension OVNManagerError: LocalizedError {
             return "Invalid OVSDB socket: \(path)"
         case .operationFailed(let message):
             return message
+        case .notificationsDropped(let bufferSize):
+            return "OVSDB notification consumer fell more than \(bufferSize) notifications behind; re-subscribe and re-issue the monitor"
         }
     }
 }

@@ -28,12 +28,12 @@ public actor JSONRPCClient {
     
     public func connect() async throws {
         logger.info("JSONRPCClient: Starting connection process...")
-        try await connection.connect().get()
+        try await connection.connect()
         logger.info("JSONRPCClient: Connection established successfully")
     }
-    
+
     public func disconnect() async throws {
-        try await connection.disconnect().get()
+        try await connection.disconnect()
     }
     
     nonisolated public var isConnected: Bool {
@@ -54,24 +54,20 @@ public actor JSONRPCClient {
     ) async throws -> T {
         let id = JSONRPCIdentifier.number(nextRequestId())
         let request = JSONRPCRequest(method: method, params: params, id: id)
-        
+
         logger.debug("Sending JSON-RPC request: \(method) with ID: \(id)")
-        
         logger.debug("Connection active before send: \(connection.isConnectionActive)")
-        
-        // Set up the response handler before sending to avoid race conditions
-        let responseFuture = connection.receive(
-            as: JSONRPCResponse<T>.self,
-            requestId: id
+
+        // The transport registers interest in `id` before writing, so a reply
+        // that arrives immediately cannot be missed.
+        let response: JSONRPCResponse<T> = try await connection.sendRequest(
+            request,
+            id: id,
+            responseType: JSONRPCResponse<T>.self
         )
-        
-        try await connection.send(request).get()
-        logger.debug("Message sent successfully, waiting for response...")
-        
-        let response: JSONRPCResponse<T> = try await responseFuture.get()
-        
+
         logger.debug("Received response for request ID: \(id)")
-        
+
         if let error = response.error {
             logger.error("JSON-RPC error response: \(error.message)")
             throw OVNManagerError.rpcError(error)
@@ -88,8 +84,8 @@ public actor JSONRPCClient {
         let request = JSONRPCRequest(method: method, params: params, id: nil)
         
         logger.debug("Sending JSON-RPC notification: \(method)")
-        
-        try await connection.send(request).get()
+
+        try await connection.send(request)
     }
     
     // MARK: - OVSDB Specific Methods
@@ -188,20 +184,29 @@ public actor JSONRPCClient {
     /// underlying stream buffers notifications between iterations. The stream
     /// has no idle timeout — it lives until the connection closes or the
     /// consumer cancels.
+    ///
+    /// It throws `OVNManagerError.notificationsDropped` if the consumer falls
+    /// far enough behind that the transport had to stop buffering for it: the
+    /// updates seen so far are then an incomplete picture, and the monitor has
+    /// to be re-established.
     nonisolated public func monitorUpdates() -> AsyncThrowingStream<(String, JSONValue), Error> {
         let notifications = connection.notifications()
         return AsyncThrowingStream { continuation in
             let task = Task {
-                for await notification in notifications {
-                    guard notification.method == "update",
-                          case .array(let paramsArray)? = notification.params,
-                          paramsArray.count >= 2,
-                          case .string(let monitorId) = paramsArray[0] else {
-                        continue
+                do {
+                    for try await notification in notifications {
+                        guard notification.method == "update",
+                              case .array(let paramsArray)? = notification.params,
+                              paramsArray.count >= 2,
+                              case .string(let monitorId) = paramsArray[0] else {
+                            continue
+                        }
+                        continuation.yield((monitorId, paramsArray[1]))
                     }
-                    continuation.yield((monitorId, paramsArray[1]))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
             continuation.onTermination = { _ in
                 task.cancel()

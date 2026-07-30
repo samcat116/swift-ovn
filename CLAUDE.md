@@ -48,7 +48,11 @@ The codebase follows a clean architecture with clear separation of concerns:
 
 1. **Low-level networking** (`/Sources/SwiftOVN/Core/`):
    - `JSONRPCClient.swift`: Handles JSON-RPC protocol communication
-   - `OVSDBSocketConnection.swift`: SwiftNIO-based transport over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias)
+   - `OVSDBSocketConnection.swift`: Public transport facade plus channel bootstrap over Unix socket, TCP, or TLS (`OVSDBEndpoint` selects the transport; `UnixSocketConnection` remains as a typealias)
+   - `OVSDBConnectionCore.swift`: The `NIOAsyncChannel`-based state machine — session, in-flight requests, inbound routing. All mutable transport state lives here
+   - `OVSDBJSONFrameDecoder.swift`: Brace-depth framer, emits one `ByteBuffer` per top-level JSON object
+   - `JSONRPCFrameEnvelope.swift`: Scans a frame's `method`/`id` for routing without parsing the payload
+   - `JSONRPCNotificationHub.swift`: Bounded fan-out of server notifications to subscribers
    - `OVSDBConnection.swift`: OVSDB protocol with real-time monitoring via AsyncSequence
 
 2. **High-level managers** (`/Sources/SwiftOVN/Managers/`):
@@ -100,9 +104,12 @@ All database operations follow the OVSDB protocol (RFC 7047) with:
 - Currently imports `@testable import OVNManager` (note: may need updating to `@testable import SwiftOVN`)
 
 ### Platform Support
-- Minimum Swift version: 5.9
-- Supported platforms: macOS 13+, iOS 16+, watchOS 9+, tvOS 16+, visionOS 1+
-- Primary deployment target: Linux servers running OVN/OVS
+- Swift tools version: 6.2 (Swift 6 language mode)
+- Deployment target: Linux servers running OVN/OVS — the only supported one
+- The `platforms:` floor is macOS-only and deliberately set to the newest release
+  the toolchain knows about, since nothing ships against it. That keeps modern
+  stdlib APIs (`Synchronization`'s `Mutex`/`Atomic`, `Span`, `InlineArray`) usable
+  with no `@available` guards; see the comment in `Package.swift`.
 
 ## License Note
 The README mentions MIT license, but LICENSE.txt contains Apache 2.0. This discrepancy should be resolved.
