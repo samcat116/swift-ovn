@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 @testable import SwiftOVN
 
 /// Wire-format helpers matching what ovsdb-server actually sends (RFC 7047):
@@ -41,14 +42,16 @@ private let uuidA = "0d53b52f-7f4c-4c8f-9b1e-1a2b3c4d5e6f"
 private let uuidB = "550e8400-e29b-41d4-a716-446655440000"
 private let uuidC = "9a3e11a4-9f7a-4d0a-8f5e-0123456789ab"
 
-final class OVSDBRowDecoderTests: XCTestCase {
+@Suite("OVSDB row decoding")
+struct OVSDBRowDecoderTests {
 
     // MARK: OVN Northbound
 
     /// The headline regression: a Logical_Switch_Port fresh from ovn-nbctl has
     /// every optional scalar column transmitted as the empty set ["set",[]],
     /// and its single address as a bare string atom.
-    func testLogicalSwitchPortWithUnsetOptionalScalars() throws {
+    @Test("A Logical_Switch_Port with unset optional scalars")
+    func logicalSwitchPortWithUnsetOptionalScalars() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("lsp-1"),
@@ -67,21 +70,22 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let port = try OVSDBRowDecoder.decode(OVNLogicalSwitchPort.self, from: row)
 
-        XCTAssertEqual(port.uuid, uuidA)
-        XCTAssertEqual(port.name, "lsp-1")
-        XCTAssertEqual(port.addresses, ["50:6b:8d:d1:00:01 10.0.0.11"])
-        XCTAssertNil(port.port_security)
-        XCTAssertNil(port.tag)
-        XCTAssertNil(port.tag_request)
-        XCTAssertNil(port.up)
-        XCTAssertNil(port.enabled)
-        XCTAssertNil(port.dhcpv4_options)
-        XCTAssertNil(port.dhcpv6_options)
-        XCTAssertEqual(port.options, [:])
-        XCTAssertEqual(port.external_ids, ["neutron:port_id": uuidB])
+        #expect(port.uuid == uuidA)
+        #expect(port.name == "lsp-1")
+        #expect(port.addresses == ["50:6b:8d:d1:00:01 10.0.0.11"])
+        #expect(port.port_security == nil)
+        #expect(port.tag == nil)
+        #expect(port.tag_request == nil)
+        #expect(port.up == nil)
+        #expect(port.enabled == nil)
+        #expect(port.dhcpv4_options == nil)
+        #expect(port.dhcpv6_options == nil)
+        #expect(port.options == [:])
+        #expect(port.external_ids == ["neutron:port_id": uuidB])
     }
 
-    func testLogicalSwitchPortWithPopulatedOptionalScalars() throws {
+    @Test("A Logical_Switch_Port with populated optional scalars")
+    func logicalSwitchPortWithPopulatedOptionalScalars() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("lsp-2"),
@@ -94,42 +98,38 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let port = try OVSDBRowDecoder.decode(OVNLogicalSwitchPort.self, from: row)
 
-        XCTAssertEqual(port.tag, 100)
-        XCTAssertEqual(port.up, true)
-        XCTAssertEqual(port.enabled, false)
-        XCTAssertEqual(port.dhcpv4_options, uuidC)
-        XCTAssertEqual(port.addresses, ["dynamic", "unknown"])
+        #expect(port.tag == 100)
+        #expect(port.up == true)
+        #expect(port.enabled == false)
+        #expect(port.dhcpv4_options == uuidC)
+        #expect(port.addresses == ["dynamic", "unknown"])
     }
 
-    /// A set column with exactly one element arrives as the bare atom itself.
-    func testLogicalSwitchWithSinglePortAtom() throws {
+    /// Every wire shape a reference-set column can arrive in: the empty set
+    /// (which decodes to nil, not `[]`), a single element sent as the bare atom
+    /// rather than a one-element set, and the tagged multi-element form.
+    @Test("A reference set column decodes from every wire shape", arguments: [
+        (emptySet, nil),
+        (wireUUID(uuidB), [uuidB]),
+        (wireSet([wireUUID(uuidB), wireUUID(uuidC)]), [uuidB, uuidC]),
+    ] as [(JSONValue, [String]?)])
+    func referenceSetColumnDecodes(wire: JSONValue, expected: [String]?) throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("ls-1"),
-            "ports": wireUUID(uuidB),
+            "ports": wire,
             "acls": emptySet,
             "external_ids": wireMap([]),
         ]
 
         let logicalSwitch = try OVSDBRowDecoder.decode(OVNLogicalSwitch.self, from: row)
 
-        XCTAssertEqual(logicalSwitch.ports, [uuidB])
-        XCTAssertNil(logicalSwitch.acls)
+        #expect(logicalSwitch.ports == expected)
+        #expect(logicalSwitch.acls == nil)
     }
 
-    func testLogicalSwitchWithMultiplePorts() throws {
-        let row: OVSDBRow = [
-            "_uuid": wireUUID(uuidA),
-            "name": .string("ls-2"),
-            "ports": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
-        ]
-
-        let logicalSwitch = try OVSDBRowDecoder.decode(OVNLogicalSwitch.self, from: row)
-
-        XCTAssertEqual(logicalSwitch.ports, [uuidB, uuidC])
-    }
-
-    func testChassisWithNonOptionalStringSet() throws {
+    @Test("A Chassis with a non-optional string set")
+    func chassisWithNonOptionalStringSet() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("chassis-1"),
@@ -141,12 +141,13 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let chassis = try OVSDBRowDecoder.decode(OVNChassis.self, from: row)
 
-        XCTAssertEqual(chassis.encaps, [uuidB, uuidC])
-        XCTAssertEqual(chassis.nb_cfg, 7)
-        XCTAssertNil(chassis.transport_zones)
+        #expect(chassis.encaps == [uuidB, uuidC])
+        #expect(chassis.nb_cfg == 7)
+        #expect(chassis.transport_zones == nil)
     }
 
-    func testAdvertisedRouteRow() throws {
+    @Test("An Advertised_Route row")
+    func advertisedRouteRow() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "datapath": wireUUID(uuidB),
@@ -158,29 +159,34 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let route = try OVSDBRowDecoder.decode(OVNAdvertisedRoute.self, from: row)
 
-        XCTAssertEqual(route.uuid, uuidA)
-        XCTAssertEqual(route.datapath, uuidB)
-        XCTAssertEqual(route.logical_port, uuidC)
-        XCTAssertEqual(route.ip_prefix, "192.0.2.10/32")
-        XCTAssertNil(route.tracked_port)
-        XCTAssertEqual(route.external_ids, ["owner": "northd"])
+        #expect(route.uuid == uuidA)
+        #expect(route.datapath == uuidB)
+        #expect(route.logical_port == uuidC)
+        #expect(route.ip_prefix == "192.0.2.10/32")
+        #expect(route.tracked_port == nil)
+        #expect(route.external_ids == ["owner": "northd"])
     }
 
-    func testAdvertisedRouteTrackedPortAtom() throws {
+    /// `tracked_port` is an optional scalar reference: unset it is the empty
+    /// set, set it is the bare UUID atom.
+    @Test("An Advertised_Route's optional scalar reference decodes from both wire shapes",
+          arguments: [(emptySet, nil), (wireUUID(uuidC), uuidC)] as [(JSONValue, String?)])
+    func advertisedRouteTrackedPort(wire: JSONValue, expected: String?) throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "datapath": wireUUID(uuidB),
             "logical_port": wireUUID(uuidC),
             "ip_prefix": .string("10.0.0.0/24"),
-            "tracked_port": wireUUID(uuidC),
+            "tracked_port": wire,
         ]
 
         let route = try OVSDBRowDecoder.decode(OVNAdvertisedRoute.self, from: row)
 
-        XCTAssertEqual(route.tracked_port, uuidC)
+        #expect(route.tracked_port == expected)
     }
 
-    func testLearnedRouteRow() throws {
+    @Test("A Learned_Route row")
+    func learnedRouteRow() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "datapath": wireUUID(uuidB),
@@ -192,17 +198,18 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let route = try OVSDBRowDecoder.decode(OVNLearnedRoute.self, from: row)
 
-        XCTAssertEqual(route.uuid, uuidA)
-        XCTAssertEqual(route.datapath, uuidB)
-        XCTAssertEqual(route.logical_port, uuidC)
-        XCTAssertEqual(route.ip_prefix, "203.0.113.0/24")
-        XCTAssertEqual(route.nexthop, "192.0.2.254")
-        XCTAssertEqual(route.external_ids, [:])
+        #expect(route.uuid == uuidA)
+        #expect(route.datapath == uuidB)
+        #expect(route.logical_port == uuidC)
+        #expect(route.ip_prefix == "203.0.113.0/24")
+        #expect(route.nexthop == "192.0.2.254")
+        #expect(route.external_ids == [:])
     }
 
     // MARK: Open_vSwitch
 
-    func testInterfaceWithUnsetAndBareScalars() throws {
+    @Test("An Interface with unset and bare scalars")
+    func interfaceWithUnsetAndBareScalars() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("eth0"),
@@ -225,17 +232,18 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let interface = try OVSDBRowDecoder.decode(OVSInterface.self, from: row)
 
-        XCTAssertEqual(interface.mtu, 1500)
-        XCTAssertEqual(interface.ifindex, 2)
-        XCTAssertNil(interface.mac)
-        XCTAssertEqual(interface.mac_in_use, "aa:bb:cc:dd:ee:ff")
-        XCTAssertEqual(interface.link_state, "up")
-        XCTAssertNil(interface.link_speed)
-        XCTAssertEqual(interface.statistics, ["rx_packets": 1024, "tx_packets": 2048])
-        XCTAssertEqual(interface.status, ["driver_name": "veth"])
+        #expect(interface.mtu == 1500)
+        #expect(interface.ifindex == 2)
+        #expect(interface.mac == nil)
+        #expect(interface.mac_in_use == "aa:bb:cc:dd:ee:ff")
+        #expect(interface.link_state == "up")
+        #expect(interface.link_speed == nil)
+        #expect(interface.statistics == ["rx_packets": 1024, "tx_packets": 2048])
+        #expect(interface.status == ["driver_name": "veth"])
     }
 
-    func testPortWithSingleInterfaceAndUnsetOptionals() throws {
+    @Test("A Port with a single interface and unset optionals")
+    func portWithSingleInterfaceAndUnsetOptionals() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("port-1"),
@@ -250,14 +258,15 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let port = try OVSDBRowDecoder.decode(OVSPort.self, from: row)
 
-        XCTAssertEqual(port.interfaces, [uuidB])
-        XCTAssertNil(port.tag)
-        XCTAssertEqual(port.trunks, [10, 20])
-        XCTAssertNil(port.qos)
-        XCTAssertNil(port.mac)
+        #expect(port.interfaces == [uuidB])
+        #expect(port.tag == nil)
+        #expect(port.trunks == [10, 20])
+        #expect(port.qos == nil)
+        #expect(port.mac == nil)
     }
 
-    func testBridgeRow() throws {
+    @Test("A Bridge row")
+    func bridgeRow() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("br-int"),
@@ -277,22 +286,23 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let bridge = try OVSDBRowDecoder.decode(OVSBridge.self, from: row)
 
-        XCTAssertEqual(bridge.uuid, uuidA)
-        XCTAssertEqual(bridge.ports, [uuidB, uuidC])
-        XCTAssertNil(bridge.mirrors)
-        XCTAssertEqual(bridge.netflow, uuidC)
-        XCTAssertNil(bridge.sflow)
-        XCTAssertEqual(bridge.controller, [uuidB])
-        XCTAssertEqual(bridge.protocols, ["OpenFlow13", "OpenFlow15"])
-        XCTAssertEqual(bridge.fail_mode, "secure")
-        XCTAssertEqual(bridge.flood_vlans, [42])
-        XCTAssertEqual(bridge.flow_tables, ["0": uuidC])
-        XCTAssertEqual(bridge.stp_enable, false)
-        XCTAssertEqual(bridge.external_ids, ["system-id": uuidB])
+        #expect(bridge.uuid == uuidA)
+        #expect(bridge.ports == [uuidB, uuidC])
+        #expect(bridge.mirrors == nil)
+        #expect(bridge.netflow == uuidC)
+        #expect(bridge.sflow == nil)
+        #expect(bridge.controller == [uuidB])
+        #expect(bridge.protocols == ["OpenFlow13", "OpenFlow15"])
+        #expect(bridge.fail_mode == "secure")
+        #expect(bridge.flood_vlans == [42])
+        #expect(bridge.flow_tables == ["0": uuidC])
+        #expect(bridge.stp_enable == false)
+        #expect(bridge.external_ids == ["system-id": uuidB])
     }
 
     /// QoS.queues is a map<integer,uuid>: integer keys and UUID-atom values.
-    func testQoSWithIntegerKeyedQueues() throws {
+    @Test("QoS with integer-keyed queues")
+    func qoSWithIntegerKeyedQueues() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "type": .string("linux-htb"),
@@ -305,14 +315,15 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let qos = try OVSDBRowDecoder.decode(OVSQoS.self, from: row)
 
-        XCTAssertEqual(qos.qosType, "linux-htb")
-        XCTAssertEqual(qos.queues, [0: uuidB, 1: uuidC])
-        XCTAssertEqual(qos.other_config, ["max-rate": "1000000"])
+        #expect(qos.qosType == "linux-htb")
+        #expect(qos.queues == [0: uuidB, 1: uuidC])
+        #expect(qos.other_config == ["max-rate": "1000000"])
     }
 
     /// One bad row must not sink the whole getter: all rows in a realistic
     /// select response decode.
-    func testMixedRowsAllDecode() throws {
+    @Test("Every row of a mixed select response decodes")
+    func mixedRowsAllDecode() throws {
         let rows: [OVSDBRow] = [
             ["_uuid": wireUUID(uuidA), "name": .string("ls-a"), "ports": emptySet],
             ["_uuid": wireUUID(uuidB), "name": .string("ls-b"), "ports": wireUUID(uuidC)],
@@ -321,17 +332,19 @@ final class OVSDBRowDecoderTests: XCTestCase {
 
         let switches = try rows.map { try OVSDBRowDecoder.decode(OVNLogicalSwitch.self, from: $0) }
 
-        XCTAssertNil(switches[0].ports)
-        XCTAssertEqual(switches[1].ports, [uuidC])
-        XCTAssertEqual(switches[2].ports?.count, 2)
+        #expect(switches[0].ports == nil)
+        #expect(switches[1].ports == [uuidC])
+        #expect(switches[2].ports?.count == 2)
     }
 }
 
-final class OVSDBRowEncoderTests: XCTestCase {
+@Suite("OVSDB row encoding")
+struct OVSDBRowEncoderTests {
 
     /// A UUID-shaped string in a string-typed column (a switch literally named
     /// like a UUID, or a UUID stored in external_ids) must stay a plain string.
-    func testUUIDShapedStringsInStringColumnsStayStrings() throws {
+    @Test("UUID-shaped strings in string columns stay strings")
+    func uuidShapedStringsInStringColumnsStayStrings() throws {
         let logicalSwitch = OVNLogicalSwitch(
             name: uuidB,
             external_ids: ["vm-id": uuidC]
@@ -339,58 +352,64 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
 
-        XCTAssertEqual(row["name"], .string(uuidB))
-        XCTAssertEqual(row["external_ids"], wireMap([(.string("vm-id"), .string(uuidC))]))
+        #expect(row["name"] == .string(uuidB))
+        #expect(row["external_ids"] == wireMap([(.string("vm-id"), .string(uuidC))]))
     }
 
-    func testReferenceSetColumnEncodesUUIDAtoms() throws {
+    @Test("A reference set column encodes UUID atoms")
+    func referenceSetColumnEncodesUUIDAtoms() throws {
         let logicalSwitch = OVNLogicalSwitch(name: "ls-1", ports: [uuidB, uuidC])
 
         let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
 
-        XCTAssertEqual(row["ports"], wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["ports"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testScalarReferenceColumnEncodesUUIDAtom() throws {
+    @Test("A scalar reference column encodes a UUID atom")
+    func scalarReferenceColumnEncodesUUIDAtom() throws {
         let port = OVSPort(name: "port-1", interfaces: [uuidB], tag: 100, qos: uuidC, bond_fake_iface: true)
 
         let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovs)
 
-        XCTAssertEqual(row["interfaces"], wireSet([wireUUID(uuidB)]))
-        XCTAssertEqual(row["qos"], wireUUID(uuidC))
+        #expect(row["interfaces"] == wireSet([wireUUID(uuidB)]))
+        #expect(row["qos"] == wireUUID(uuidC))
         // Integers must stay numbers and booleans must stay booleans.
-        XCTAssertEqual(row["tag"], .number(100))
-        XCTAssertEqual(row["bond_fake_iface"], .boolean(true))
+        #expect(row["tag"] == .number(100))
+        #expect(row["bond_fake_iface"] == .boolean(true))
     }
 
     /// Non-reference string arrays (e.g. logical router port networks, LSP
     /// addresses) must not have their elements rewritten into UUID atoms.
-    func testPlainStringSetElementsStayStrings() throws {
+    @Test("Plain string set elements stay strings")
+    func plainStringSetElementsStayStrings() throws {
         let port = OVNLogicalSwitchPort(name: "lsp-1", addresses: ["router", uuidC])
 
         let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
 
-        XCTAssertEqual(row["addresses"], wireSet([.string("router"), .string(uuidC)]))
+        #expect(row["addresses"] == wireSet([.string("router"), .string(uuidC)]))
     }
 
-    func testIntegerKeyedUUIDValuedMapEncoding() throws {
+    @Test("An integer-keyed, UUID-valued map encodes")
+    func integerKeyedUUIDValuedMapEncoding() throws {
         let qos = OVSQoS(qosType: "linux-htb", queues: [0: uuidB])
 
         let row = try OVSDBRowEncoder.makeRow(from: qos, hints: .ovs)
 
-        XCTAssertEqual(row["queues"], wireMap([(.number(0), wireUUID(uuidB))]))
+        #expect(row["queues"] == wireMap([(.number(0), wireUUID(uuidB))]))
     }
 
-    func testBridgeFlowTablesEncodeIntegerKeys() throws {
+    @Test("A Bridge's flow_tables encodes integer keys")
+    func bridgeFlowTablesEncodeIntegerKeys() throws {
         let bridge = OVSBridge(name: "br-0", flow_tables: ["0": uuidB])
 
         let row = try OVSDBRowEncoder.makeRow(from: bridge, hints: .ovs)
 
-        XCTAssertEqual(row["flow_tables"], wireMap([(.number(0), wireUUID(uuidB))]))
+        #expect(row["flow_tables"] == wireMap([(.number(0), wireUUID(uuidB))]))
     }
 
-    func testStaticRouteReferenceColumnsEncodeUUIDAtoms() throws {
+    @Test("A static route's reference columns encode UUID atoms")
+    func staticRouteReferenceColumnsEncodeUUIDAtoms() throws {
         let route = OVNLogicalRouterStaticRoute(
             ip_prefix: "10.0.0.0/24",
             nexthop: "192.168.1.1",
@@ -403,15 +422,16 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         // bfd is the only reference column; output_port is a plain port-name
         // string and nexthop/ip_prefix stay plain strings.
-        XCTAssertEqual(row["bfd"], wireUUID(uuidC))
-        XCTAssertEqual(row["output_port"], .string("lrp0"))
-        XCTAssertEqual(row["nexthop"], .string("192.168.1.1"))
-        XCTAssertEqual(row["ip_prefix"], .string("10.0.0.0/24"))
-        XCTAssertEqual(row["policy"], .string("dst-ip"))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["bfd"] == wireUUID(uuidC))
+        #expect(row["output_port"] == .string("lrp0"))
+        #expect(row["nexthop"] == .string("192.168.1.1"))
+        #expect(row["ip_prefix"] == .string("10.0.0.0/24"))
+        #expect(row["policy"] == .string("dst-ip"))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testStaticRouteRoundTrip() throws {
+    @Test("A static route round trips")
+    func staticRouteRoundTrip() throws {
         let route = OVNLogicalRouterStaticRoute(
             ip_prefix: "0.0.0.0/0",
             nexthop: "10.0.0.1",
@@ -424,19 +444,20 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let row = try OVSDBRowEncoder.makeRow(from: route, hints: .ovn)
         // selection_fields is a plain string set, not rewritten into UUID atoms.
-        XCTAssertEqual(row["selection_fields"], wireSet([.string("ip_src"), .string("ip_dst")]))
+        #expect(row["selection_fields"] == wireSet([.string("ip_src"), .string("ip_dst")]))
         let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterStaticRoute.self, from: row)
 
-        XCTAssertEqual(decoded.ip_prefix, route.ip_prefix)
-        XCTAssertEqual(decoded.nexthop, route.nexthop)
-        XCTAssertEqual(decoded.policy, route.policy)
-        XCTAssertEqual(decoded.route_table, route.route_table)
-        XCTAssertEqual(decoded.selection_fields, route.selection_fields)
-        XCTAssertEqual(decoded.options, route.options)
-        XCTAssertEqual(decoded.external_ids, route.external_ids)
+        #expect(decoded.ip_prefix == route.ip_prefix)
+        #expect(decoded.nexthop == route.nexthop)
+        #expect(decoded.policy == route.policy)
+        #expect(decoded.route_table == route.route_table)
+        #expect(decoded.selection_fields == route.selection_fields)
+        #expect(decoded.options == route.options)
+        #expect(decoded.external_ids == route.external_ids)
     }
 
-    func testLogicalRouterPortRoundTripWithIPv6RAConfigs() throws {
+    @Test("A logical router port round trips with IPv6 RA configs")
+    func logicalRouterPortRoundTripWithIPv6RAConfigs() throws {
         let port = OVNLogicalRouterPort(
             name: "lrp-net0",
             mac: "0a:58:0a:00:00:01",
@@ -447,45 +468,45 @@ final class OVSDBRowEncoderTests: XCTestCase {
         )
 
         let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
-        XCTAssertEqual(
-            normalizingMapOrder(row["ipv6_ra_configs"]),
-            normalizingMapOrder(wireStringMap(["address_mode": "dhcpv6_stateful", "send_periodic": "true"]))
+        #expect(
+            normalizingMapOrder(row["ipv6_ra_configs"])
+                == normalizingMapOrder(
+                    wireStringMap(["address_mode": "dhcpv6_stateful", "send_periodic": "true"]))
         )
         let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
 
-        XCTAssertEqual(decoded.name, port.name)
-        XCTAssertEqual(decoded.mac, port.mac)
-        XCTAssertEqual(decoded.networks, port.networks)
-        XCTAssertEqual(decoded.ipv6_ra_configs, port.ipv6_ra_configs)
-        XCTAssertEqual(decoded.options, port.options)
-        XCTAssertEqual(decoded.external_ids, port.external_ids)
+        #expect(decoded.name == port.name)
+        #expect(decoded.mac == port.mac)
+        #expect(decoded.networks == port.networks)
+        #expect(decoded.ipv6_ra_configs == port.ipv6_ra_configs)
+        #expect(decoded.options == port.options)
+        #expect(decoded.external_ids == port.external_ids)
     }
 
     /// A router port fresh from ovn-nbctl carries ipv6_ra_configs as an empty
     /// map; rows from peers that predate the column omit it entirely. Both
     /// must decode.
-    func testLogicalRouterPortWithoutIPv6RAConfigs() throws {
-        let bareRow: OVSDBRow = [
+    @Test("A logical router port decodes without IPv6 RA configs",
+          arguments: [(nil, nil), (wireMap([]), [:])] as [(JSONValue?, [String: String]?)])
+    func logicalRouterPortWithoutIPv6RAConfigs(
+        wire: JSONValue?,
+        expected: [String: String]?
+    ) throws {
+        var row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("lrp-bare"),
             "mac": .string("0a:58:0a:00:00:01"),
             "networks": .string("10.0.0.1/24"),
         ]
-        let bare = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: bareRow)
-        XCTAssertNil(bare.ipv6_ra_configs)
+        row["ipv6_ra_configs"] = wire
 
-        let emptyMapRow: OVSDBRow = [
-            "_uuid": wireUUID(uuidA),
-            "name": .string("lrp-empty"),
-            "mac": .string("0a:58:0a:00:00:01"),
-            "networks": .string("10.0.0.1/24"),
-            "ipv6_ra_configs": wireMap([]),
-        ]
-        let empty = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: emptyMapRow)
-        XCTAssertEqual(empty.ipv6_ra_configs, [:])
+        let port = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
+
+        #expect(port.ipv6_ra_configs == expected)
     }
 
-    func testPortGroupReferenceColumnsEncodeUUIDAtoms() throws {
+    @Test("A port group's reference columns encode UUID atoms")
+    func portGroupReferenceColumnsEncodeUUIDAtoms() throws {
         let portGroup = OVNPortGroup(
             name: "pg-web",
             ports: [uuidB, uuidC],
@@ -497,13 +518,14 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         // ports and acls are reference sets rewritten into UUID atoms; the
         // encoder always emits the tagged ["set", ...] form, even for one item.
-        XCTAssertEqual(row["ports"], wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
-        XCTAssertEqual(row["acls"], wireSet([wireUUID(uuidA)]))
-        XCTAssertEqual(row["name"], .string("pg-web"))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["ports"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["acls"] == wireSet([wireUUID(uuidA)]))
+        #expect(row["name"] == .string("pg-web"))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testPortGroupRoundTrip() throws {
+    @Test("A port group round trips")
+    func portGroupRoundTrip() throws {
         let portGroup = OVNPortGroup(
             name: "pg-db",
             ports: [uuidB, uuidC],
@@ -514,15 +536,16 @@ final class OVSDBRowEncoderTests: XCTestCase {
         let row = try OVSDBRowEncoder.makeRow(from: portGroup, hints: .ovn)
         let decoded = try OVSDBRowDecoder.decode(OVNPortGroup.self, from: row)
 
-        XCTAssertEqual(decoded.name, portGroup.name)
-        XCTAssertEqual(decoded.ports, portGroup.ports)
-        XCTAssertEqual(decoded.acls, portGroup.acls)
-        XCTAssertEqual(decoded.external_ids, portGroup.external_ids)
+        #expect(decoded.name == portGroup.name)
+        #expect(decoded.ports == portGroup.ports)
+        #expect(decoded.acls == portGroup.acls)
+        #expect(decoded.external_ids == portGroup.external_ids)
     }
 
     /// A fresh, empty port group has its reference sets sent as the empty set,
     /// which decodes to nil rather than an empty array.
-    func testPortGroupWithEmptyMembership() throws {
+    @Test("A port group with empty membership")
+    func portGroupWithEmptyMembership() throws {
         let row: OVSDBRow = [
             "_uuid": wireUUID(uuidA),
             "name": .string("pg-empty"),
@@ -532,12 +555,13 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let portGroup = try OVSDBRowDecoder.decode(OVNPortGroup.self, from: row)
 
-        XCTAssertEqual(portGroup.name, "pg-empty")
-        XCTAssertNil(portGroup.ports)
-        XCTAssertNil(portGroup.acls)
+        #expect(portGroup.name == "pg-empty")
+        #expect(portGroup.ports == nil)
+        #expect(portGroup.acls == nil)
     }
 
-    func testGatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
+    @Test("A Gateway_Chassis encodes chassis_name as a string and priority as a number")
+    func gatewayChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
         let chassis = OVNGatewayChassis(
             name: "lrp0-hv1",
             chassis_name: "hv1",
@@ -549,13 +573,14 @@ final class OVSDBRowEncoderTests: XCTestCase {
         let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
 
         // chassis_name is a plain string (a Chassis *name*), not a UUID atom.
-        XCTAssertEqual(row["chassis_name"], .string("hv1"))
-        XCTAssertEqual(row["name"], .string("lrp0-hv1"))
-        XCTAssertEqual(row["priority"], .number(100))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["chassis_name"] == .string("hv1"))
+        #expect(row["name"] == .string("lrp0-hv1"))
+        #expect(row["priority"] == .number(100))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testGatewayChassisRoundTrip() throws {
+    @Test("A Gateway_Chassis round trips")
+    func gatewayChassisRoundTrip() throws {
         let chassis = OVNGatewayChassis(
             name: "lrp0-hv2",
             chassis_name: "hv2",
@@ -566,13 +591,14 @@ final class OVSDBRowEncoderTests: XCTestCase {
         let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
         let decoded = try OVSDBRowDecoder.decode(OVNGatewayChassis.self, from: row)
 
-        XCTAssertEqual(decoded.name, chassis.name)
-        XCTAssertEqual(decoded.chassis_name, chassis.chassis_name)
-        XCTAssertEqual(decoded.priority, chassis.priority)
-        XCTAssertEqual(decoded.external_ids, chassis.external_ids)
+        #expect(decoded.name == chassis.name)
+        #expect(decoded.chassis_name == chassis.chassis_name)
+        #expect(decoded.priority == chassis.priority)
+        #expect(decoded.external_ids == chassis.external_ids)
     }
 
-    func testHAChassisGroupEncodesHAChassisAsUUIDSet() throws {
+    @Test("An HA_Chassis_Group encodes ha_chassis as a UUID set")
+    func haChassisGroupEncodesHAChassisAsUUIDSet() throws {
         let group = OVNHAChassisGroup(
             name: "grp0",
             ha_chassis: [uuidA, uuidB],
@@ -581,12 +607,13 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let row = try OVSDBRowEncoder.makeRow(from: group, hints: .ovn)
 
-        XCTAssertEqual(row["ha_chassis"], wireSet([wireUUID(uuidA), wireUUID(uuidB)]))
-        XCTAssertEqual(row["name"], .string("grp0"))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["ha_chassis"] == wireSet([wireUUID(uuidA), wireUUID(uuidB)]))
+        #expect(row["name"] == .string("grp0"))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testHAChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
+    @Test("An HA_Chassis encodes chassis_name as a string and priority as a number")
+    func haChassisEncodesChassisNameAsStringAndPriorityAsNumber() throws {
         let chassis = OVNHAChassis(
             chassis_name: "hv3",
             priority: 20,
@@ -595,22 +622,24 @@ final class OVSDBRowEncoderTests: XCTestCase {
 
         let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
 
-        XCTAssertEqual(row["chassis_name"], .string("hv3"))
-        XCTAssertEqual(row["priority"], .number(20))
-        XCTAssertNil(row["_uuid"])
+        #expect(row["chassis_name"] == .string("hv3"))
+        #expect(row["priority"] == .number(20))
+        #expect(row["_uuid"] == nil)
     }
 
-    func testHAChassisRoundTrip() throws {
+    @Test("An HA_Chassis round trips")
+    func haChassisRoundTrip() throws {
         let chassis = OVNHAChassis(chassis_name: "hv4", priority: 10)
 
         let row = try OVSDBRowEncoder.makeRow(from: chassis, hints: .ovn)
         let decoded = try OVSDBRowDecoder.decode(OVNHAChassis.self, from: row)
 
-        XCTAssertEqual(decoded.chassis_name, chassis.chassis_name)
-        XCTAssertEqual(decoded.priority, chassis.priority)
+        #expect(decoded.chassis_name == chassis.chassis_name)
+        #expect(decoded.priority == chassis.priority)
     }
 
-    func testDHCPOptionsRoundTrip() throws {
+    @Test("DHCP_Options round trips")
+    func dhcpOptionsRoundTrip() throws {
         let dhcp = OVNDHCPOptions(
             cidr: "10.0.0.0/24",
             options: ["lease_time": "3600", "server_id": "10.0.0.1"],
@@ -620,31 +649,33 @@ final class OVSDBRowEncoderTests: XCTestCase {
         let row = try OVSDBRowEncoder.makeRow(from: dhcp, hints: .ovn)
         let decoded = try OVSDBRowDecoder.decode(OVNDHCPOptions.self, from: row)
 
-        XCTAssertEqual(decoded.cidr, dhcp.cidr)
-        XCTAssertEqual(decoded.options, dhcp.options)
-        XCTAssertEqual(decoded.external_ids, dhcp.external_ids)
+        #expect(decoded.cidr == dhcp.cidr)
+        #expect(decoded.options == dhcp.options)
+        #expect(decoded.external_ids == dhcp.external_ids)
     }
 
-    func testQoSRoundTrip() throws {
+    @Test("QoS round trips")
+    func qoSRoundTrip() throws {
         let qos = OVSQoS(qosType: "linux-htb", queues: [0: uuidB, 1: uuidC])
 
         let row = try OVSDBRowEncoder.makeRow(from: qos, hints: .ovs)
         let decoded = try OVSDBRowDecoder.decode(OVSQoS.self, from: row)
 
-        XCTAssertEqual(decoded.qosType, qos.qosType)
-        XCTAssertEqual(decoded.queues, qos.queues)
+        #expect(decoded.qosType == qos.qosType)
+        #expect(decoded.queues == qos.queues)
     }
 }
 
-final class JSONValueWireEncodingTests: XCTestCase {
+@Suite("JSONValue wire encoding")
+struct JSONValueWireEncodingTests {
 
     /// Integral numbers must serialize as JSON integers: ovsdb-server rejects
     /// "1.0" for integer-typed columns and map keys.
-    func testIntegralNumbersSerializeWithoutFraction() throws {
-        let encoded = try JSONEncoder().encode(JSONValue.number(5))
-        XCTAssertEqual(String(data: encoded, encoding: .utf8), "5")
+    @Test("Numbers serialize with a fractional part only when they have one",
+          arguments: [(JSONValue.number(5), "5"), (JSONValue.number(2.5), "2.5")])
+    func numbersSerializeWithoutSpuriousFraction(value: JSONValue, expected: String) throws {
+        let encoded = try JSONEncoder().encode(value)
 
-        let fractional = try JSONEncoder().encode(JSONValue.number(2.5))
-        XCTAssertEqual(String(data: fractional, encoding: .utf8), "2.5")
+        #expect(String(decoding: encoded, as: UTF8.self) == expected)
     }
 }

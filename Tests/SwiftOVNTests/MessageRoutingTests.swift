@@ -1,4 +1,5 @@
-import XCTest
+import Foundation
+import Testing
 import NIOCore
 import NIOEmbedded
 import NIOPosix
@@ -15,19 +16,24 @@ private struct DeadlineExceeded: Error {}
 /// `OVSDBConnectionCore.consumeInbound` is driven with NIO's testing inbound
 /// stream and outbound writer, so these exercise the same code path a socket
 /// does without needing one.
-final class MessageRoutingTests: XCTestCase {
+///
+/// A `final class` rather than a `struct` so the per-test event loop group can
+/// be torn down in `deinit`, the way `tearDown` used to.
+@Suite("JSON-RPC message routing")
+final class MessageRoutingTests {
 
-    private var group: MultiThreadedEventLoopGroup!
+    private let group: MultiThreadedEventLoopGroup
 
-    override func setUp() {
-        super.setUp()
+    init() {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    override func tearDown() {
-        try? group.syncShutdownGracefully()
-        group = nil
-        super.tearDown()
+    deinit {
+        // Asynchronously, and never `syncShutdownGracefully()`: Swift Testing
+        // runs tests as tasks, so `deinit` lands on a cooperative thread, and
+        // blocking one of the pool's few threads while other suites' read-loop
+        // tasks are waiting for a thread deadlocks the whole run.
+        group.shutdownGracefully { _ in }
     }
 
     /// A core driven by a test stream, plus the handles to feed it frames and
@@ -71,11 +77,12 @@ final class MessageRoutingTests: XCTestCase {
         }
 
         // consumeInbound installs the write side first; wait for that so a test
-        // can send straight away.
+        // can send straight away. A `#require` rather than an expectation: every
+        // test below would hang on an inactive session, so stop here instead.
         for _ in 0..<10_000 where !core.isConnected {
             await Task.yield()
         }
-        XCTAssertTrue(core.isConnected, "read loop never activated the session")
+        try #require(core.isConnected, "read loop never activated the session")
 
         return Harness(core: core, source: source, written: written, loop: loop)
     }
@@ -102,8 +109,8 @@ final class MessageRoutingTests: XCTestCase {
         _ iterator: inout NIOAsyncChannelOutboundWriter<ByteBuffer>.TestSink.AsyncIterator
     ) async throws -> [String: Any] {
         let next = await iterator.next()
-        let frame = try XCTUnwrap(next, "Expected the core to write a frame")
-        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(buffer: frame)) as? [String: Any])
+        let frame = try #require(next, "Expected the core to write a frame")
+        return try #require(JSONSerialization.jsonObject(with: Data(buffer: frame)) as? [String: Any])
     }
 
     /// Unwraps a notification event, returning nil for a drop report.
@@ -112,9 +119,16 @@ final class MessageRoutingTests: XCTestCase {
         return notification
     }
 
+    /// The monitor ID an `update` notification carries as its first parameter.
+    private func monitorId(of notification: JSONRPCNotification) throws -> String {
+        let params = try #require(notification.params?.arrayValue)
+        return try #require(params.first?.stringValue)
+    }
+
     // MARK: - Notifications
 
-    func testUpdateNotificationWithNullIdIsDispatched() async throws {
+    @Test("An update notification with a null id is dispatched")
+    func updateNotificationWithNullIdIsDispatched() async throws {
         let harness = try await makeHarness()
         let stream = harness.core.notificationHub.subscribe()
 
@@ -122,22 +136,18 @@ final class MessageRoutingTests: XCTestCase {
         harness.receive(#"{"method":"update","params":["mon1",{"Logical_Switch":{"aa-bb":{"new":{"name":"ls0"}}}}],"id":null}"#)
 
         var iterator = stream.makeAsyncIterator()
-        let notification = notification(await iterator.next())
+        let notification = try #require(notification(await iterator.next()))
 
-        XCTAssertEqual(notification?.method, "update")
-        guard let notification,
-              case .array(let params)? = notification.params,
-              params.count == 2,
-              case .string(let monitorId) = params[0] else {
-            XCTFail("Expected array params with monitor ID first")
-            return
-        }
-        XCTAssertEqual(monitorId, "mon1")
+        #expect(notification.method == "update")
+        let params = try #require(notification.params?.arrayValue)
+        #expect(params.count == 2)
+        #expect(try monitorId(of: notification) == "mon1")
 
         await harness.endConnection()
     }
 
-    func testNotificationWithoutIdKeyIsDispatched() async throws {
+    @Test("A notification with no id key at all is dispatched")
+    func notificationWithoutIdKeyIsDispatched() async throws {
         let harness = try await makeHarness()
         let stream = harness.core.notificationHub.subscribe()
 
@@ -145,12 +155,13 @@ final class MessageRoutingTests: XCTestCase {
 
         var iterator = stream.makeAsyncIterator()
         let received = notification(await iterator.next())
-        XCTAssertEqual(received?.method, "update")
+        #expect(received?.method == "update")
 
         await harness.endConnection()
     }
 
-    func testNotificationsAreBufferedBetweenReads() async throws {
+    @Test("Notifications are buffered between reads")
+    func notificationsAreBufferedBetweenReads() async throws {
         let harness = try await makeHarness()
         let stream = harness.core.notificationHub.subscribe()
 
@@ -163,20 +174,19 @@ final class MessageRoutingTests: XCTestCase {
         var received: [String] = []
         var iterator = stream.makeAsyncIterator()
         for _ in 1...3 {
-            guard let notification = notification(await iterator.next()),
-                  case .array(let params)? = notification.params,
-                  case .string(let monitorId) = params[0] else {
-                XCTFail("Missing buffered notification")
-                return
-            }
-            received.append(monitorId)
+            let notification = try #require(
+                notification(await iterator.next()),
+                "Missing buffered notification"
+            )
+            received.append(try monitorId(of: notification))
         }
-        XCTAssertEqual(received, ["mon1", "mon2", "mon3"])
+        #expect(received == ["mon1", "mon2", "mon3"])
 
         await harness.endConnection()
     }
 
-    func testEverySubscriberReceivesEachNotification() async throws {
+    @Test("Every subscriber receives each notification")
+    func everySubscriberReceivesEachNotification() async throws {
         let harness = try await makeHarness()
         let first = harness.core.notificationHub.subscribe()
         let second = harness.core.notificationHub.subscribe()
@@ -187,13 +197,14 @@ final class MessageRoutingTests: XCTestCase {
         var secondIterator = second.makeAsyncIterator()
         let fromFirst = notification(await firstIterator.next())
         let fromSecond = notification(await secondIterator.next())
-        XCTAssertEqual(fromFirst?.method, "update")
-        XCTAssertEqual(fromSecond?.method, "update")
+        #expect(fromFirst?.method == "update")
+        #expect(fromSecond?.method == "update")
 
         await harness.endConnection()
     }
 
-    func testLaggingSubscriberIsBoundedAndToldAboutTheGap() async throws {
+    @Test("A lagging subscriber is bounded and told about the gap")
+    func laggingSubscriberIsBoundedAndToldAboutTheGap() async throws {
         // The point of the bounded buffer: a consumer that stops reading must
         // not make the process grow, and must be told it lost updates rather
         // than silently receiving an incomplete picture.
@@ -211,7 +222,7 @@ final class MessageRoutingTests: XCTestCase {
         harness.receive(#"{"method":"echo","params":[],"id":99}"#)
         var writtenIterator = harness.written.makeAsyncIterator()
         let reply = try await nextWritten(&writtenIterator)
-        XCTAssertEqual(reply["id"] as? Int, 99)
+        #expect(reply["id"] as? Int == 99)
 
         await harness.endConnection()
 
@@ -229,12 +240,13 @@ final class MessageRoutingTests: XCTestCase {
             return (delivered, dropped)
         }
 
-        XCTAssertLessThanOrEqual(delivered, 2, "Buffer must not grow past its bound")
-        XCTAssertGreaterThan(dropped, 0, "The consumer fell behind, so drops must be reported")
-        XCTAssertLessThanOrEqual(delivered + dropped, 6)
+        #expect(delivered <= 2, "Buffer must not grow past its bound")
+        #expect(dropped > 0, "The consumer fell behind, so drops must be reported")
+        #expect(delivered + dropped <= 6)
     }
 
-    func testSubscribingAfterTheConnectionEndedYieldsAFinishedStream() async throws {
+    @Test("Subscribing after the connection ended yields a finished stream")
+    func subscribingAfterTheConnectionEndedYieldsAFinishedStream() async throws {
         // Previously the hub kept no record of being closed, so a late
         // subscriber got a stream that never finished and hung its consumer.
         let harness = try await makeHarness()
@@ -247,10 +259,11 @@ final class MessageRoutingTests: XCTestCase {
             var iterator = stream.makeAsyncIterator()
             return await iterator.next()
         }
-        XCTAssertNil(event, "A stream created after the close must be finished")
+        #expect(event == nil, "A stream created after the close must be finished")
     }
 
-    func testConnectionEndFinishesNotificationStreams() async throws {
+    @Test("The connection ending finishes notification streams")
+    func connectionEndFinishesNotificationStreams() async throws {
         let harness = try await makeHarness()
         let stream = harness.core.notificationHub.subscribe()
 
@@ -260,10 +273,11 @@ final class MessageRoutingTests: XCTestCase {
             var iterator = stream.makeAsyncIterator()
             return await iterator.next()
         }
-        XCTAssertNil(event, "Stream should finish when the connection closes")
+        #expect(event == nil, "Stream should finish when the connection closes")
     }
 
-    func testResubscribingWorksAfterAReconnect() async throws {
+    @Test("Resubscribing works after a reconnect")
+    func resubscribingWorksAfterAReconnect() async throws {
         // A dropped connection closes the hub; a new session has to reopen it,
         // or every subscriber after the first reconnect would get a finished
         // stream.
@@ -286,7 +300,7 @@ final class MessageRoutingTests: XCTestCase {
 
         var iterator = stream.makeAsyncIterator()
         let received = notification(await iterator.next())
-        XCTAssertEqual(received?.method, "update")
+        #expect(received?.method == "update")
 
         source.finish()
         await loop.value
@@ -294,34 +308,37 @@ final class MessageRoutingTests: XCTestCase {
 
     // MARK: - Server echo requests
 
-    func testServerEchoRequestGetsReply() async throws {
+    @Test("A server echo request gets a reply")
+    func serverEchoRequestGetsReply() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
         harness.receive(#"{"method":"echo","params":["ping"],"id":42}"#)
 
         let reply = try await nextWritten(&iterator)
-        XCTAssertEqual(reply["id"] as? Int, 42)
-        XCTAssertEqual(reply["result"] as? [String], ["ping"])
-        XCTAssertTrue(reply["error"] is NSNull)
+        #expect(reply["id"] as? Int == 42)
+        #expect(reply["result"] as? [String] == ["ping"])
+        #expect(reply["error"] is NSNull)
 
         await harness.endConnection()
     }
 
-    func testServerEchoReplyPreservesStringId() async throws {
+    @Test("A server echo reply preserves a string id")
+    func serverEchoReplyPreservesStringId() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
         harness.receive(#"{"method":"echo","params":[],"id":"echo-7"}"#)
 
         let reply = try await nextWritten(&iterator)
-        XCTAssertEqual(reply["id"] as? String, "echo-7")
-        XCTAssertEqual((reply["result"] as? [Any])?.count, 0)
+        #expect(reply["id"] as? String == "echo-7")
+        #expect((reply["result"] as? [Any])?.count == 0)
 
         await harness.endConnection()
     }
 
-    func testUnknownServerRequestProducesNoReply() async throws {
+    @Test("An unknown server request produces no reply")
+    func unknownServerRequestProducesNoReply() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
@@ -331,14 +348,15 @@ final class MessageRoutingTests: XCTestCase {
         harness.receive(#"{"method":"echo","params":[],"id":10}"#)
 
         let reply = try await nextWritten(&iterator)
-        XCTAssertEqual(reply["id"] as? Int, 10)
+        #expect(reply["id"] as? Int == 10)
 
         await harness.endConnection()
     }
 
     // MARK: - Responses
 
-    func testResponseIsRoutedToPendingRequest() async throws {
+    @Test("A response is routed to its pending request")
+    func responseIsRoutedToPendingRequest() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
@@ -357,34 +375,30 @@ final class MessageRoutingTests: XCTestCase {
         // `sendRequest` registers the pending entry and writes inside one
         // actor-isolated stretch, with the registration first.
         let request = try await nextWritten(&iterator)
-        XCTAssertEqual(request["method"] as? String, "list_dbs")
+        #expect(request["method"] as? String == "list_dbs")
 
         harness.receive(#"{"id":7,"result":["OVN_Northbound"],"error":null}"#)
 
         let value = try await response.value
-        XCTAssertEqual(value.result, ["OVN_Northbound"])
-        XCTAssertNil(value.error)
+        #expect(value.result == ["OVN_Northbound"])
+        #expect(value.error == nil)
 
         await harness.endConnection()
     }
 
-    func testTimedOutRequestFailsAndLateResponseIsIgnored() async throws {
+    @Test("A timed-out request fails and a late response is ignored")
+    func timedOutRequestFailsAndLateResponseIsIgnored() async throws {
         let harness = try await makeHarness()
 
-        do {
-            _ = try await harness.core.sendRequest(
+        let error = await #expect(throws: OVNManagerError.self) {
+            try await harness.core.sendRequest(
                 JSONRPCRequest(method: "list_dbs", params: nil, id: .number(1)),
                 id: .number(1),
                 responseType: JSONRPCResponse<JSONValue>.self,
                 timeout: .milliseconds(50)
             )
-            XCTFail("Expected the request to time out")
-        } catch {
-            guard case OVNManagerError.timeoutError = error else {
-                XCTFail("Expected timeoutError, got \(error)")
-                return
-            }
         }
+        #expect(error?.errorCase == .timeoutError)
 
         // A response arriving after the timeout must be ignored gracefully, not
         // fulfil the already-failed promise (which would crash).
@@ -394,12 +408,13 @@ final class MessageRoutingTests: XCTestCase {
         // The request frame, then the echo reply that proves the core survived.
         _ = try await nextWritten(&iterator)
         let reply = try await nextWritten(&iterator)
-        XCTAssertEqual(reply["id"] as? Int, 2)
+        #expect(reply["id"] as? Int == 2)
 
         await harness.endConnection()
     }
 
-    func testResponseWithUnsupportedIdIsIgnored() async throws {
+    @Test("A response with an unsupported id is ignored")
+    func responseWithUnsupportedIdIsIgnored() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
@@ -409,14 +424,15 @@ final class MessageRoutingTests: XCTestCase {
         harness.receive(#"{"method":"echo","params":[],"id":3}"#)
 
         let reply = try await nextWritten(&iterator)
-        XCTAssertEqual(reply["id"] as? Int, 3)
+        #expect(reply["id"] as? Int == 3)
 
         await harness.endConnection()
     }
 
     // MARK: - Connection loss
 
-    func testConnectionEndFailsPendingRequests() async throws {
+    @Test("The connection ending fails pending requests")
+    func connectionEndFailsPendingRequests() async throws {
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
 
@@ -432,18 +448,14 @@ final class MessageRoutingTests: XCTestCase {
 
         await harness.endConnection()
 
-        do {
-            _ = try await response.value
-            XCTFail("Expected the in-flight request to fail")
-        } catch {
-            guard case OVNManagerError.connectionFailed = error else {
-                XCTFail("Expected connectionFailed, got \(error)")
-                return
-            }
+        let error = await #expect(throws: OVNManagerError.self) {
+            try await response.value
         }
+        #expect(error?.errorCase == .connectionFailed)
     }
 
-    func testConnectionFailureFailsPendingRequests() async throws {
+    @Test("A read failure fails pending requests")
+    func connectionFailureFailsPendingRequests() async throws {
         struct SocketDied: Error {}
         let harness = try await makeHarness()
         var iterator = harness.written.makeAsyncIterator()
@@ -460,31 +472,24 @@ final class MessageRoutingTests: XCTestCase {
 
         await harness.endConnection(throwing: SocketDied())
 
-        do {
-            _ = try await response.value
-            XCTFail("Expected the read failure to fail the in-flight request")
-        } catch {
-            XCTAssertTrue(error is SocketDied, "Got \(error)")
+        await #expect(throws: SocketDied.self) {
+            try await response.value
         }
     }
 
-    func testSendingWithoutAConnectionFails() async throws {
+    @Test("Sending without a connection fails")
+    func sendingWithoutAConnectionFails() async throws {
         let core = OVSDBConnectionCore(
             endpoint: .unix(path: "/tmp/swiftovn-never-connected"),
             eventLoopGroup: group,
             logger: Logger(label: "test")
         )
-        XCTAssertFalse(core.isConnected)
+        #expect(!core.isConnected)
 
-        do {
+        let error = await #expect(throws: OVNManagerError.self) {
             try await core.send(JSONRPCRequest(method: "echo", params: nil, id: nil))
-            XCTFail("Expected send to fail without a connection")
-        } catch {
-            guard case OVNManagerError.connectionFailed = error else {
-                XCTFail("Expected connectionFailed, got \(error)")
-                return
-            }
         }
+        #expect(error?.errorCase == .connectionFailed)
     }
 }
 
@@ -493,7 +498,8 @@ final class MessageRoutingTests: XCTestCase {
 /// The hub's buffering and drop accounting, driven directly: it is what keeps a
 /// stalled consumer from growing the process without limit, and what tells that
 /// consumer its view has a hole.
-final class JSONRPCNotificationHubTests: XCTestCase {
+@Suite("Notification hub")
+struct JSONRPCNotificationHubTests {
 
     private enum StreamOutcome {
         case event(JSONRPCNotificationEvent)
@@ -520,7 +526,8 @@ final class JSONRPCNotificationHubTests: XCTestCase {
         }
     }
 
-    func testSlowSubscriberBufferIsBoundedAndDropsAreReported() async throws {
+    @Test("A slow subscriber's buffer is bounded and drops are reported")
+    func slowSubscriberBufferIsBoundedAndDropsAreReported() async throws {
         let bufferSize = 4
         let published = 20
         let hub = JSONRPCNotificationHub(bufferSize: bufferSize, logger: Logger(label: "test"))
@@ -539,27 +546,23 @@ final class JSONRPCNotificationHubTests: XCTestCase {
         for await event in stream {
             switch event {
             case .notification(let notification):
-                guard case .string(let payload)? = notification.params else {
-                    XCTFail("Unexpected notification payload")
-                    return
-                }
-                notifications.append(payload)
+                notifications.append(try #require(notification.params?.stringValue))
             case .dropped(let count):
                 dropped += count
             }
         }
 
-        XCTAssertLessThanOrEqual(notifications.count, bufferSize,
-                                 "Buffer must not grow past its bound")
-        XCTAssertGreaterThan(dropped, 0, "The consumer fell behind, so drops must be reported")
+        #expect(notifications.count <= bufferSize, "Buffer must not grow past its bound")
+        #expect(dropped > 0, "The consumer fell behind, so drops must be reported")
         // A report is never inflated; the one emitted at close can undercount,
         // since squeezing it into a full buffer costs another element.
-        XCTAssertLessThanOrEqual(notifications.count + dropped, published)
+        #expect(notifications.count + dropped <= published)
         // Newest are kept: the final publish must have survived.
-        XCTAssertEqual(notifications.last, "n\(published)")
+        #expect(notifications.last == "n\(published)")
     }
 
-    func testDropCountIsExactOnceTheConsumerCatchesUp() async throws {
+    @Test("The drop count is exact once the consumer catches up")
+    func dropCountIsExactOnceTheConsumerCatchesUp() async throws {
         let hub = JSONRPCNotificationHub(bufferSize: 4, logger: Logger(label: "test"))
         let stream = hub.subscribe()
         var iterator = stream.makeAsyncIterator()
@@ -579,42 +582,41 @@ final class JSONRPCNotificationHubTests: XCTestCase {
             }
             switch await iterator.next() {
             case .notification(let notification):
-                guard case .string(let payload)? = notification.params else {
-                    XCTFail("Unexpected notification payload")
-                    return
-                }
-                notifications.append(payload)
+                notifications.append(try #require(notification.params?.stringValue))
             case .dropped(let count):
                 dropped += count
             case nil:
-                XCTFail("Stream finished early")
+                Issue.record("Stream finished early")
                 return
             }
         }
 
-        XCTAssertEqual(notifications, ["n4", "n5", "n6", "n7"])
-        XCTAssertEqual(dropped, 3, "n1, n2 and n3 were discarded")
-        XCTAssertEqual(notifications.count + dropped, 7,
-                       "Every notification is either delivered or reported as dropped")
+        #expect(notifications == ["n4", "n5", "n6", "n7"])
+        #expect(dropped == 3, "n1, n2 and n3 were discarded")
+        #expect(
+            notifications.count + dropped == 7,
+            "Every notification is either delivered or reported as dropped"
+        )
     }
 
-    func testKeptUpSubscriberSeesNoDrops() async throws {
+    @Test("A subscriber that keeps up sees no drops")
+    func keptUpSubscriberSeesNoDrops() async throws {
         let hub = JSONRPCNotificationHub(bufferSize: 2, logger: Logger(label: "test"))
         let stream = hub.subscribe()
         var iterator = stream.makeAsyncIterator()
 
         for index in 1...10 {
             hub.publish(JSONRPCNotification(method: "update", params: .string("n\(index)")))
-            guard case .notification(let notification)? = await iterator.next(),
-                  case .string(let payload)? = notification.params else {
-                XCTFail("Expected notification \(index)")
+            guard case .notification(let notification)? = await iterator.next() else {
+                Issue.record("Expected notification \(index)")
                 return
             }
-            XCTAssertEqual(payload, "n\(index)")
+            #expect(notification.params?.stringValue == "n\(index)")
         }
     }
 
-    func testSubscribingAfterCloseReturnsAFinishedStream() async throws {
+    @Test("Subscribing after close returns an already-finished stream")
+    func subscribingAfterCloseReturnsAFinishedStream() async throws {
         let hub = JSONRPCNotificationHub(logger: Logger(label: "test"))
         hub.finishAll()
 
@@ -622,12 +624,13 @@ final class JSONRPCNotificationHubTests: XCTestCase {
         // never finished and the consumer's `for await` hung forever.
         let outcome = await firstOutcome(of: hub.subscribe())
         guard case .finished = outcome else {
-            XCTFail("Expected a finished stream, got \(outcome)")
+            Issue.record("Expected a finished stream, got \(outcome)")
             return
         }
     }
 
-    func testSubscribingAfterReopenReceivesNotifications() async throws {
+    @Test("Subscribing after a reopen receives notifications")
+    func subscribingAfterReopenReceivesNotifications() async throws {
         let hub = JSONRPCNotificationHub(logger: Logger(label: "test"))
         hub.finishAll()
 
@@ -637,12 +640,11 @@ final class JSONRPCNotificationHubTests: XCTestCase {
         let stream = hub.subscribe()
         hub.publish(JSONRPCNotification(method: "update", params: .string("after-reconnect")))
 
-        guard case .event(.notification(let notification)) = await firstOutcome(of: stream),
-              case .string(let payload)? = notification.params else {
-            XCTFail("Expected a notification after reopen")
+        guard case .event(.notification(let notification)) = await firstOutcome(of: stream) else {
+            Issue.record("Expected a notification after reopen")
             return
         }
-        XCTAssertEqual(payload, "after-reconnect")
+        #expect(notification.params?.stringValue == "after-reconnect")
     }
 }
 
@@ -650,9 +652,11 @@ final class JSONRPCNotificationHubTests: XCTestCase {
 
 /// A monitor consumer that falls behind must be told its view is incomplete
 /// rather than have the client buffer updates until memory runs out.
-final class MonitorStreamDropTests: XCTestCase {
+@Suite("Monitor stream backpressure")
+struct MonitorStreamDropTests {
 
-    func testMonitorUpdatesThrowsWhenNotificationsWereDropped() async throws {
+    @Test("monitorUpdates() throws once notifications were dropped")
+    func monitorUpdatesThrowsWhenNotificationsWereDropped() async throws {
         let transport = StubNotificationTransport(events: [
             .notification(Self.updateNotification(monitorId: "mon1")),
             .dropped(count: 7),
@@ -665,14 +669,14 @@ final class MonitorStreamDropTests: XCTestCase {
             for try await _ in client.monitorUpdates() {
                 delivered += 1
             }
-            XCTFail("Expected the stream to fail after notifications were dropped")
+            Issue.record("Expected the stream to fail after notifications were dropped")
         } catch OVNManagerError.notificationsDropped(let count) {
-            XCTAssertEqual(count, 7)
+            #expect(count == 7)
         }
 
         // Updates before the gap are still delivered; nothing after it is,
         // because the consumer must restart the monitor to resynchronize.
-        XCTAssertEqual(delivered, 1)
+        #expect(delivered == 1)
     }
 
     private static func updateNotification(monitorId: String) -> JSONRPCNotification {
@@ -726,14 +730,16 @@ private struct StubNotificationTransport: OVSDBTransport {
 
 // MARK: - Table Updates Parsing
 
-final class OVSDBTableUpdatesParsingTests: XCTestCase {
+@Suite("Table update parsing")
+struct OVSDBTableUpdatesParsingTests {
 
     private func tableUpdates(_ json: String) throws -> [OVSDBUpdate] {
         let value = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
         return OVSDBConnection.parseTableUpdates(value)
     }
 
-    func testParsingCarriesTableUUIDOldAndNew() throws {
+    @Test("Parsing carries the table, uuid, old and new")
+    func parsingCarriesTableUUIDOldAndNew() throws {
         let updates = try tableUpdates(#"""
         {
           "Logical_Switch": {
@@ -746,25 +752,26 @@ final class OVSDBTableUpdatesParsingTests: XCTestCase {
         }
         """#)
 
-        XCTAssertEqual(updates.count, 3)
+        #expect(updates.count == 3)
 
-        let insert = try XCTUnwrap(updates.first { $0.uuid == "uuid-insert" })
-        XCTAssertEqual(insert.table, "Logical_Switch")
-        XCTAssertNil(insert.old)
-        XCTAssertEqual(insert.new?["name"], .string("ls0"))
+        let insert = try #require(updates.first { $0.uuid == "uuid-insert" })
+        #expect(insert.table == "Logical_Switch")
+        #expect(insert.old == nil)
+        #expect(insert.new?["name"] == .string("ls0"))
 
-        let delete = try XCTUnwrap(updates.first { $0.uuid == "uuid-delete" })
-        XCTAssertEqual(delete.table, "Logical_Switch")
-        XCTAssertEqual(delete.old?["name"], .string("ls1"))
-        XCTAssertNil(delete.new)
+        let delete = try #require(updates.first { $0.uuid == "uuid-delete" })
+        #expect(delete.table == "Logical_Switch")
+        #expect(delete.old?["name"] == .string("ls1"))
+        #expect(delete.new == nil)
 
-        let modify = try XCTUnwrap(updates.first { $0.uuid == "uuid-modify" })
-        XCTAssertEqual(modify.table, "Logical_Switch_Port")
-        XCTAssertEqual(modify.old?["name"], .string("p0"))
-        XCTAssertEqual(modify.new?["name"], .string("p1"))
+        let modify = try #require(updates.first { $0.uuid == "uuid-modify" })
+        #expect(modify.table == "Logical_Switch_Port")
+        #expect(modify.old?["name"] == .string("p0"))
+        #expect(modify.new?["name"] == .string("p1"))
     }
 
-    func testParsingNonObjectValueReturnsEmpty() throws {
-        XCTAssertTrue(try tableUpdates(#"[1,2,3]"#).isEmpty)
+    @Test("Parsing a non-object value returns nothing")
+    func parsingNonObjectValueReturnsEmpty() throws {
+        #expect(try tableUpdates(#"[1,2,3]"#).isEmpty)
     }
 }

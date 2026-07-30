@@ -1,6 +1,23 @@
-import XCTest
+import Foundation
+import Testing
 import NIOCore
 @testable import SwiftOVN
+
+/// One frame and the envelope the scanner has to find in it.
+struct EnvelopeCase: Sendable, CustomTestStringConvertible {
+    let json: String
+    let method: String?
+    let identifier: JSONRPCFrameEnvelope.Identifier
+
+    /// The frame itself is the most useful label a failure can carry.
+    var testDescription: String { json }
+
+    init(_ json: String, method: String? = nil, identifier: JSONRPCFrameEnvelope.Identifier) {
+        self.json = json
+        self.method = method
+        self.identifier = identifier
+    }
+}
 
 /// Tests for the routing scan that replaced the throwaway `JSONSerialization`
 /// pass over every inbound message.
@@ -9,188 +26,141 @@ import NIOCore
 /// `method` and `id` are, whatever surrounds them — otherwise a response is
 /// matched to the wrong request, or a notification is mistaken for a
 /// server-to-client request and answered.
-final class JSONRPCFrameEnvelopeTests: XCTestCase {
+@Suite("JSON-RPC frame envelope scanning")
+struct JSONRPCFrameEnvelopeTests {
 
     private func scan(_ json: String) -> JSONRPCFrameEnvelope? {
         return JSONRPCFrameScanner.scanEnvelope(ByteBuffer(string: json))
     }
 
+    /// Scans `testCase.json` and checks both envelope members.
+    private func check(_ testCase: EnvelopeCase) throws {
+        let envelope = try #require(scan(testCase.json))
+        #expect(envelope.method == testCase.method)
+        #expect(envelope.identifier == testCase.identifier)
+    }
+
     // MARK: - Well-formed frames
 
-    func testResponseWithNumericId() throws {
-        let envelope = try XCTUnwrap(scan(#"{"id":7,"result":["OVN_Northbound"],"error":null}"#))
-        XCTAssertNil(envelope.method)
-        XCTAssertEqual(envelope.identifier, .value(.number(7)))
-    }
+    static let wellFormedCases: [EnvelopeCase] = [
+        EnvelopeCase(#"{"id":7,"result":["OVN_Northbound"],"error":null}"#,
+                     identifier: .value(.number(7))),
+        EnvelopeCase(#"{"id":"req-3","result":{},"error":null}"#,
+                     identifier: .value(.string("req-3"))),
+        EnvelopeCase(#"{"id":-12,"result":{}}"#, identifier: .value(.number(-12))),
+        EnvelopeCase(#"{"method":"update","params":["mon1",{}],"id":null}"#,
+                     method: "update", identifier: .absent),
+        EnvelopeCase(#"{"method":"update","params":[]}"#, method: "update", identifier: .absent),
+        EnvelopeCase(#"{"method":"echo","params":["ping"],"id":42}"#,
+                     method: "echo", identifier: .value(.number(42))),
+        // Member order carries no meaning in JSON, so the scan cannot rely on it.
+        EnvelopeCase(#"{"id":null,"params":[],"method":"update"}"#,
+                     method: "update", identifier: .absent),
+        EnvelopeCase("{\n  \"method\" : \"echo\" ,\n  \"id\" : 5\n}",
+                     method: "echo", identifier: .value(.number(5))),
+        EnvelopeCase("{}", identifier: .absent),
+        // Leading whitespace before the object is allowed.
+        EnvelopeCase("\n\t {\"id\":2}", identifier: .value(.number(2))),
+    ]
 
-    func testResponseWithStringId() throws {
-        let envelope = try XCTUnwrap(scan(#"{"id":"req-3","result":{},"error":null}"#))
-        XCTAssertEqual(envelope.identifier, .value(.string("req-3")))
-    }
-
-    func testNegativeId() throws {
-        let envelope = try XCTUnwrap(scan(#"{"id":-12,"result":{}}"#))
-        XCTAssertEqual(envelope.identifier, .value(.number(-12)))
-    }
-
-    func testNotificationWithNullId() throws {
-        let envelope = try XCTUnwrap(scan(#"{"method":"update","params":["mon1",{}],"id":null}"#))
-        XCTAssertEqual(envelope.method, "update")
-        XCTAssertEqual(envelope.identifier, .absent)
-    }
-
-    func testNotificationWithNoIdMember() throws {
-        let envelope = try XCTUnwrap(scan(#"{"method":"update","params":[]}"#))
-        XCTAssertEqual(envelope.method, "update")
-        XCTAssertEqual(envelope.identifier, .absent)
-    }
-
-    func testServerRequest() throws {
-        let envelope = try XCTUnwrap(scan(#"{"method":"echo","params":["ping"],"id":42}"#))
-        XCTAssertEqual(envelope.method, "echo")
-        XCTAssertEqual(envelope.identifier, .value(.number(42)))
-    }
-
-    func testMemberOrderDoesNotMatter() throws {
-        let idFirst = try XCTUnwrap(scan(#"{"id":null,"params":[],"method":"update"}"#))
-        XCTAssertEqual(idFirst.method, "update")
-        XCTAssertEqual(idFirst.identifier, .absent)
-    }
-
-    func testWhitespaceBetweenMembers() throws {
-        let envelope = try XCTUnwrap(scan("{\n  \"method\" : \"echo\" ,\n  \"id\" : 5\n}"))
-        XCTAssertEqual(envelope.method, "echo")
-        XCTAssertEqual(envelope.identifier, .value(.number(5)))
-    }
-
-    func testEmptyObject() throws {
-        let envelope = try XCTUnwrap(scan("{}"))
-        XCTAssertNil(envelope.method)
-        XCTAssertEqual(envelope.identifier, .absent)
+    @Test("Scans a well-formed frame", arguments: JSONRPCFrameEnvelopeTests.wellFormedCases)
+    func scansWellFormedFrame(testCase: EnvelopeCase) throws {
+        try check(testCase)
     }
 
     // MARK: - Skipping payloads
 
-    func testIdAfterANestedPayload() throws {
+    static let payloadSkippingCases: [EnvelopeCase] = [
         // The common shape for a monitor update: the id sits behind the payload,
         // so every kind of nested value has to be skipped to reach it.
-        let json = #"""
-        {"method":"update","params":["mon1",{"Logical_Flow":{"aa":{"new":{"match":"ip4.dst == 10.0.0.1","actions":["a","b"],"n":1,"ok":true,"nothing":null}}}}],"id":null}
-        """#
-        let envelope = try XCTUnwrap(scan(json))
-        XCTAssertEqual(envelope.method, "update")
-        XCTAssertEqual(envelope.identifier, .absent)
-    }
-
-    func testBracesAndKeywordsInsideStringsAreSkipped() throws {
+        EnvelopeCase(
+            #"{"method":"update","params":["mon1",{"Logical_Flow":{"aa":{"new":{"match":"ip4.dst == 10.0.0.1","actions":["a","b"],"n":1,"ok":true,"nothing":null}}}}],"id":null}"#,
+            method: "update", identifier: .absent),
         // A payload string containing `}`, `"id":`, or an escaped quote must not
         // be mistaken for structure or for a top-level member.
-        let json = #"{"result":{"details":"unexpected } char, \"id\":99, {nested"},"id":4}"#
-        let envelope = try XCTUnwrap(scan(json))
-        XCTAssertNil(envelope.method)
-        XCTAssertEqual(envelope.identifier, .value(.number(4)))
-    }
-
-    func testNestedIdMemberIsNotMistakenForTheTopLevelOne() throws {
-        let json = #"{"result":{"rows":[{"id":123}]},"id":8}"#
-        let envelope = try XCTUnwrap(scan(json))
-        XCTAssertEqual(envelope.identifier, .value(.number(8)))
-    }
-
-    func testNestedMethodMemberIsIgnored() throws {
-        let json = #"{"result":{"method":"not-ours"},"id":9}"#
-        let envelope = try XCTUnwrap(scan(json))
-        XCTAssertNil(envelope.method)
-        XCTAssertEqual(envelope.identifier, .value(.number(9)))
-    }
-
-    func testEscapedBackslashBeforeAClosingQuote() throws {
+        EnvelopeCase(#"{"result":{"details":"unexpected } char, \"id\":99, {nested"},"id":4}"#,
+                     identifier: .value(.number(4))),
+        // A nested `id` is not the top-level one.
+        EnvelopeCase(#"{"result":{"rows":[{"id":123}]},"id":8}"#, identifier: .value(.number(8))),
+        // Nor is a nested `method`.
+        EnvelopeCase(#"{"result":{"method":"not-ours"},"id":9}"#, identifier: .value(.number(9))),
         // The string ends at the quote after `\\`, not at the escaped one.
-        let json = #"{"result":"trailing backslash \\","id":10}"#
-        XCTAssertEqual(scan(json)?.identifier, .value(.number(10)))
+        EnvelopeCase(#"{"result":"trailing backslash \\","id":10}"#,
+                     identifier: .value(.number(10))),
+    ]
+
+    @Test("Skips a payload to reach the envelope members",
+          arguments: JSONRPCFrameEnvelopeTests.payloadSkippingCases)
+    func skipsPayload(testCase: EnvelopeCase) throws {
+        try check(testCase)
     }
 
     // MARK: - Ids this library cannot correlate
 
-    func testFractionalIdIsUnsupported() throws {
-        XCTAssertEqual(scan(#"{"id":1.5,"result":{}}"#)?.identifier, .unsupported)
-    }
-
-    func testBooleanIdIsUnsupported() throws {
-        XCTAssertEqual(scan(#"{"id":true,"result":{}}"#)?.identifier, .unsupported)
-    }
-
-    func testObjectIdIsUnsupported() throws {
-        let envelope = try XCTUnwrap(scan(#"{"id":{"a":1},"result":{},"method":"x"}"#))
-        XCTAssertEqual(envelope.identifier, .unsupported)
-        XCTAssertEqual(envelope.method, "x")
-    }
-
-    func testOutOfRangeIdIsUnsupported() throws {
-        XCTAssertEqual(scan(#"{"id":99999999999999999999,"result":{}}"#)?.identifier, .unsupported)
-    }
-
-    func testStringIdWithEscapesIsUnsupported() throws {
+    static let uncorrelatableCases: [EnvelopeCase] = [
+        EnvelopeCase(#"{"id":1.5,"result":{}}"#, identifier: .unsupported),
+        EnvelopeCase(#"{"id":true,"result":{}}"#, identifier: .unsupported),
+        EnvelopeCase(#"{"id":{"a":1},"result":{},"method":"x"}"#,
+                     method: "x", identifier: .unsupported),
+        EnvelopeCase(#"{"id":99999999999999999999,"result":{}}"#, identifier: .unsupported),
         // Escapes are not expanded, so the scanned text cannot be compared with
         // the ids this library generates; refusing to correlate beats matching
         // the wrong pending request.
-        XCTAssertEqual(scan(#"{"id":"a\"b","result":{}}"#)?.identifier, .unsupported)
+        EnvelopeCase(#"{"id":"a\"b","result":{}}"#, identifier: .unsupported),
+    ]
+
+    @Test("Refuses an id it cannot correlate",
+          arguments: JSONRPCFrameEnvelopeTests.uncorrelatableCases)
+    func refusesUncorrelatableId(testCase: EnvelopeCase) throws {
+        try check(testCase)
     }
 
-    func testNonStringMethodIsNotAMethod() throws {
-        let envelope = try XCTUnwrap(scan(#"{"method":5,"id":11}"#))
-        XCTAssertNil(envelope.method)
-        XCTAssertEqual(envelope.identifier, .value(.number(11)))
+    @Test("A non-string method is not a method")
+    func nonStringMethodIsNotAMethod() throws {
+        try check(EnvelopeCase(#"{"method":5,"id":11}"#, identifier: .value(.number(11))))
     }
 
     // MARK: - Malformed input
 
-    func testNonObjectFrameIsRejected() {
-        XCTAssertNil(scan(#"[1,2,3]"#))
-        XCTAssertNil(scan(#""just a string""#))
-        XCTAssertNil(scan(""))
-    }
-
-    func testTruncatedFrameIsRejected() {
-        XCTAssertNil(scan(#"{"id":1,"result":"#))
-        XCTAssertNil(scan(#"{"method":"upda"#))
-    }
-
-    func testMissingColonIsRejected() {
-        XCTAssertNil(scan(#"{"id" 1}"#))
-    }
-
-    func testLeadingWhitespaceIsAllowed() throws {
-        XCTAssertEqual(scan("\n\t {\"id\":2}")?.identifier, .value(.number(2)))
+    @Test("Rejects a malformed frame", arguments: [
+        // Not a JSON object at all.
+        #"[1,2,3]"#,
+        #""just a string""#,
+        "",
+        // Truncated mid-value and mid-string.
+        #"{"id":1,"result":"#,
+        #"{"method":"upda"#,
+        // A member with no colon after its name.
+        #"{"id" 1}"#,
+    ])
+    func rejectsMalformedFrame(json: String) {
+        #expect(scan(json) == nil)
     }
 
     // MARK: - Agreement with a real parser
 
-    func testScannerAgreesWithJSONSerializationOnRealisticFrames() throws {
-        let frames = [
-            #"{"id":1,"result":["OVN_Northbound","OVN_Southbound"],"error":null}"#,
-            #"{"method":"update","params":["mon-1",{"Logical_Switch":{"uuid":{"new":{"name":"ls0"}}}}],"id":null}"#,
-            #"{"method":"echo","params":["ping"],"id":"probe-1"}"#,
-            #"{"id":"tx-9","result":[{"count":1}],"error":null}"#,
-            #"{"error":{"code":-32000,"message":"syntax error, }"},"id":12}"#,
-        ]
+    @Test("The scanner agrees with JSONSerialization on a realistic frame", arguments: [
+        #"{"id":1,"result":["OVN_Northbound","OVN_Southbound"],"error":null}"#,
+        #"{"method":"update","params":["mon-1",{"Logical_Switch":{"uuid":{"new":{"name":"ls0"}}}}],"id":null}"#,
+        #"{"method":"echo","params":["ping"],"id":"probe-1"}"#,
+        #"{"id":"tx-9","result":[{"count":1}],"error":null}"#,
+        #"{"error":{"code":-32000,"message":"syntax error, }"},"id":12}"#,
+    ])
+    func scannerAgreesWithJSONSerialization(frame: String) throws {
+        let envelope = try #require(scan(frame))
+        let parsed = try #require(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
 
-        for frame in frames {
-            let envelope = try XCTUnwrap(scan(frame), frame)
-            let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any], frame)
+        #expect(envelope.method == parsed["method"] as? String)
 
-            XCTAssertEqual(envelope.method, parsed["method"] as? String, frame)
-
-            let expected: JSONRPCFrameEnvelope.Identifier
-            switch parsed["id"] {
-            case let value as Int:
-                expected = .value(.number(value))
-            case let value as String:
-                expected = .value(.string(value))
-            default:
-                expected = .absent
-            }
-            XCTAssertEqual(envelope.identifier, expected, frame)
+        let expected: JSONRPCFrameEnvelope.Identifier
+        switch parsed["id"] {
+        case let value as Int:
+            expected = .value(.number(value))
+        case let value as String:
+            expected = .value(.string(value))
+        default:
+            expected = .absent
         }
+        #expect(envelope.identifier == expected)
     }
 }

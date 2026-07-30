@@ -1,195 +1,192 @@
-import XCTest
+import Foundation
+import Testing
 import NIO
 @testable import SwiftOVN
 
-final class OVNManagerTests: XCTestCase {
-    
-    func testJSONRPCRequest() throws {
+@Suite("Models and wire formats")
+struct OVNManagerTests {
+
+    @Test("A JSON-RPC request keeps its method, params and id")
+    func jsonRPCRequest() throws {
         let request = JSONRPCRequest(
             method: "list_dbs",
             params: nil,
             id: .string("test-1")
         )
-        
-        XCTAssertEqual(request.method, "list_dbs")
-        XCTAssertNil(request.params)
-        
-        if case .string(let id) = request.id {
-            XCTAssertEqual(id, "test-1")
-        } else {
-            XCTFail("Expected string ID")
-        }
+
+        #expect(request.method == "list_dbs")
+        #expect(request.params == nil)
+        #expect(request.id == .string("test-1"))
     }
-    
-    func testJSONValueEncodingDecoding() throws {
-        let testCases: [JSONValue] = [
-            .null,
-            .boolean(true),
-            .number(42.5),
-            .string("hello"),
-            .array([.string("a"), .number(1), .boolean(false)]),
-            .object(["key": .string("value"), "number": .number(123)])
-        ]
-        
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-        
-        for testValue in testCases {
-            let encoded = try encoder.encode(testValue)
-            let decoded = try decoder.decode(JSONValue.self, from: encoded)
-            XCTAssertEqual(testValue, decoded)
-        }
+
+    @Test("Every JSONValue shape round trips through Codable", arguments: [
+        JSONValue.null,
+        .boolean(true),
+        .number(42.5),
+        .string("hello"),
+        .array([.string("a"), .number(1), .boolean(false)]),
+        .object(["key": .string("value"), "number": .number(123)]),
+    ])
+    func jsonValueEncodingDecoding(value: JSONValue) throws {
+        let encoded = try JSONEncoder().encode(value)
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: encoded)
+
+        #expect(decoded == value)
     }
-    
-    func testOVNLogicalSwitchCreation() throws {
+
+    @Test("A logical switch keeps what it was created with")
+    func ovnLogicalSwitchCreation() throws {
         let logicalSwitch = OVNLogicalSwitch(
             name: "test-switch",
             external_ids: ["test": "value"]
         )
-        
-        XCTAssertEqual(logicalSwitch.name, "test-switch")
-        XCTAssertEqual(logicalSwitch.external_ids?["test"], "value")
-        XCTAssertNil(logicalSwitch.uuid)
+
+        #expect(logicalSwitch.name == "test-switch")
+        #expect(logicalSwitch.external_ids?["test"] == "value")
+        #expect(logicalSwitch.uuid == nil)
     }
-    
-    func testOVSBridgeCreation() throws {
+
+    @Test("A bridge keeps what it was created with")
+    func ovsBridgeCreation() throws {
         let bridge = OVSBridge(
             name: "br-test",
             fail_mode: "secure",
             external_ids: ["description": "Test bridge"]
         )
-        
-        XCTAssertEqual(bridge.name, "br-test")
-        XCTAssertEqual(bridge.fail_mode, "secure")
-        XCTAssertEqual(bridge.external_ids?["description"], "Test bridge")
-    }
-    
-    func testOVSDBConditionCreation() throws {
-        let condition = OVSDBCondition.equal(column: "name", to: "test-value")
-        
-        XCTAssertEqual(condition.column, "name")
-        XCTAssertEqual(condition.function, "==")
-        
-        if case .string(let value) = condition.value {
-            XCTAssertEqual(value, "test-value")
-        } else {
-            XCTFail("Expected string value")
-        }
-    }
-    
-    func testOVSDBMutationCreation() throws {
-        let mutation = OVSDBMutation.add(column: "count", value: 5)
-        
-        XCTAssertEqual(mutation.column, "count")
-        XCTAssertEqual(mutation.mutator, "+=")
-        
-        if case .number(let value) = mutation.value {
-            XCTAssertEqual(value, 5.0)
-        } else {
-            XCTFail("Expected number value")
-        }
-    }
-    
-    func testJSONValueSetHandling() throws {
-        let stringSet = JSONValue.set(["a", "b", "c"])
-        let setValues = stringSet.setStringValues
-        
-        XCTAssertEqual(setValues?.count, 3)
-        XCTAssertTrue(setValues?.contains("a") == true)
-        XCTAssertTrue(setValues?.contains("b") == true)
-        XCTAssertTrue(setValues?.contains("c") == true)
-    }
-    
-    func testJSONValueMapHandling() throws {
-        let stringMap = JSONValue.map(["key1": "value1", "key2": "value2"])
-        let mapValues = stringMap.mapStringValues
-        
-        XCTAssertEqual(mapValues?.count, 2)
-        XCTAssertEqual(mapValues?["key1"], "value1")
-        XCTAssertEqual(mapValues?["key2"], "value2")
-    }
-    
-    func testJSONValueUUIDHandling() throws {
-        let uuidValue = JSONValue.uuid("12345678-1234-5678-9abc-123456789012")
-        let extractedUUID = uuidValue.uuidValue
 
-        XCTAssertEqual(extractedUUID, "12345678-1234-5678-9abc-123456789012")
+        #expect(bridge.name == "br-test")
+        #expect(bridge.fail_mode == "secure")
+        #expect(bridge.external_ids?["description"] == "Test bridge")
+    }
+
+    @Test("The equality condition builder fills in column, function and value")
+    func ovsdbConditionCreation() throws {
+        let condition = OVSDBCondition.equal(column: "name", to: "test-value")
+
+        #expect(condition.column == "name")
+        #expect(condition.function == "==")
+        #expect(condition.value == .string("test-value"))
+    }
+
+    @Test("The add mutation builder fills in column, mutator and value")
+    func ovsdbMutationCreation() throws {
+        let mutation = OVSDBMutation.add(column: "count", value: 5)
+
+        #expect(mutation.column == "count")
+        #expect(mutation.mutator == "+=")
+        #expect(mutation.value == .number(5))
+    }
+
+    @Test("A string set exposes its elements")
+    func jsonValueSetHandling() throws {
+        let stringSet = JSONValue.set(["a", "b", "c"])
+        let setValues = try #require(stringSet.setStringValues)
+
+        #expect(setValues.count == 3)
+        #expect(setValues.contains("a"))
+        #expect(setValues.contains("b"))
+        #expect(setValues.contains("c"))
+    }
+
+    @Test("A string map exposes its entries")
+    func jsonValueMapHandling() throws {
+        let stringMap = JSONValue.map(["key1": "value1", "key2": "value2"])
+        let mapValues = try #require(stringMap.mapStringValues)
+
+        #expect(mapValues.count == 2)
+        #expect(mapValues["key1"] == "value1")
+        #expect(mapValues["key2"] == "value2")
+    }
+
+    @Test("A UUID atom exposes its UUID")
+    func jsonValueUUIDHandling() throws {
+        let uuidValue = JSONValue.uuid("12345678-1234-5678-9abc-123456789012")
+
+        #expect(uuidValue.uuidValue == "12345678-1234-5678-9abc-123456789012")
     }
 
     // MARK: - JSONValue set/map wire-format assertions
 
-    func testJSONValueSetOfBoolsPreservesBooleans() throws {
+    @Test("A set of booleans keeps its booleans")
+    func jsonValueSetOfBoolsPreservesBooleans() throws {
         // Regression: set(_:) previously dropped Bool elements, silently
         // producing an empty set on the wire.
         let set = JSONValue.set([true, false])
 
-        guard case .array(let outer) = set, outer.count == 2,
-              case .string("set") = outer[0],
-              case .array(let elements) = outer[1] else {
-            return XCTFail("Expected [\"set\", [...]] shape, got \(set)")
-        }
-        XCTAssertEqual(elements, [.boolean(true), .boolean(false)])
+        let outer = try #require(set.arrayValue, "Expected [\"set\", [...]] shape, got \(set)")
+        #expect(outer.count == 2)
+        #expect(outer.first == .string("set"))
+        #expect(outer.last?.arrayValue == [.boolean(true), .boolean(false)])
 
         // And it must serialize as JSON booleans, not 0/1.
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(set))
-        guard let outer = json as? [Any], outer.count == 2 else {
-            return XCTFail("Expected 2-element array, got \(json)")
-        }
-        XCTAssertEqual(outer[0] as? String, "set")
-        XCTAssertEqual(outer[1] as? [Bool], [true, false])
+        let serialized = try #require(json as? [Any], "Expected 2-element array, got \(json)")
+        #expect(serialized.count == 2)
+        #expect(serialized.first as? String == "set")
+        #expect(serialized.last as? [Bool] == [true, false])
     }
 
-    func testJSONValueSingleElementSetIsBareScalar() throws {
-        // RFC 7047: a one-element set is the bare value, not ["set", [value]].
-        XCTAssertEqual(JSONValue.set(["only"]), .string("only"))
-        XCTAssertEqual(JSONValue.set([true]), .boolean(true))
-        XCTAssertEqual(JSONValue.set([42]), .number(42))
+    /// RFC 7047: a one-element set is the bare value, not ["set", [value]].
+    @Test("A single-element set is the bare scalar", arguments: [
+        (JSONValue.set(["only"]), JSONValue.string("only")),
+        (JSONValue.set([true]), .boolean(true)),
+        (JSONValue.set([42]), .number(42)),
+    ])
+    func jsonValueSingleElementSetIsBareScalar(set: JSONValue, expected: JSONValue) {
+        #expect(set == expected)
     }
 
-    func testJSONValueSetValueUnwrapsBareScalar() throws {
-        // Regression: the old impossible conjunction made setValue return nil
-        // for a bare scalar instead of a single-element set.
-        XCTAssertEqual(JSONValue.string("x").setValue, [.string("x")])
-        XCTAssertEqual(JSONValue.number(7).setValue, [.number(7)])
-        XCTAssertEqual(JSONValue.boolean(true).setValue, [.boolean(true)])
+    /// Regression: the old impossible conjunction made setValue return nil for
+    /// a bare scalar instead of a single-element set.
+    @Test("setValue unwraps a bare scalar as a one-element set", arguments: [
+        (JSONValue.string("x"), [JSONValue.string("x")]),
+        (.number(7), [.number(7)]),
+        (.boolean(true), [.boolean(true)]),
         // The wrapped multi-element form still round-trips.
-        XCTAssertEqual(JSONValue.set(["a", "b"]).setValue, [.string("a"), .string("b")])
+        (JSONValue.set(["a", "b"]), [.string("a"), .string("b")]),
+    ])
+    func jsonValueSetValueUnwrapsBareScalar(value: JSONValue, expected: [JSONValue]) {
+        #expect(value.setValue == expected)
     }
 
-    func testStringDictionaryToJSONValueIsMapWireFormat() throws {
+    @Test("A string dictionary converts to the map wire format")
+    func stringDictionaryToJSONValueIsMapWireFormat() throws {
         // toJSONValue() must produce ["map", [[k, v], ...]] so it can build row
         // columns directly, not a bare JSON object.
         let value = ["a": "b"].toJSONValue()
 
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
-        guard let array = json as? [Any], array.count == 2,
-              array[0] as? String == "map",
-              let pairs = array[1] as? [[Any]], pairs.count == 1 else {
-            return XCTFail("Expected [\"map\", [[k, v]]] shape, got \(json)")
-        }
-        XCTAssertEqual(pairs[0][0] as? String, "a")
-        XCTAssertEqual(pairs[0][1] as? String, "b")
+        let array = try #require(json as? [Any], "Expected [\"map\", [[k, v]]] shape, got \(json)")
+        #expect(array.count == 2)
+        #expect(array.first as? String == "map")
+        let pairs = try #require(array.last as? [[Any]])
+        #expect(pairs.count == 1)
+        #expect(pairs[0][0] as? String == "a")
+        #expect(pairs[0][1] as? String == "b")
     }
 
-    func testIntDictionaryToJSONValueEncodesIntegerValues() throws {
+    @Test("An integer dictionary encodes integer values")
+    func intDictionaryToJSONValueEncodesIntegerValues() throws {
         // Integer map values must serialize as JSON integers, not 5.0.
         let value = ["ttl": 5].toJSONValue()
 
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
-        let pairs = (json as? [Any])?[1] as? [[Any]]
-        XCTAssertEqual(pairs?.first?[0] as? String, "ttl")
-        XCTAssertEqual(pairs?.first?[1] as? Int, 5)
+        let pairs = try #require((json as? [Any])?[1] as? [[Any]])
+        #expect(pairs.first?[0] as? String == "ttl")
+        #expect(pairs.first?[1] as? Int == 5)
     }
 
-    func testOVSDBMutationConvenienceEncodesAsArray() throws {
+    @Test("The mutation convenience builders encode as an array")
+    func ovsdbMutationConvenienceEncodesAsArray() throws {
         // The convenience builders must produce the RFC 7047 3-tuple wire form.
         let mutation = OVSDBMutation.insert(column: "ports", value: "lsp0")
 
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(mutation))
-        XCTAssertEqual(json as? [String], ["ports", "insert", "lsp0"])
+        #expect(json as? [String] == ["ports", "insert", "lsp0"])
     }
-    
-    func testOVNACLCreation() throws {
+
+    @Test("An ACL keeps what it was created with")
+    func ovnACLCreation() throws {
         let acl = OVNACL(
             priority: 1000,
             direction: "to-lport",
@@ -198,29 +195,31 @@ final class OVNManagerTests: XCTestCase {
             log: true,
             name: "test-acl"
         )
-        
-        XCTAssertEqual(acl.priority, 1000)
-        XCTAssertEqual(acl.direction, "to-lport")
-        XCTAssertEqual(acl.match, "ip4.src == 192.168.1.0/24")
-        XCTAssertEqual(acl.action, "allow")
-        XCTAssertEqual(acl.log, true)
-        XCTAssertEqual(acl.name, "test-acl")
+
+        #expect(acl.priority == 1000)
+        #expect(acl.direction == "to-lport")
+        #expect(acl.match == "ip4.src == 192.168.1.0/24")
+        #expect(acl.action == "allow")
+        #expect(acl.log == true)
+        #expect(acl.name == "test-acl")
     }
-    
-    func testOVNLoadBalancerCreation() throws {
+
+    @Test("A load balancer keeps what it was created with")
+    func ovnLoadBalancerCreation() throws {
         let loadBalancer = OVNLoadBalancer(
             name: "test-lb",
             vips: ["192.168.1.100:80": "192.168.1.10:8080,192.168.1.11:8080"],
             protocolType: "tcp"
         )
-        
-        XCTAssertEqual(loadBalancer.name, "test-lb")
-        XCTAssertEqual(loadBalancer.vips.count, 1)
-        XCTAssertEqual(loadBalancer.vips["192.168.1.100:80"], "192.168.1.10:8080,192.168.1.11:8080")
-        XCTAssertEqual(loadBalancer.protocolType, "tcp")
+
+        #expect(loadBalancer.name == "test-lb")
+        #expect(loadBalancer.vips.count == 1)
+        #expect(loadBalancer.vips["192.168.1.100:80"] == "192.168.1.10:8080,192.168.1.11:8080")
+        #expect(loadBalancer.protocolType == "tcp")
     }
 
-    func testLogicalRouterDynamicRoutingHelpers() throws {
+    @Test("The logical router dynamic-routing helpers write and clear options")
+    func logicalRouterDynamicRoutingHelpers() throws {
         let router = OVNLogicalRouter(
             name: "lr0",
             options: ["existing": "kept"]
@@ -235,22 +234,23 @@ final class OVNManagerTests: XCTestCase {
             ipv6PrefixNexthop: "2001:db8::1"
         )
 
-        XCTAssertTrue(dynamicRouter.dynamicRoutingEnabled)
-        XCTAssertEqual(dynamicRouter.dynamicRoutingRedistribute, [.connected, .staticRoutes, .nat, .loadBalancer])
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing"], "true")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-redistribute"], "connected,lb,nat,static")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-vrf-id"], "42")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-vrf-name"], "tenant-a")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-no-learning"], "true")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-v4-prefix-nexthop"], "192.0.2.1")
-        XCTAssertEqual(dynamicRouter.options?["dynamic-routing-v6-prefix-nexthop"], "2001:db8::1")
-        XCTAssertEqual(dynamicRouter.options?["existing"], "kept")
+        #expect(dynamicRouter.dynamicRoutingEnabled)
+        #expect(dynamicRouter.dynamicRoutingRedistribute == [.connected, .staticRoutes, .nat, .loadBalancer])
+        #expect(dynamicRouter.options?["dynamic-routing"] == "true")
+        #expect(dynamicRouter.options?["dynamic-routing-redistribute"] == "connected,lb,nat,static")
+        #expect(dynamicRouter.options?["dynamic-routing-vrf-id"] == "42")
+        #expect(dynamicRouter.options?["dynamic-routing-vrf-name"] == "tenant-a")
+        #expect(dynamicRouter.options?["dynamic-routing-no-learning"] == "true")
+        #expect(dynamicRouter.options?["dynamic-routing-v4-prefix-nexthop"] == "192.0.2.1")
+        #expect(dynamicRouter.options?["dynamic-routing-v6-prefix-nexthop"] == "2001:db8::1")
+        #expect(dynamicRouter.options?["existing"] == "kept")
 
         let disabledRouter = dynamicRouter.withoutDynamicRouting()
-        XCTAssertEqual(disabledRouter.options, ["existing": "kept"])
+        #expect(disabledRouter.options == ["existing": "kept"])
     }
 
-    func testLogicalRouterPortDynamicRoutingHelpers() throws {
+    @Test("The logical router port dynamic-routing helpers write and clear options")
+    func logicalRouterPortDynamicRoutingHelpers() throws {
         let port = OVNLogicalRouterPort(
             name: "lrp0",
             mac: "00:00:00:00:00:01",
@@ -267,21 +267,22 @@ final class OVNManagerTests: XCTestCase {
             routingProtocolRedirect: "bgp-speaker-lsp"
         )
 
-        XCTAssertEqual(dynamicPort.dynamicRoutingRedistribute, [.connectedAsHost])
-        XCTAssertEqual(dynamicPort.routingProtocols, [.bgp, .bfd])
-        XCTAssertEqual(dynamicPort.options?["dynamic-routing-redistribute"], "connected-as-host")
-        XCTAssertEqual(dynamicPort.options?["dynamic-routing-maintain-vrf"], "true")
-        XCTAssertEqual(dynamicPort.options?["dynamic-routing-no-learning"], "false")
-        XCTAssertEqual(dynamicPort.options?["dynamic-routing-port-name"], "fabric0")
-        XCTAssertEqual(dynamicPort.options?["routing-protocols"], "BFD,BGP")
-        XCTAssertEqual(dynamicPort.options?["routing-protocol-redirect"], "bgp-speaker-lsp")
-        XCTAssertEqual(dynamicPort.options?["existing"], "kept")
+        #expect(dynamicPort.dynamicRoutingRedistribute == [.connectedAsHost])
+        #expect(dynamicPort.routingProtocols == [.bgp, .bfd])
+        #expect(dynamicPort.options?["dynamic-routing-redistribute"] == "connected-as-host")
+        #expect(dynamicPort.options?["dynamic-routing-maintain-vrf"] == "true")
+        #expect(dynamicPort.options?["dynamic-routing-no-learning"] == "false")
+        #expect(dynamicPort.options?["dynamic-routing-port-name"] == "fabric0")
+        #expect(dynamicPort.options?["routing-protocols"] == "BFD,BGP")
+        #expect(dynamicPort.options?["routing-protocol-redirect"] == "bgp-speaker-lsp")
+        #expect(dynamicPort.options?["existing"] == "kept")
 
         let clearedPort = dynamicPort.withoutDynamicRoutingOverrides()
-        XCTAssertEqual(clearedPort.options, ["existing": "kept"])
+        #expect(clearedPort.options == ["existing": "kept"])
     }
-    
-    func testOVSFlowBuilder() throws {
+
+    @Test("The flow builder assembles a flow")
+    func ovsFlowBuilder() throws {
         let flow = OVSFlowBuilder()
             .table(0)
             .priority(1000)
@@ -289,101 +290,90 @@ final class OVNManagerTests: XCTestCase {
             .actions("output:2")
             .idleTimeout(60)
             .build()
-        
-        XCTAssertEqual(flow.table, 0)
-        XCTAssertEqual(flow.priority, 1000)
-        XCTAssertEqual(flow.match, "in_port=1")
-        XCTAssertEqual(flow.actions, "output:2")
-        XCTAssertEqual(flow.idle_timeout, 60)
+
+        #expect(flow.table == 0)
+        #expect(flow.priority == 1000)
+        #expect(flow.match == "in_port=1")
+        #expect(flow.actions == "output:2")
+        #expect(flow.idle_timeout == 60)
     }
-    
-    func testJSONRPCErrorHandling() throws {
+
+    @Test("A JSON-RPC error keeps its code, message and data")
+    func jsonRPCErrorHandling() throws {
         let error = JSONRPCError(
             code: -32600,
             message: "Invalid Request",
             data: .string("Additional error information")
         )
-        
-        XCTAssertEqual(error.code, -32600)
-        XCTAssertEqual(error.message, "Invalid Request")
-        
-        if case .string(let data) = error.data {
-            XCTAssertEqual(data, "Additional error information")
-        } else {
-            XCTFail("Expected string data")
-        }
+
+        #expect(error.code == -32600)
+        #expect(error.message == "Invalid Request")
+        #expect(error.data == .string("Additional error information"))
     }
-    
-    func testOVNManagerError() throws {
+
+    @Test("Manager errors carry their payloads")
+    func ovnManagerError() throws {
         let connectionError = OVNManagerError.connectionFailed("Socket not found")
-        let timeoutError = OVNManagerError.timeoutError
-        
-        switch connectionError {
-        case .connectionFailed(let message):
-            XCTAssertEqual(message, "Socket not found")
-        default:
-            XCTFail("Expected connection failed error")
+
+        guard case .connectionFailed(let message) = connectionError else {
+            Issue.record("Expected connectionFailed, got \(connectionError.errorCase)")
+            return
         }
-        
-        switch timeoutError {
-        case .timeoutError:
-            break // Expected
-        default:
-            XCTFail("Expected timeout error")
-        }
+        #expect(message == "Socket not found")
+        #expect(OVNManagerError.timeoutError.errorCase == .timeoutError)
     }
 }
 
 // MARK: - Mock Tests
 
-final class JSONRPCClientMockTests: XCTestCase {
-    
-    func testJSONRPCRequestSerialization() throws {
+@Suite("JSON-RPC and OVSDB serialization")
+struct JSONRPCClientMockTests {
+
+    @Test("A JSON-RPC request round trips")
+    func jsonRPCRequestSerialization() throws {
         let request = JSONRPCRequest(
             method: "transact",
             params: .array([.string("OVN_Northbound"), .object(["op": .string("select"), "table": .string("Logical_Switch")])]),
             id: .number(1)
         )
-        
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(request)
-        
+
+        let data = try JSONEncoder().encode(request)
+
         // Verify that the JSON can be decoded back
-        let decoder = JSONDecoder()
-        let decodedRequest = try decoder.decode(JSONRPCRequest.self, from: data)
-        
-        XCTAssertEqual(decodedRequest.method, request.method)
+        let decodedRequest = try JSONDecoder().decode(JSONRPCRequest.self, from: data)
+
+        #expect(decodedRequest.method == request.method)
     }
-    
-    func testOVSDBOperationSerialization() throws {
+
+    @Test("An OVSDB operation round trips")
+    func ovsdbOperationSerialization() throws {
         let operation = OVSDBOperation(
             op: "select",
             table: "Logical_Switch",
             whereConditions: [OVSDBCondition(column: "name", function: "==", value: .string("test"))],
             columns: ["name", "ports"]
         )
-        
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(operation)
-        
-        let decoder = JSONDecoder()
-        let decodedOperation = try decoder.decode(OVSDBOperation.self, from: data)
-        
-        XCTAssertEqual(decodedOperation.op, operation.op)
-        XCTAssertEqual(decodedOperation.table, operation.table)
-        XCTAssertEqual(decodedOperation.columns, operation.columns)
+
+        let data = try JSONEncoder().encode(operation)
+        let decodedOperation = try JSONDecoder().decode(OVSDBOperation.self, from: data)
+
+        #expect(decodedOperation.op == operation.op)
+        #expect(decodedOperation.table == operation.table)
+        #expect(decodedOperation.columns == operation.columns)
     }
-    
-    func testOVSDBConditionEncodesAsArray() throws {
+
+    @Test("A condition encodes as an array")
+    func ovsdbConditionEncodesAsArray() throws {
         let condition = OVSDBCondition(column: "name", function: "==", value: .string("ls0"))
 
         let data = try JSONEncoder().encode(condition)
         let json = try JSONSerialization.jsonObject(with: data)
 
-        XCTAssertEqual(json as? [String], ["name", "==", "ls0"])
+        #expect(json as? [String] == ["name", "==", "ls0"])
     }
 
-    func testOVSDBMutationEncodesAsArray() throws {
+    @Test("A mutation encodes as an array")
+    func ovsdbMutationEncodesAsArray() throws {
         // RFC 7047 requires mutations on the wire as [column, mutator, value],
         // not a keyed object — ovsdb-server rejects the object form.
         let mutation = OVSDBMutation(
@@ -395,20 +385,20 @@ final class JSONRPCClientMockTests: XCTestCase {
         let data = try JSONEncoder().encode(mutation)
         let json = try JSONSerialization.jsonObject(with: data)
 
-        guard let array = json as? [Any], array.count == 3 else {
-            return XCTFail("Expected 3-element array, got \(json)")
-        }
-        XCTAssertEqual(array[0] as? String, "ports")
-        XCTAssertEqual(array[1] as? String, "insert")
-        XCTAssertEqual(array[2] as? [String], ["named-uuid", "new_lsp"])
+        let array = try #require(json as? [Any], "Expected 3-element array, got \(json)")
+        #expect(array.count == 3)
+        #expect(array[0] as? String == "ports")
+        #expect(array[1] as? String == "insert")
+        #expect(array[2] as? [String] == ["named-uuid", "new_lsp"])
 
         let decoded = try JSONDecoder().decode(OVSDBMutation.self, from: data)
-        XCTAssertEqual(decoded.column, mutation.column)
-        XCTAssertEqual(decoded.mutator, mutation.mutator)
-        XCTAssertEqual(decoded.value, mutation.value)
+        #expect(decoded.column == mutation.column)
+        #expect(decoded.mutator == mutation.mutator)
+        #expect(decoded.value == mutation.value)
     }
 
-    func testOVSDBOperationEncodesUUIDNameAndWaitFields() throws {
+    @Test("An operation encodes uuid-name and the wait fields")
+    func ovsdbOperationEncodesUUIDNameAndWaitFields() throws {
         let insert = OVSDBOperation(
             op: "insert",
             table: "Logical_Switch_Port",
@@ -417,9 +407,9 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let insertJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(insert)) as? [String: Any]
-        XCTAssertEqual(insertJSON?["uuid-name"] as? String, "new_lsp")
-        XCTAssertNil(insertJSON?["uuidName"])
-        XCTAssertNil(insertJSON?["where"], "insert must not carry a where clause")
+        #expect(insertJSON?["uuid-name"] as? String == "new_lsp")
+        #expect(insertJSON?["uuidName"] == nil)
+        #expect(insertJSON?["where"] == nil, "insert must not carry a where clause")
 
         let wait = OVSDBOperation(
             op: "wait",
@@ -432,22 +422,22 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let waitJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(wait)) as? [String: Any]
-        XCTAssertEqual(waitJSON?["until"] as? String, "==")
-        XCTAssertEqual(waitJSON?["timeout"] as? Int, 0)
-        XCTAssertEqual((waitJSON?["rows"] as? [[String: Any]])?.first?["name"] as? String, "ls0")
-        XCTAssertEqual((waitJSON?["where"] as? [[Any]])?.count, 1)
+        #expect(waitJSON?["until"] as? String == "==")
+        #expect(waitJSON?["timeout"] as? Int == 0)
+        #expect((waitJSON?["rows"] as? [[String: Any]])?.first?["name"] as? String == "ls0")
+        #expect((waitJSON?["where"] as? [[Any]])?.count == 1)
     }
 
     private func encodeOperations(_ operations: [OVSDBOperation]) throws -> [[String: Any]] {
         let data = try JSONEncoder().encode(operations)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            XCTFail("Operations did not encode as an array of objects")
-            return []
-        }
-        return json
+        return try #require(
+            JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+            "Operations did not encode as an array of objects"
+        )
     }
 
-    func testInsertAttachedTransactionWireFormat() throws {
+    @Test("insertAttached produces the wait/insert/mutate wire format")
+    func insertAttachedTransactionWireFormat() throws {
         let operations = OVSDBReferenceTransactions.insertAttached(
             row: ["priority": .number(1000), "direction": .string("to-lport")],
             into: "ACL",
@@ -458,34 +448,37 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let json = try encodeOperations(operations)
-        XCTAssertEqual(json.count, 3)
+        #expect(json.count == 3)
 
         // Op 0: wait guarding the parent's existence, aborting on mismatch
-        XCTAssertEqual(json[0]["op"] as? String, "wait")
-        XCTAssertEqual(json[0]["table"] as? String, "Logical_Switch")
-        XCTAssertEqual(json[0]["until"] as? String, "==")
-        XCTAssertEqual(json[0]["timeout"] as? Int, 0)
-        XCTAssertEqual(json[0]["columns"] as? [String], ["name"])
-        XCTAssertEqual((json[0]["rows"] as? [[String: Any]])?.first?["name"] as? String, "ls0")
+        #expect(json[0]["op"] as? String == "wait")
+        #expect(json[0]["table"] as? String == "Logical_Switch")
+        #expect(json[0]["until"] as? String == "==")
+        #expect(json[0]["timeout"] as? Int == 0)
+        #expect(json[0]["columns"] as? [String] == ["name"])
+        #expect((json[0]["rows"] as? [[String: Any]])?.first?["name"] as? String == "ls0")
 
         // Op 1: insert carrying the uuid-name for the mutate to reference
-        XCTAssertEqual(json[1]["op"] as? String, "insert")
-        XCTAssertEqual(json[1]["table"] as? String, "ACL")
-        XCTAssertEqual(json[1]["uuid-name"] as? String, "new_acl")
-        XCTAssertNil(json[1]["where"], "insert must not carry a where clause")
+        #expect(json[1]["op"] as? String == "insert")
+        #expect(json[1]["table"] as? String == "ACL")
+        #expect(json[1]["uuid-name"] as? String == "new_acl")
+        #expect(json[1]["where"] == nil, "insert must not carry a where clause")
 
         // Op 2: mutate adding the named-uuid to the parent's reference set
-        XCTAssertEqual(json[2]["op"] as? String, "mutate")
-        XCTAssertEqual(json[2]["table"] as? String, "Logical_Switch")
-        guard let mutation = (json[2]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
-            return XCTFail("Expected one [column, mutator, value] mutation")
-        }
-        XCTAssertEqual(mutation[0] as? String, "acls")
-        XCTAssertEqual(mutation[1] as? String, "insert")
-        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_acl"])
+        #expect(json[2]["op"] as? String == "mutate")
+        #expect(json[2]["table"] as? String == "Logical_Switch")
+        let mutation = try #require(
+            (json[2]["mutations"] as? [[Any]])?.first,
+            "Expected one [column, mutator, value] mutation"
+        )
+        #expect(mutation.count == 3)
+        #expect(mutation[0] as? String == "acls")
+        #expect(mutation[1] as? String == "insert")
+        #expect(mutation[2] as? [String] == ["named-uuid", "new_acl"])
     }
 
-    func testInsertAttachedToRootParentSkipsWaitAndMatchesAllRows() throws {
+    @Test("insertAttached to a root parent skips the wait and matches all rows")
+    func insertAttachedToRootParentSkipsWaitAndMatchesAllRows() throws {
         // The Open_vSwitch root table holds a single row that always exists:
         // no wait op, and the mutate's empty where matches that one row.
         let operations = OVSDBReferenceTransactions.insertAttached(
@@ -498,22 +491,25 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let json = try encodeOperations(operations)
-        XCTAssertEqual(json.count, 2)
+        #expect(json.count == 2)
 
-        XCTAssertEqual(json[0]["op"] as? String, "insert")
-        XCTAssertEqual(json[0]["uuid-name"] as? String, "new_bridge")
+        #expect(json[0]["op"] as? String == "insert")
+        #expect(json[0]["uuid-name"] as? String == "new_bridge")
 
-        XCTAssertEqual(json[1]["op"] as? String, "mutate")
-        XCTAssertEqual(json[1]["table"] as? String, "Open_vSwitch")
-        XCTAssertEqual((json[1]["where"] as? [Any])?.count, 0)
-        guard let mutation = (json[1]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
-            return XCTFail("Expected one [column, mutator, value] mutation")
-        }
-        XCTAssertEqual(mutation[0] as? String, "bridges")
-        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_bridge"])
+        #expect(json[1]["op"] as? String == "mutate")
+        #expect(json[1]["table"] as? String == "Open_vSwitch")
+        #expect((json[1]["where"] as? [Any])?.count == 0)
+        let mutation = try #require(
+            (json[1]["mutations"] as? [[Any]])?.first,
+            "Expected one [column, mutator, value] mutation"
+        )
+        #expect(mutation.count == 3)
+        #expect(mutation[0] as? String == "bridges")
+        #expect(mutation[2] as? [String] == ["named-uuid", "new_bridge"])
     }
 
-    func testInsertBridgeAttachedCreatesInternalPortWireFormat() throws {
+    @Test("insertBridgeAttached creates the internal port pair")
+    func insertBridgeAttachedCreatesInternalPortWireFormat() throws {
         // `ovs-vsctl add-br` semantics: Interface + Port + Bridge inserted and
         // chained by named-uuid, then referenced from the Open_vSwitch root.
         // Without the internal Port/Interface pair, ovs-vswitchd never creates
@@ -525,43 +521,42 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let json = try encodeOperations(operations)
-        XCTAssertEqual(json.count, 4)
+        #expect(json.count == 4)
 
         // Op 0: the internal interface, carrying its uuid-name for the port.
-        XCTAssertEqual(json[0]["op"] as? String, "insert")
-        XCTAssertEqual(json[0]["table"] as? String, "Interface")
-        XCTAssertEqual(json[0]["uuid-name"] as? String, "new_interface")
-        XCTAssertEqual((json[0]["row"] as? [String: Any])?["type"] as? String, "internal")
+        #expect(json[0]["op"] as? String == "insert")
+        #expect(json[0]["table"] as? String == "Interface")
+        #expect(json[0]["uuid-name"] as? String == "new_interface")
+        #expect((json[0]["row"] as? [String: Any])?["type"] as? String == "internal")
 
         // Op 1: the port, its interfaces chained to the new interface.
-        XCTAssertEqual(json[1]["op"] as? String, "insert")
-        XCTAssertEqual(json[1]["table"] as? String, "Port")
-        XCTAssertEqual(json[1]["uuid-name"] as? String, "new_port")
-        XCTAssertEqual(
-            (json[1]["row"] as? [String: Any])?["interfaces"] as? [String],
-            ["named-uuid", "new_interface"])
+        #expect(json[1]["op"] as? String == "insert")
+        #expect(json[1]["table"] as? String == "Port")
+        #expect(json[1]["uuid-name"] as? String == "new_port")
+        #expect((json[1]["row"] as? [String: Any])?["interfaces"] as? [String] == ["named-uuid", "new_interface"])
 
         // Op 2: the bridge, its ports overwritten with the new port.
-        XCTAssertEqual(json[2]["op"] as? String, "insert")
-        XCTAssertEqual(json[2]["table"] as? String, "Bridge")
-        XCTAssertEqual(json[2]["uuid-name"] as? String, "new_bridge")
-        XCTAssertEqual(
-            (json[2]["row"] as? [String: Any])?["ports"] as? [String],
-            ["named-uuid", "new_port"])
+        #expect(json[2]["op"] as? String == "insert")
+        #expect(json[2]["table"] as? String == "Bridge")
+        #expect(json[2]["uuid-name"] as? String == "new_bridge")
+        #expect((json[2]["row"] as? [String: Any])?["ports"] as? [String] == ["named-uuid", "new_port"])
 
         // Op 3: root reference, unconditioned (the one Open_vSwitch row).
-        XCTAssertEqual(json[3]["op"] as? String, "mutate")
-        XCTAssertEqual(json[3]["table"] as? String, "Open_vSwitch")
-        XCTAssertEqual((json[3]["where"] as? [Any])?.count, 0)
-        guard let mutation = (json[3]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
-            return XCTFail("Expected one [column, mutator, value] mutation")
-        }
-        XCTAssertEqual(mutation[0] as? String, "bridges")
-        XCTAssertEqual(mutation[1] as? String, "insert")
-        XCTAssertEqual(mutation[2] as? [String], ["named-uuid", "new_bridge"])
+        #expect(json[3]["op"] as? String == "mutate")
+        #expect(json[3]["table"] as? String == "Open_vSwitch")
+        #expect((json[3]["where"] as? [Any])?.count == 0)
+        let mutation = try #require(
+            (json[3]["mutations"] as? [[Any]])?.first,
+            "Expected one [column, mutator, value] mutation"
+        )
+        #expect(mutation.count == 3)
+        #expect(mutation[0] as? String == "bridges")
+        #expect(mutation[1] as? String == "insert")
+        #expect(mutation[2] as? [String] == ["named-uuid", "new_bridge"])
     }
 
-    func testDeleteDetachingTransactionWireFormat() throws {
+    @Test("deleteDetaching detaches from every parent, then deletes")
+    func deleteDetachingTransactionWireFormat() throws {
         let uuid = "5e9b0a79-6f38-4e5f-b112-3f0a35b4d2a1"
         let operations = OVSDBReferenceTransactions.deleteDetaching(
             uuid: uuid,
@@ -573,76 +568,105 @@ final class JSONRPCClientMockTests: XCTestCase {
         )
 
         let json = try encodeOperations(operations)
-        XCTAssertEqual(json.count, 3)
+        #expect(json.count == 3)
 
         // Ops 0-1: one detach mutate per parent, selecting rows whose
         // reference set includes the uuid atom and removing it.
         for (index, expectedTable) in ["Logical_Switch", "Port_Group"].enumerated() {
-            XCTAssertEqual(json[index]["op"] as? String, "mutate")
-            XCTAssertEqual(json[index]["table"] as? String, expectedTable)
+            #expect(json[index]["op"] as? String == "mutate")
+            #expect(json[index]["table"] as? String == expectedTable)
 
-            guard let condition = (json[index]["where"] as? [[Any]])?.first, condition.count == 3 else {
-                return XCTFail("Expected one [column, function, value] condition")
-            }
-            XCTAssertEqual(condition[0] as? String, "acls")
-            XCTAssertEqual(condition[1] as? String, "includes")
-            XCTAssertEqual(condition[2] as? [String], ["uuid", uuid])
+            let condition = try #require(
+                (json[index]["where"] as? [[Any]])?.first,
+                "Expected one [column, function, value] condition"
+            )
+            #expect(condition.count == 3)
+            #expect(condition[0] as? String == "acls")
+            #expect(condition[1] as? String == "includes")
+            #expect(condition[2] as? [String] == ["uuid", uuid])
 
-            guard let mutation = (json[index]["mutations"] as? [[Any]])?.first, mutation.count == 3 else {
-                return XCTFail("Expected one [column, mutator, value] mutation")
-            }
-            XCTAssertEqual(mutation[0] as? String, "acls")
-            XCTAssertEqual(mutation[1] as? String, "delete")
-            XCTAssertEqual(mutation[2] as? [String], ["uuid", uuid])
+            let mutation = try #require(
+                (json[index]["mutations"] as? [[Any]])?.first,
+                "Expected one [column, mutator, value] mutation"
+            )
+            #expect(mutation.count == 3)
+            #expect(mutation[0] as? String == "acls")
+            #expect(mutation[1] as? String == "delete")
+            #expect(mutation[2] as? [String] == ["uuid", uuid])
         }
 
         // Op 2: the row delete itself, in the same transaction
-        XCTAssertEqual(json[2]["op"] as? String, "delete")
-        XCTAssertEqual(json[2]["table"] as? String, "ACL")
-        guard let deleteCondition = (json[2]["where"] as? [[Any]])?.first, deleteCondition.count == 3 else {
-            return XCTFail("Expected one [column, function, value] condition")
-        }
-        XCTAssertEqual(deleteCondition[0] as? String, "_uuid")
-        XCTAssertEqual(deleteCondition[1] as? String, "==")
-        XCTAssertEqual(deleteCondition[2] as? [String], ["uuid", uuid])
+        #expect(json[2]["op"] as? String == "delete")
+        #expect(json[2]["table"] as? String == "ACL")
+        let deleteCondition = try #require(
+            (json[2]["where"] as? [[Any]])?.first,
+            "Expected one [column, function, value] condition"
+        )
+        #expect(deleteCondition.count == 3)
+        #expect(deleteCondition[0] as? String == "_uuid")
+        #expect(deleteCondition[1] as? String == "==")
+        #expect(deleteCondition[2] as? [String] == ["uuid", uuid])
     }
 
-    func testInsertResultUUIDExtraction() throws {
+    @Test("An insert's UUID is extracted from the right result, and only from there")
+    func insertResultUUIDExtraction() throws {
         let results: [JSONValue] = [
             .object([:]),  // wait result
             .object(["uuid": .array([.string("uuid"), .string("11111111-2222-3333-4444-555555555555")])]),
             .object(["count": .number(1)])
         ]
 
-        XCTAssertEqual(
-            try OVSDBConnection.uuid(fromInsertResults: results, at: 1),
-            "11111111-2222-3333-4444-555555555555"
+        #expect(
+            try OVSDBConnection.uuid(fromInsertResults: results, at: 1)
+                == "11111111-2222-3333-4444-555555555555"
         )
 
-        XCTAssertThrowsError(try OVSDBConnection.uuid(fromInsertResults: results, at: 0))
-        XCTAssertThrowsError(try OVSDBConnection.uuid(fromInsertResults: results, at: 3))
+        // A result with no uuid member, and an index past the end.
+        for index in [0, 3] {
+            #expect(throws: OVNManagerError.self) {
+                try OVSDBConnection.uuid(fromInsertResults: results, at: index)
+            }
+        }
     }
 
-    func testMonitorRequestSerialization() throws {
+    @Test("A monitor request round trips")
+    func monitorRequestSerialization() throws {
         let monitorRequest = OVSDBMonitorRequest(
             columns: ["name", "ports"],
             select: OVSDBMonitorSelect(initial: true, insert: true, delete: true, modify: true)
         )
-        
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(monitorRequest)
-        
-        let decoder = JSONDecoder()
-        let decodedRequest = try decoder.decode(OVSDBMonitorRequest.self, from: data)
-        
-        XCTAssertEqual(decodedRequest.columns, monitorRequest.columns)
-        XCTAssertEqual(decodedRequest.select?.initial, monitorRequest.select?.initial)
+
+        let data = try JSONEncoder().encode(monitorRequest)
+        let decodedRequest = try JSONDecoder().decode(OVSDBMonitorRequest.self, from: data)
+
+        #expect(decodedRequest.columns == monitorRequest.columns)
+        #expect(decodedRequest.select?.initial == monitorRequest.select?.initial)
     }
 }
 
 // MARK: - Frame Decoder Tests
 
-final class OVSDBJSONFrameDecoderTests: XCTestCase {
+/// One framing scenario: the byte chunks as they arrive off the socket, and
+/// every message the decoder has to emit for them.
+struct FramingCase: Sendable, CustomTestStringConvertible {
+    let testDescription: String
+    let chunks: [String]
+    let expected: [String]
+
+    init(_ description: String, chunks: [String], expected: [String]) {
+        self.testDescription = description
+        self.chunks = chunks
+        self.expected = expected
+    }
+
+    /// A message that must come back out exactly as it went in.
+    init(_ description: String, verbatim message: String) {
+        self.init(description, chunks: [message], expected: [message])
+    }
+}
+
+@Suite("OVSDB JSON framing")
+struct OVSDBJSONFrameDecoderTests {
 
     /// Feeds the given byte chunks through the decoder in order and returns every
     /// framed message the decoder produced. Frames come out as `ByteBuffer`s and
@@ -664,50 +688,27 @@ final class OVSDBJSONFrameDecoderTests: XCTestCase {
         return results
     }
 
-    func testSingleObject() throws {
-        let framed = try frames(feeding: [#"{"id":1,"result":[]}"#])
-        XCTAssertEqual(framed, [#"{"id":1,"result":[]}"#])
-    }
-
-    func testNewlineDelimitedObject() throws {
+    static let singleReadCases: [FramingCase] = [
+        FramingCase("single object", verbatim: #"{"id":1,"result":[]}"#),
+        FramingCase("nested object", verbatim: #"{"id":1,"result":{"rows":[{"name":"ls0"}]}}"#),
+        FramingCase("braces inside strings are ignored",
+                    verbatim: #"{"error":"unexpected } or { char","id":1}"#),
+        FramingCase("escaped quotes inside strings",
+                    verbatim: #"{"match":"name==\"a}b{c\"","id":1}"#),
         // The client appends a trailing newline; leading/trailing whitespace is dropped.
-        let framed = try frames(feeding: ["\n" + #"{"id":1}"# + "\n"])
-        XCTAssertEqual(framed, [#"{"id":1}"#])
-    }
-
-    func testConcatenatedObjects() throws {
+        FramingCase("newline delimited object",
+                    chunks: ["\n" + #"{"id":1}"# + "\n"],
+                    expected: [#"{"id":1}"#]),
         // Two objects with no delimiter arriving in a single read must be split.
-        let framed = try frames(feeding: [#"{"id":1}{"id":2}"#])
-        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"id":2}"#])
-    }
+        FramingCase("concatenated objects",
+                    chunks: [#"{"id":1}{"id":2}"#],
+                    expected: [#"{"id":1}"#, #"{"id":2}"#]),
+    ]
 
-    func testNestedObject() throws {
-        let message = #"{"id":1,"result":{"rows":[{"name":"ls0"}]}}"#
-        let framed = try frames(feeding: [message])
-        XCTAssertEqual(framed, [message])
-    }
-
-    func testBracesInsideStringsAreIgnored() throws {
-        let message = #"{"error":"unexpected } or { char","id":1}"#
-        let framed = try frames(feeding: [message])
-        XCTAssertEqual(framed, [message])
-    }
-
-    func testEscapedQuotesInsideStrings() throws {
-        let message = #"{"match":"name==\"a}b{c\"","id":1}"#
-        let framed = try frames(feeding: [message])
-        XCTAssertEqual(framed, [message])
-    }
-
-    func testPartialObjectSplitAcrossReads() throws {
-        let framed = try frames(feeding: [#"{"id":1,"resu"#, #"lt":[]}"#])
-        XCTAssertEqual(framed, [#"{"id":1,"result":[]}"#])
-    }
-
-    func testTrailingBytesBufferedForNextObject() throws {
-        // First read carries a full object plus the start of the next one.
-        let framed = try frames(feeding: [#"{"id":1}{"id":"#, #"2}"#])
-        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"id":2}"#])
+    @Test("Frames messages arriving in a single read",
+          arguments: OVSDBJSONFrameDecoderTests.singleReadCases)
+    func framesSingleRead(testCase: FramingCase) throws {
+        #expect(try frames(feeding: testCase.chunks) == testCase.expected)
     }
 
     // MARK: - Scan-state continuity across reads
@@ -717,53 +718,60 @@ final class OVSDBJSONFrameDecoderTests: XCTestCase {
     // membership, backslash escaping, nesting depth, object start) has to
     // survive a chunk boundary landing in the middle of it.
 
-    func testBackslashEscapeSplitAcrossReads() throws {
+    static let splitReadCases: [FramingCase] = [
+        FramingCase("partial object split across reads",
+                    chunks: [#"{"id":1,"resu"#, #"lt":[]}"#],
+                    expected: [#"{"id":1,"result":[]}"#]),
+        // First read carries a full object plus the start of the next one.
+        FramingCase("trailing bytes buffered for the next object",
+                    chunks: [#"{"id":1}{"id":"#, #"2}"#],
+                    expected: [#"{"id":1}"#, #"{"id":2}"#]),
         // The chunk boundary falls between a backslash and the quote it
         // escapes. If `escaped` did not persist, the quote would be read as
         // closing the string and the `}` after it would end the object early.
-        let framed = try frames(feeding: [#"{"match":"a\"#, #""b}c","id":1}"#])
-        XCTAssertEqual(framed, [#"{"match":"a\"b}c","id":1}"#])
-    }
-
-    func testBraceInsideStringSplitAcrossReads() throws {
+        FramingCase("backslash escape split across reads",
+                    chunks: [#"{"match":"a\"#, #""b}c","id":1}"#],
+                    expected: [#"{"match":"a\"b}c","id":1}"#]),
         // Boundary inside a string that contains braces; `inString` must persist.
-        let framed = try frames(feeding: [#"{"e":"x{y"#, #"}z","id":1}"#])
-        XCTAssertEqual(framed, [#"{"e":"x{y}z","id":1}"#])
-    }
-
-    func testNestingDepthSplitAcrossReads() throws {
+        FramingCase("brace inside a string split across reads",
+                    chunks: [#"{"e":"x{y"#, #"}z","id":1}"#],
+                    expected: [#"{"e":"x{y}z","id":1}"#]),
         // Boundary between nested opening braces; `depth` must persist so the
         // first inner `}` is not mistaken for the end of the top-level object.
-        let framed = try frames(feeding: [#"{"a":{"b":{"#, #""c":1}}}"#])
-        XCTAssertEqual(framed, [#"{"a":{"b":{"c":1}}}"#])
-    }
-
-    func testLeadingWhitespaceSplitAcrossReads() throws {
+        FramingCase("nesting depth split across reads",
+                    chunks: [#"{"a":{"b":{"#, #""c":1}}}"#],
+                    expected: [#"{"a":{"b":{"c":1}}}"#]),
         // Whitespace before the object arrives in its own reads, so the object
         // does not start at the reader index; `objectStartOffset` must persist.
-        let framed = try frames(feeding: ["\n\n", "  ", #"{"id"#, #"":1}"#])
-        XCTAssertEqual(framed, [#"{"id":1}"#])
-    }
-
-    func testSecondObjectSplitAfterFirstIsEmitted() throws {
+        FramingCase("leading whitespace split across reads",
+                    chunks: ["\n\n", "  ", #"{"id"#, #"":1}"#],
+                    expected: [#"{"id":1}"#]),
         // Scan state must be reset once an object is consumed, so the offsets
         // recorded for the first object do not leak into the second.
-        let framed = try frames(feeding: [#"{"id":1}"#, #"{"na"#, #"me":"x"}"#])
-        XCTAssertEqual(framed, [#"{"id":1}"#, #"{"name":"x"}"#])
+        FramingCase("second object split after the first is emitted",
+                    chunks: [#"{"id":1}"#, #"{"na"#, #"me":"x"}"#],
+                    expected: [#"{"id":1}"#, #"{"name":"x"}"#]),
+    ]
+
+    @Test("Scan state survives a chunk boundary",
+          arguments: OVSDBJSONFrameDecoderTests.splitReadCases)
+    func framesSplitReads(testCase: FramingCase) throws {
+        #expect(try frames(feeding: testCase.chunks) == testCase.expected)
     }
 
-    func testByteAtATimeDeliveryOfNestedObject() throws {
+    @Test("A nested object delivered a byte at a time is framed")
+    func byteAtATimeDeliveryOfNestedObject() throws {
         // Maximal fragmentation: every byte is its own read, so the decoder
         // resumes on each one. This is also the pathological case for the old
         // rescan-from-the-start framer.
         let message = #"{"id":1,"result":{"rows":[{"name":"ls0","other":"a\"b{}"}]}}"#
-        let framed = try frames(feeding: message.map { String($0) })
-        XCTAssertEqual(framed, [message])
+        #expect(try frames(feeding: message.map { String($0) }) == [message])
     }
 
-    func testManyConcatenatedObjectsInOneRead() throws {
+    @Test("Many concatenated objects in one read are all framed")
+    func manyConcatenatedObjectsInOneRead() throws {
         let messages = (1...50).map { #"{"id":\#($0)}"# }
-        let framed = try frames(feeding: [messages.joined()])
-        XCTAssertEqual(framed, messages)
+
+        #expect(try frames(feeding: [messages.joined()]) == messages)
     }
 }
