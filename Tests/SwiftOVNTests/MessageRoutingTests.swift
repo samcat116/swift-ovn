@@ -20,6 +20,17 @@ final class MessageRoutingTests: XCTestCase {
         return (channel, hub, router)
     }
 
+    /// Reads the router's next outbound write and parses it as a JSON object.
+    /// The router writes raw bytes — nothing downstream serializes for it — so
+    /// the reply arrives as a `ByteBuffer`.
+    private func readOutboundObject(from channel: EmbeddedChannel) throws -> [String: Any]? {
+        guard var buffer = try channel.readOutbound(as: ByteBuffer.self),
+              let bytes = buffer.readBytes(length: buffer.readableBytes) else {
+            return nil
+        }
+        return try JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any]
+    }
+
     /// Unwraps a notification event, returning nil for a drop report.
     private func notification(_ event: JSONRPCNotificationEvent?) -> JSONRPCNotification? {
         guard case .notification(let notification)? = event else { return nil }
@@ -271,13 +282,9 @@ final class MessageRoutingTests: XCTestCase {
 
         try channel.writeInbound(#"{"method":"echo","params":["ping"],"id":42}"#)
 
-        guard let reply = try channel.readOutbound(as: String.self) else {
-            XCTFail("Expected an echo reply to be written")
-            return
-        }
-
         let replyObject = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any]
+            readOutboundObject(from: channel),
+            "Expected an echo reply to be written"
         )
         XCTAssertEqual(replyObject["id"] as? Int, 42)
         XCTAssertEqual(replyObject["result"] as? [String], ["ping"])
@@ -290,13 +297,9 @@ final class MessageRoutingTests: XCTestCase {
 
         try channel.writeInbound(#"{"method":"echo","params":[],"id":"echo-7"}"#)
 
-        guard let reply = try channel.readOutbound(as: String.self) else {
-            XCTFail("Expected an echo reply to be written")
-            return
-        }
-
         let replyObject = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any]
+            readOutboundObject(from: channel),
+            "Expected an echo reply to be written"
         )
         XCTAssertEqual(replyObject["id"] as? String, "echo-7")
         XCTAssertEqual((replyObject["result"] as? [Any])?.count, 0)
@@ -308,7 +311,7 @@ final class MessageRoutingTests: XCTestCase {
 
         try channel.writeInbound(#"{"method":"frobnicate","params":[],"id":9}"#)
 
-        XCTAssertNil(try channel.readOutbound(as: String.self))
+        XCTAssertNil(try channel.readOutbound(as: ByteBuffer.self))
     }
 
     // MARK: - Responses
