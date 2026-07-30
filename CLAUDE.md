@@ -252,16 +252,23 @@ connect/serve/reconnect cycle. Things that are easy to get wrong there:
     forgotten and its streams get `monitorInterrupted`; a session that died
     mid-recovery means the supervisor is already fetching another one that will
     run the same recovery, so reporting then would kill streams about to work.
-  - **`startPipeline` is `nonisolated` and takes the hub subscription under its
-    own lock.** Streams can be created before `connect()`, and the subscription
-    has to exist before the caller's next line starts a monitor. `connect()`
-    starts it too, because monitors are re-created whether or not anyone is
-    reading their updates; `disconnect()` stops it and closes the broadcaster, so
-    a stream taken afterwards comes back finished instead of hanging.
-  - **`disconnect()` closes the transport before it awaits the pipeline.** The
-    pipeline may be parked on a re-establishment's monitor request, and
-    cancelling the task does not free it — NIO's `EventLoopFuture.get()` ignores
-    cancellation — so awaiting first costs the request's full 30s timeout.
+  - **The pipeline task is plain actor state, started by `connect()`.** It could
+    instead start lazily from `monitorTableUpdates()`, but that is `nonisolated`,
+    so it would need a lock — and a lock held across the transport subscription
+    is a cooperative thread that can be blocked, which in this package's test
+    suite means the whole run hangs with no failure output (the same trap as the
+    `deinit` note under Testing Approach). Deferring to `connect()` misses
+    nothing: a stream may be taken earlier, but no monitor notification exists
+    before there is a session to carry it. It does mean a connection driven by a
+    mock transport has no pipeline until `connect()` succeeds, which is why
+    `MonitorStubTransport` answers `echo`.
+  - **`disconnect()` does not wait for the pipeline**, only cancels it and sets
+    `isDisconnecting`. A join there is a wait on another task's progress, and a
+    re-establishment parked on a monitor request can hold it for the request's
+    whole timeout — NIO's `EventLoopFuture.get()` ignores cancellation, so
+    cancelling does not free it. The flag settles the only question the join
+    answered: a recovery in flight must not re-register a monitor behind
+    `monitors.removeAll()`.
   - **`JSONRPCClient`'s own streams still end on a reconnect.** That layer does
     not track monitors, so it cannot put anything back — `monitorInterrupted`
     there means what it always did.

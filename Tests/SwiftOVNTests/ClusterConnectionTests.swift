@@ -1004,6 +1004,41 @@ final class ClusterConnectionTests {
         try await withDeadline { try await drained.value }
     }
 
+    @Test("A stream taken after a reconnect by hand is live, not a leftover")
+    func streamTakenAfterAReconnectByHandIsLive() async throws {
+        // connect / disconnect / connect: the second connect has to reopen the
+        // broadcaster and start a pipeline on the new session's hub. The first
+        // pipeline may still be unwinding while it does, and must not finish the
+        // streams belonging to the second.
+        let server = try await startServer()
+        let connection = OVSDBConnection(
+            remotes: OVSDBRemotes(server.endpoint),
+            reconnect: Self.fastReconnect,
+            eventLoopGroup: group
+        )
+        try await connection.connect()
+        try await connection.disconnect()
+        try await connection.connect()
+
+        let batches = connection.monitorTableUpdates()
+        _ = try await connection.startMonitoring(
+            database: Self.database,
+            tables: ["Logical_Switch": OVSDBMonitorRequest()]
+        )
+
+        let first = Task { () -> OVSDBTableUpdates? in
+            for try await batch in batches { return batch }
+            return nil
+        }
+        let batch = try #require(
+            try await withDeadline { try await first.value },
+            "The stream finished instead of delivering the new session's updates"
+        )
+        #expect(batch.updates.first?.table == "Logical_Switch")
+
+        try await connection.disconnect()
+    }
+
     @Test("Disconnecting while a monitor is being restarted does not wait for the reply")
     func disconnectingWhileAMonitorIsBeingRestartedDoesNotWaitForTheReply() async throws {
         // `disconnect()` waits for the pipeline to unwind, and the pipeline may

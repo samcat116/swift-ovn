@@ -582,6 +582,10 @@ struct ConditionalMonitoringTests {
     func update3BatchesCarryTheTransactionId() async throws {
         let transport = MonitorStubTransport()
         let connection = OVSDBConnection(transport: transport)
+        // Connected because that is what starts the monitor pipeline; a
+        // connection that was never connected has no session to carry a
+        // notification, so nothing feeds its streams.
+        try await connection.connect()
 
         // Subscribed before the monitor is started, so nothing can be missed.
         let batches = connection.monitorTableUpdates(monitorId: "mon-1")
@@ -619,6 +623,7 @@ struct ConditionalMonitoringTests {
     func batchesAreFilteredByMonitorId() async throws {
         let transport = MonitorStubTransport()
         let connection = OVSDBConnection(transport: transport)
+        try await connection.connect()
 
         let batches = connection.monitorTableUpdates(monitorId: "mon-2")
         transport.publish(MonitorStubTransport.update3(
@@ -644,6 +649,7 @@ struct ConditionalMonitoringTests {
     func update2RowsReachThePerRowStream() async throws {
         let transport = MonitorStubTransport()
         let connection = OVSDBConnection(transport: transport)
+        try await connection.connect()
 
         let updates = connection.monitorUpdates()
         transport.publish(JSONRPCNotification(
@@ -939,6 +945,11 @@ private final class MonitorStubTransport: OVSDBTransport {
 
     private func result(for method: String) -> JSONValue {
         switch method {
+        case "echo":
+            // RFC 7047 §4.1.11: the reply mirrors the request's params. Answered
+            // so a test can `connect()` this transport, which is what starts an
+            // `OVSDBConnection`'s monitor pipeline.
+            return .array([.string("echo")])
         case "monitor":
             return Self.tableUpdates
         case "monitor_cond":

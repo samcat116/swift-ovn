@@ -5,7 +5,6 @@ import Foundation
 #endif
 import NIO
 import Logging
-import Synchronization
 
 public actor OVSDBConnection {
     /// What this connection knows about one of its monitors: the method it was
@@ -32,26 +31,36 @@ public actor OVSDBConnection {
     /// database.
     private var negotiatedMethod: OVSDBMonitorMethod?
     /// The single fan-out every monitor stream this connection hands out reads
-    /// from, fed by `pipeline`. See `OVSDBMonitorBroadcaster` for why the streams
-    /// go through here rather than subscribing to the transport directly.
+    /// from, fed by `pipelineTask`. See `OVSDBMonitorBroadcaster` for why the
+    /// streams go through here rather than subscribing to the transport directly.
     private nonisolated let broadcaster: OVSDBMonitorBroadcaster
     /// The one task consuming the transport's notification events: it parses
     /// notifications into the broadcaster, and on a reconnect re-establishes the
     /// monitors and publishes their replies before the updates buffered behind
     /// them.
     ///
-    /// Behind a `Mutex` rather than in actor state because `monitorTableUpdates()`
-    /// is `nonisolated` and may be called before `connect()`: it has to be able
-    /// to start the pipeline synchronously, so the transport subscription exists
-    /// before the caller's next line starts a monitor.
-    private nonisolated let pipeline = Mutex(Pipeline())
-
-    private struct Pipeline {
-        var task: Task<Void, Never>?
-        /// Bumped per pipeline started, so a task that finishes after it has been
-        /// replaced cannot clear its successor's slot.
-        var generation = 0
-    }
+    /// Started by `connect()` and stopped by `disconnect()`, which is what keeps
+    /// it in ordinary actor state. Starting it lazily from `monitorTableUpdates()`
+    /// instead — that being `nonisolated` — would take a lock, and a lock held
+    /// across the transport subscription is a cooperative thread that can be
+    /// blocked; this package has learned that lesson before (see the note on
+    /// `deinit` in the testing section of CLAUDE.md). Nothing is missed by
+    /// deferring to `connect()`: a stream may be taken before it, but no monitor
+    /// notification can exist before there is a session to carry it.
+    private var pipelineTask: Task<Void, Never>?
+    /// Bumped per pipeline started, so that a task which unwinds *after* a
+    /// disconnect/reconnect cycle has replaced it cannot clear its successor's
+    /// handle or finish the streams the new one is feeding.
+    private var pipelineGeneration = 0
+    /// Set by `disconnect()` so a re-establishment already in flight cannot put a
+    /// monitor back on a connection that is going away.
+    ///
+    /// `disconnect()` waited for `pipelineTask` instead, which is a wait on
+    /// another task's progress — and one that a request parked on a dying session
+    /// can hold for its whole timeout. Nothing a caller asking to disconnect
+    /// should have to sit through, and the flag settles the same question without
+    /// a join.
+    private var isDisconnecting = false
 
     /// See `OVSDBSocketConnection.init(remotes:reconnect:leaderOnlyDatabase:…)`
     /// for what the cluster parameters mean.
@@ -102,6 +111,7 @@ public actor OVSDBConnection {
     }
 
     public func connect() async throws(OVNManagerError) {
+        isDisconnecting = false
         // Reopened before the transport is: a connect after a previous one
         // closed for good has to hand out live streams again, not the finished
         // ones a closed broadcaster gives.
@@ -118,35 +128,28 @@ public actor OVSDBConnection {
             throw error
         }
 
-        // Started even with no stream subscribed: this is also what re-creates
-        // the monitors after a reconnect, which a caller may well be relying on
-        // without reading their updates here.
+        // The pipeline of a previous connect ended with that connection's
+        // notification hub, so this one needs its own. Started after the session
+        // is up, which misses nothing: no monitor exists on a new session yet.
         startPipeline()
     }
 
     public func disconnect() async throws(OVNManagerError) {
-        // Cancelled up front so no re-establishment can start from here on, but
-        // deliberately not awaited yet: one already in flight is waiting on a
-        // monitor request, and NIO's future `get()` is not cancellation-aware,
-        // so only closing the transport below will free it.
-        let pipelineTask = takePipelineTask()
+        // Set before anything is awaited, so a re-establishment in flight stops
+        // rather than putting a monitor back on the session being torn down.
+        isDisconnecting = true
         pipelineTask?.cancel()
+        pipelineTask = nil
 
         // Cancel all active monitors
         for monitorId in monitors.keys {
             try? await client.cancelMonitor(monitorId: monitorId)
         }
-
-        try await client.disconnect()
-
-        // Now that the session is gone — and anything the pipeline had in flight
-        // has failed with it — waiting for it to unwind costs nothing, and it
-        // guarantees no monitor is re-registered behind the state cleared below.
-        await pipelineTask?.value
-        broadcaster.finishAll()
-
         monitors.removeAll()
         negotiatedMethod = nil
+
+        try await client.disconnect()
+        broadcaster.finishAll()
         logger.info("Disconnected from OVSDB")
     }
 
@@ -171,51 +174,47 @@ public actor OVSDBConnection {
 
     // MARK: - The monitor pipeline
 
-    /// Starts the one task that turns the transport's notification events into
-    /// this connection's monitor pipeline, unless it is already running.
+    /// Starts the task that turns the transport's notification events into this
+    /// connection's monitor pipeline, unless one is already running.
     ///
-    /// Synchronous, and it takes the transport subscription *inside* the lock,
-    /// before the task exists: a caller that takes a stream and then immediately
-    /// starts a monitor must not have that monitor's first notification arrive
-    /// with nothing subscribed to see it. (The lock the hub takes to register the
-    /// subscription is its own, so nesting them cannot deadlock.)
-    private nonisolated func startPipeline() {
-        pipeline.withLock { pipeline in
-            guard pipeline.task == nil else { return }
-            pipeline.generation += 1
-            let generation = pipeline.generation
-            let events = client.notificationEvents()
-            // `self` weakly, the broadcaster strongly: a connection nobody holds
-            // any more must not be kept alive by its own pipeline, but its
-            // consumers still have to be finished rather than left waiting.
-            pipeline.task = Task { [weak self, broadcaster] in
-                for await event in events {
-                    guard let self else { break }
-                    await self.consume(event)
-                }
-                // The transport's hub finished for good, or this connection was
-                // released: nothing more can reach these streams, and a
-                // subscription taken from here on has to come back finished.
-                broadcaster.finishAll()
-                self?.forgetPipeline(generation: generation)
+    /// The transport subscription is taken here, synchronously, before the task
+    /// exists: a caller that takes a stream and then immediately starts a monitor
+    /// must not have that monitor's first notification arrive with nothing
+    /// subscribed to see it.
+    private func startPipeline() {
+        guard pipelineTask == nil else { return }
+        pipelineGeneration += 1
+        let generation = pipelineGeneration
+        let events = client.notificationEvents()
+        // `self` weakly, the broadcaster strongly: a connection nobody holds any
+        // more must not be kept alive by its own pipeline, but its consumers
+        // still have to be finished rather than left waiting.
+        pipelineTask = Task { [weak self, broadcaster] in
+            for await event in events {
+                guard let self else { break }
+                await self.consume(event)
             }
+            guard let self else {
+                // The connection was released, so nothing can revive it and there
+                // is no state left to check this against.
+                broadcaster.finishAll()
+                return
+            }
+            await self.pipelineDidEnd(generation: generation)
         }
     }
 
-    /// Takes the running pipeline task out of its slot, so a later `connect()`
-    /// starts a fresh one whatever the caller does with this.
-    private nonisolated func takePipelineTask() -> Task<Void, Never>? {
-        return pipeline.withLock { pipeline in
-            defer { pipeline.task = nil }
-            return pipeline.task
-        }
-    }
-
-    private nonisolated func forgetPipeline(generation: Int) {
-        pipeline.withLock { pipeline in
-            guard pipeline.generation == generation else { return }
-            pipeline.task = nil
-        }
+    /// Retires a pipeline whose event stream has ended: the transport's hub
+    /// finished for good, so nothing more can reach these streams and a
+    /// subscription taken from here on has to come back finished.
+    ///
+    /// A no-op for a pipeline that has already been replaced — a disconnect and a
+    /// fresh `connect()` can both happen before a cancelled task gets to unwind,
+    /// and finishing the broadcaster then would kill the new pipeline's streams.
+    private func pipelineDidEnd(generation: Int) {
+        guard generation == pipelineGeneration else { return }
+        pipelineTask = nil
+        broadcaster.finishAll()
     }
 
     /// Handles one transport notification event.
@@ -270,15 +269,23 @@ public actor OVSDBConnection {
     /// place that sees both.
     private func reestablishMonitors() async {
         let existing = monitors
-        guard !existing.isEmpty else { return }
+        guard !existing.isEmpty, !isDisconnecting else { return }
         // The new session may be a different member of the cluster, which need
         // not implement the method the previous one did.
         negotiatedMethod = nil
         logger.info("Connection re-established; restarting \(existing.count) monitor(s)")
 
         for (monitorId, state) in existing {
+            if isDisconnecting { return }
             do {
                 let session = try await restartMonitor(monitorId, state: state)
+                guard !isDisconnecting else {
+                    // `disconnect()` ran while this request was in flight, and has
+                    // already emptied the monitor table; this registration must
+                    // not outlive it.
+                    monitors.removeValue(forKey: monitorId)
+                    return
+                }
                 logger.info(
                     """
                     Restarted monitor \(monitorId) on \(state.database) \
@@ -1106,12 +1113,10 @@ public actor OVSDBConnection {
     /// constrained to `Failure == any Error`, so a typed-failure stream cannot be
     /// built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {
-        // Subscribed before the pipeline is started, so nothing it publishes in
-        // between can be missed — and it is started here rather than only in
-        // `connect()` so a stream taken beforehand is subscribed to the transport
-        // from the moment it is created.
+        // Synchronous, so the subscription is in place by the time this returns
+        // and a monitor started on the caller's next line cannot out-run it. The
+        // pipeline feeding the broadcaster has been running since `init`.
         let events = broadcaster.subscribe()
-        startPipeline()
 
         return AsyncThrowingStream(
             bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
