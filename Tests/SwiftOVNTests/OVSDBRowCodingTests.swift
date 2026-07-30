@@ -128,6 +128,55 @@ struct OVSDBRowDecoderTests {
         #expect(logicalSwitch.acls == nil)
     }
 
+    /// The Northbound QoS table's `action` and `bandwidth` are
+    /// map<string,integer> — the one map shape no other model exercises, since
+    /// every other string-keyed map in the schema has string values.
+    @Test("A Northbound QoS row with integer-valued maps")
+    func northboundQoSWithIntegerValuedMaps() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "priority": .number(1000),
+            "direction": .string("from-lport"),
+            "match": .string("inport == \"lsp-1\""),
+            "action": wireMap([(.string("dscp"), .number(48))]),
+            "bandwidth": wireMap([
+                (.string("rate"), .number(10_000)),
+                (.string("burst"), .number(2_000)),
+            ]),
+            "external_ids": wireStringMap(["owner": "test"]),
+        ]
+
+        let qos = try OVSDBRowDecoder.decode(OVNQoS.self, from: row)
+
+        #expect(qos.uuid == uuidA)
+        #expect(qos.priority == 1000)
+        #expect(qos.direction == "from-lport")
+        #expect(qos.match == "inport == \"lsp-1\"")
+        #expect(qos.action == ["dscp": 48])
+        #expect(qos.bandwidth == ["rate": 10_000, "burst": 2_000])
+        #expect(qos.external_ids == ["owner": "test"])
+    }
+
+    /// `action` and `bandwidth` both have min 0, so a rule that sets neither
+    /// has them transmitted as empty maps — which decode to `[:]`, not nil
+    /// (only the empty *set* means "no value").
+    @Test("A Northbound QoS row with empty maps")
+    func northboundQoSWithEmptyMaps() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "priority": .number(0),
+            "direction": .string("to-lport"),
+            "match": .string("ip4.dst == 10.0.0.0/24"),
+            "action": wireMap([]),
+            "bandwidth": wireMap([]),
+        ]
+
+        let qos = try OVSDBRowDecoder.decode(OVNQoS.self, from: row)
+
+        #expect(qos.action == [:])
+        #expect(qos.bandwidth == [:])
+    }
+
     @Test("A Chassis with a non-optional string set")
     func chassisWithNonOptionalStringSet() throws {
         let row: OVSDBRow = [
@@ -652,6 +701,50 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.cidr == dhcp.cidr)
         #expect(decoded.options == dhcp.options)
         #expect(decoded.external_ids == dhcp.external_ids)
+    }
+
+    /// A string-keyed map with integer values: the keys stay strings (unlike
+    /// the integer-keyed `queues`/`flow_tables`) and the values stay numbers.
+    @Test("A Northbound QoS rule's integer-valued maps encode")
+    func northboundQoSIntegerValuedMapsEncode() throws {
+        let qos = OVNQoS(
+            priority: 1000,
+            direction: "from-lport",
+            match: "inport == \"lsp-1\"",
+            action: ["dscp": 48],
+            bandwidth: ["rate": 10_000]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: qos, hints: .ovn)
+
+        #expect(row["action"] == wireMap([(.string("dscp"), .number(48))]))
+        #expect(row["bandwidth"] == wireMap([(.string("rate"), .number(10_000))]))
+        #expect(row["priority"] == .number(1000))
+        #expect(row["direction"] == .string("from-lport"))
+        #expect(row["match"] == .string("inport == \"lsp-1\""))
+        #expect(row["_uuid"] == nil)
+    }
+
+    @Test("A Northbound QoS rule round trips")
+    func northboundQoSRoundTrip() throws {
+        let qos = OVNQoS(
+            priority: 200,
+            direction: "to-lport",
+            match: "outport == \"lsp-2\"",
+            action: ["dscp": 8, "mark": 3],
+            bandwidth: ["rate": 20_000, "burst": 5_000],
+            external_ids: ["owner": "test"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: qos, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNQoS.self, from: row)
+
+        #expect(decoded.priority == qos.priority)
+        #expect(decoded.direction == qos.direction)
+        #expect(decoded.match == qos.match)
+        #expect(decoded.action == qos.action)
+        #expect(decoded.bandwidth == qos.bandwidth)
+        #expect(decoded.external_ids == qos.external_ids)
     }
 
     @Test("QoS round trips")
