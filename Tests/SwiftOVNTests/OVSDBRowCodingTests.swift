@@ -105,6 +105,54 @@ struct OVSDBRowDecoderTests {
         #expect(port.addresses == ["dynamic", "unknown"])
     }
 
+    /// A container port as ovn-nbctl leaves it: `parent_name` plus the
+    /// `tag_request` it makes meaningful, and the `dynamic_addresses` northd
+    /// wrote back for `addresses: ["dynamic"]` — the one place the allocated
+    /// MAC/IP can be read.
+    @Test("A container Logical_Switch_Port with a dynamic address")
+    func containerLogicalSwitchPortWithDynamicAddress() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("lsp-container"),
+            "type": .string(""),
+            "parent_name": .string("lsp-vm"),
+            "tag_request": .number(42),
+            "tag": .number(42),
+            "addresses": .string("dynamic"),
+            "dynamic_addresses": .string("0a:00:00:00:00:07 10.0.0.7"),
+            "peer": emptySet,
+            "health_checks": emptySet,
+            "mirror_rules": wireUUID(uuidB),
+            "ha_chassis_group": emptySet,
+        ]
+
+        let port = try OVSDBRowDecoder.decode(OVNLogicalSwitchPort.self, from: row)
+
+        #expect(port.parent_name == "lsp-vm")
+        #expect(port.tag_request == 42)
+        #expect(port.addresses == ["dynamic"])
+        #expect(port.dynamic_addresses == "0a:00:00:00:00:07 10.0.0.7")
+        #expect(port.peer == nil)
+        #expect(port.health_checks == nil)
+        #expect(port.mirror_rules == [uuidB])
+        #expect(port.ha_chassis_group == nil)
+    }
+
+    /// A port pairing two switches carries the other port's *name* in `peer`,
+    /// so a UUID-shaped name must survive as a string.
+    @Test("A Logical_Switch_Port's peer decodes as a name")
+    func logicalSwitchPortPeerDecodesAsAName() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("lsp-pair-a"),
+            "peer": .string(uuidB),
+        ]
+
+        let port = try OVSDBRowDecoder.decode(OVNLogicalSwitchPort.self, from: row)
+
+        #expect(port.peer == uuidB)
+    }
+
     /// Every wire shape a reference-set column can arrive in: the empty set
     /// (which decodes to nil, not `[]`), a single element sent as the bare atom
     /// rather than a one-element set, and the tagged multi-element form.
@@ -380,6 +428,100 @@ struct OVSDBRowDecoderTests {
         #expect(route.external_ids == [:])
     }
 
+    /// A Port_Binding mid-live-migration: `chassis` still holds the source and
+    /// `requested_chassis` names the destination, with the multi-chassis
+    /// columns carrying the second binding and its tunnel.
+    @Test("A Port_Binding during live migration")
+    func portBindingDuringLiveMigration() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lsp-vm"),
+            "type": .string(""),
+            "datapath": wireUUID(uuidB),
+            "tunnel_key": .number(3),
+            "chassis": wireUUID(uuidB),
+            "requested_chassis": wireUUID(uuidC),
+            "additional_chassis": wireUUID(uuidC),
+            "requested_additional_chassis": wireSet([wireUUID(uuidC)]),
+            "encap": wireUUID(uuidA),
+            "additional_encap": wireSet([wireUUID(uuidB), wireUUID(uuidC)]),
+            "mac": .string("0a:00:00:00:00:03 10.0.0.3"),
+            "port_security": emptySet,
+            "nat_addresses": emptySet,
+            "virtual_parent": emptySet,
+            "mirror_port": emptySet,
+            "mirror_rules": emptySet,
+            "up": .boolean(true),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNPortBinding.self, from: row)
+
+        #expect(binding.chassis == uuidB)
+        #expect(binding.requested_chassis == uuidC)
+        #expect(binding.additional_chassis == [uuidC])
+        #expect(binding.requested_additional_chassis == [uuidC])
+        #expect(binding.encap == uuidA)
+        #expect(binding.additional_encap == [uuidB, uuidC])
+        #expect(binding.port_security == nil)
+        #expect(binding.nat_addresses == nil)
+        #expect(binding.virtual_parent == nil)
+        #expect(binding.mirror_port == nil)
+        #expect(binding.mirror_rules == nil)
+        #expect(binding.up == true)
+    }
+
+    /// A `virtual` port binding and an `l3gateway` one, which is where
+    /// `virtual_parent` and `nat_addresses` are actually populated.
+    @Test("A Port_Binding with virtual_parent and nat_addresses")
+    func portBindingWithVirtualParentAndNATAddresses() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_port": .string("lsp-vip"),
+            "type": .string("virtual"),
+            "datapath": wireUUID(uuidB),
+            "tunnel_key": .number(4),
+            "virtual_parent": .string("lsp-vm"),
+            "nat_addresses": wireSet([
+                .string("80:fa:5b:06:72:b7 158.36.44.22"),
+                .string("80:fa:5b:06:72:b7 158.36.44.24"),
+            ]),
+            "port_security": .string("0a:00:00:00:00:04 10.0.0.4"),
+        ]
+
+        let binding = try OVSDBRowDecoder.decode(OVNPortBinding.self, from: row)
+
+        #expect(binding.bindingType == "virtual")
+        #expect(binding.virtual_parent == "lsp-vm")
+        #expect(binding.nat_addresses == [
+            "80:fa:5b:06:72:b7 158.36.44.22",
+            "80:fa:5b:06:72:b7 158.36.44.24",
+        ])
+        #expect(binding.port_security == ["0a:00:00:00:00:04 10.0.0.4"])
+    }
+
+    @Test("A Logical_Flow with a description", arguments: [
+        (emptySet, nil),
+        (JSONValue.string("ingress ACL evaluation"), "ingress ACL evaluation"),
+    ] as [(JSONValue, String?)])
+    func logicalFlowWithDescription(wire: JSONValue, expected: String?) throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "logical_datapath": wireUUID(uuidB),
+            "logical_dp_group": emptySet,
+            "pipeline": .string("ingress"),
+            "table_id": .number(8),
+            "priority": .number(2000),
+            "match": .string("ip4 && tcp.dst == 80"),
+            "actions": .string("next;"),
+            "flow_desc": wire,
+        ]
+
+        let flow = try OVSDBRowDecoder.decode(OVNLogicalFlow.self, from: row)
+
+        #expect(flow.flow_desc == expected)
+        #expect(flow.table_id == 8)
+    }
+
     // MARK: Open_vSwitch
 
     @Test("An Interface with unset and bare scalars")
@@ -562,6 +704,342 @@ struct OVSDBRowEncoderTests {
         let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
 
         #expect(row["addresses"] == wireSet([.string("router"), .string(uuidC)]))
+    }
+
+    /// `parent_name` and `peer` are port *names*, so they stay strings even
+    /// when they look like UUIDs; `mirror_rules` and `health_checks` are
+    /// reference sets and become UUID atoms.
+    @Test("A Logical_Switch_Port's names stay strings and its reference sets become atoms")
+    func logicalSwitchPortNameAndReferenceColumnsEncode() throws {
+        let port = OVNLogicalSwitchPort(
+            name: "lsp-container",
+            tag_request: 42,
+            parent_name: uuidB,
+            peer: uuidC,
+            health_checks: [uuidA],
+            mirror_rules: [uuidB, uuidC],
+            ha_chassis_group: uuidA
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
+
+        #expect(row["parent_name"] == .string(uuidB))
+        #expect(row["peer"] == .string(uuidC))
+        #expect(row["health_checks"] == wireSet([wireUUID(uuidA)]))
+        #expect(row["mirror_rules"] == wireSet([wireUUID(uuidB), wireUUID(uuidC)]))
+        #expect(row["ha_chassis_group"] == wireUUID(uuidA))
+        #expect(row["tag_request"] == .number(42))
+        #expect(row["_uuid"] == nil)
+    }
+
+    @Test("A Logical_Switch_Port round trips")
+    func logicalSwitchPortRoundTrip() throws {
+        let port = OVNLogicalSwitchPort(
+            name: "lsp-1",
+            addresses: ["dynamic"],
+            port_security: ["0a:00:00:00:00:01 10.0.0.1"],
+            tag_request: 7,
+            external_ids: ["owner": "test"],
+            parent_name: "lsp-vm",
+            dynamic_addresses: "0a:00:00:00:00:01 10.0.0.1",
+            peer: "lsp-pair-b",
+            health_checks: [uuidA],
+            mirror_rules: [uuidB],
+            ha_chassis_group: uuidC
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalSwitchPort.self, from: row)
+
+        #expect(decoded.name == port.name)
+        #expect(decoded.addresses == port.addresses)
+        #expect(decoded.port_security == port.port_security)
+        #expect(decoded.tag_request == port.tag_request)
+        #expect(decoded.parent_name == port.parent_name)
+        #expect(decoded.dynamic_addresses == port.dynamic_addresses)
+        #expect(decoded.peer == port.peer)
+        #expect(decoded.health_checks == port.health_checks)
+        #expect(decoded.mirror_rules == port.mirror_rules)
+        #expect(decoded.ha_chassis_group == port.ha_chassis_group)
+        #expect(decoded.external_ids == port.external_ids)
+    }
+
+    /// `gateway_port` is a `Logical_Router_Port` reference, while `match` and
+    /// `priority` are a plain expression and a number.
+    @Test("A NAT rule's gateway_port encodes as a UUID atom")
+    func natGatewayPortEncodesUUIDAtom() throws {
+        let nat = OVNNAT(
+            natType: "snat",
+            external_ip: "50.1.1.20",
+            logical_ip: "10.1.1.0/24",
+            allowed_ext_ips: uuidA,
+            gateway_port: uuidB,
+            match: "ip4.dst == 50.0.0.0/24",
+            priority: 100
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: nat, hints: .ovn)
+
+        #expect(row["gateway_port"] == wireUUID(uuidB))
+        #expect(row["allowed_ext_ips"] == wireUUID(uuidA))
+        #expect(row["match"] == .string("ip4.dst == 50.0.0.0/24"))
+        #expect(row["priority"] == .number(100))
+        #expect(row["type"] == .string("snat"))
+        #expect(row["_uuid"] == nil)
+    }
+
+    @Test("A NAT rule round trips")
+    func natRoundTrip() throws {
+        let nat = OVNNAT(
+            natType: "dnat_and_snat",
+            external_ip: "192.0.2.10",
+            logical_ip: "10.0.0.10",
+            logical_port: "lsp-vm",
+            options: ["stateless": "true"],
+            external_ids: ["owner": "test"],
+            gateway_port: uuidB,
+            match: "inport == \"lrp0\"",
+            priority: 32767
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: nat, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNNAT.self, from: row)
+
+        #expect(decoded.natType == nat.natType)
+        #expect(decoded.external_ip == nat.external_ip)
+        #expect(decoded.logical_ip == nat.logical_ip)
+        #expect(decoded.logical_port == nat.logical_port)
+        #expect(decoded.gateway_port == nat.gateway_port)
+        #expect(decoded.match == nat.match)
+        #expect(decoded.priority == nat.priority)
+        #expect(decoded.options == nat.options)
+        #expect(decoded.external_ids == nat.external_ids)
+    }
+
+    /// A NAT rule without a `match` omits both it and `priority`, which is only
+    /// consulted when a match is set.
+    @Test("A NAT rule without a match omits priority")
+    func natWithoutMatchOmitsPriority() throws {
+        let row = try OVSDBRowEncoder.makeRow(
+            from: OVNNAT(natType: "snat", external_ip: "192.0.2.1", logical_ip: "10.0.0.0/24"),
+            hints: .ovn
+        )
+
+        #expect(row["match"] == nil)
+        #expect(row["priority"] == nil)
+        #expect(row["gateway_port"] == nil)
+    }
+
+    /// `tier` and `label` are integer columns — they must stay numbers — and
+    /// the `sample_*`/`network_function_group` columns are references.
+    @Test("An ACL's tier, label and sample references encode")
+    func aclTierLabelAndSampleReferencesEncode() throws {
+        let acl = OVNACL(
+            priority: 1000,
+            direction: "from-lport",
+            match: "ip4.src == 10.0.0.0/24",
+            action: "allow-related",
+            log: true,
+            tier: 2,
+            label: 4_294_967_295,
+            network_function_group: uuidA,
+            sample_new: uuidB,
+            sample_est: uuidC,
+            options: ["apply-after-lb": "true"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: acl, hints: .ovn)
+
+        #expect(row["tier"] == .number(2))
+        #expect(row["label"] == .number(4_294_967_295))
+        #expect(row["network_function_group"] == wireUUID(uuidA))
+        #expect(row["sample_new"] == wireUUID(uuidB))
+        #expect(row["sample_est"] == wireUUID(uuidC))
+        #expect(row["options"] == wireMap([(.string("apply-after-lb"), .string("true"))]))
+        #expect(row["log"] == .boolean(true))
+        #expect(row["_uuid"] == nil)
+    }
+
+    @Test("An ACL round trips")
+    func aclRoundTrip() throws {
+        let acl = OVNACL(
+            priority: 2000,
+            direction: "to-lport",
+            match: "outport == @pg-web && ip4",
+            action: "drop",
+            log: true,
+            severity: "info",
+            meter: "acl-log-meter",
+            name: "web-drop",
+            external_ids: ["owner": "test"],
+            tier: 1,
+            label: 42,
+            options: ["log-related": "true"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: acl, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNACL.self, from: row)
+
+        #expect(decoded.priority == acl.priority)
+        #expect(decoded.direction == acl.direction)
+        #expect(decoded.match == acl.match)
+        #expect(decoded.action == acl.action)
+        #expect(decoded.log == acl.log)
+        #expect(decoded.severity == acl.severity)
+        #expect(decoded.meter == acl.meter)
+        #expect(decoded.name == acl.name)
+        #expect(decoded.tier == acl.tier)
+        #expect(decoded.label == acl.label)
+        #expect(decoded.options == acl.options)
+        #expect(decoded.external_ids == acl.external_ids)
+    }
+
+    /// An ACL from a server whose schema predates `tier`/`label` omits those
+    /// columns entirely, so they must decode as absent rather than failing.
+    @Test("An ACL without tier or label decodes")
+    func aclWithoutTierOrLabelDecodes() throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "priority": .number(100),
+            "direction": .string("from-lport"),
+            "match": .string("ip"),
+            "action": .string("allow"),
+            "log": .boolean(false),
+        ]
+
+        let acl = try OVSDBRowDecoder.decode(OVNACL.self, from: row)
+
+        #expect(acl.tier == nil)
+        #expect(acl.label == nil)
+        #expect(acl.options == nil)
+        #expect(acl.sample_new == nil)
+    }
+
+    /// `ipv6_prefix` is a plain string set and `status` a northd-written map;
+    /// `dhcp_relay` is the one reference among the three.
+    @Test("A logical router port's prefix, status and dhcp_relay encode")
+    func logicalRouterPortPrefixStatusAndDHCPRelayEncode() throws {
+        let port = OVNLogicalRouterPort(
+            name: "lrp-gw",
+            mac: "0a:58:0a:00:00:01",
+            networks: ["10.0.0.1/24"],
+            ipv6_prefix: ["fd12:3456:789a::/64"],
+            dhcp_relay: uuidB,
+            status: ["hosting-chassis": "hv1"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
+
+        #expect(row["ipv6_prefix"] == wireSet([.string("fd12:3456:789a::/64")]))
+        #expect(row["dhcp_relay"] == wireUUID(uuidB))
+        #expect(row["status"] == wireStringMap(["hosting-chassis": "hv1"]))
+    }
+
+    /// The observability read this exists for: a distributed gateway port's
+    /// `status:hosting-chassis` names the chassis currently hosting it, and an
+    /// unbound port carries the column as an empty map.
+    @Test("A logical router port's hosting chassis decodes", arguments: [
+        (wireStringMap(["hosting-chassis": "hv2"]), ["hosting-chassis": "hv2"]),
+        (wireMap([]), [:]),
+    ] as [(JSONValue, [String: String]?)])
+    func logicalRouterPortHostingChassisDecodes(
+        wire: JSONValue,
+        expected: [String: String]?
+    ) throws {
+        let row: OVSDBRow = [
+            "_uuid": wireUUID(uuidA),
+            "name": .string("lrp-gw"),
+            "mac": .string("0a:58:0a:00:00:01"),
+            "networks": .string("10.0.0.1/24"),
+            "ipv6_prefix": emptySet,
+            "dhcp_relay": emptySet,
+            "status": wire,
+        ]
+
+        let port = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
+
+        #expect(port.status == expected)
+        #expect(port.ipv6_prefix == nil)
+        #expect(port.dhcp_relay == nil)
+    }
+
+    @Test("A logical router port round trips with its prefix and status")
+    func logicalRouterPortRoundTripWithPrefixAndStatus() throws {
+        let port = OVNLogicalRouterPort(
+            name: "lrp-gw",
+            mac: "0a:58:0a:00:00:01",
+            networks: ["10.0.0.1/24"],
+            external_ids: ["owner": "test"],
+            ipv6_prefix: ["fd12:3456:789a::/64", "fd12:3456:789b::/64"],
+            dhcp_relay: uuidC,
+            status: ["hosting-chassis": "hv1"]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: port, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouterPort.self, from: row)
+
+        #expect(decoded.ipv6_prefix == port.ipv6_prefix)
+        #expect(decoded.dhcp_relay == port.dhcp_relay)
+        #expect(decoded.status == port.status)
+        #expect(decoded.external_ids == port.external_ids)
+    }
+
+    @Test("A logical switch's copp and group columns encode as UUID atoms")
+    func logicalSwitchCoppAndGroupColumnsEncode() throws {
+        let logicalSwitch = OVNLogicalSwitch(
+            name: "ls-1",
+            loadBalancer: [uuidA],
+            loadBalancerGroup: [uuidB],
+            copp: uuidC,
+            forwardingGroups: [uuidA, uuidB]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
+
+        #expect(row["load_balancer"] == wireSet([wireUUID(uuidA)]))
+        #expect(row["load_balancer_group"] == wireSet([wireUUID(uuidB)]))
+        #expect(row["copp"] == wireUUID(uuidC))
+        #expect(row["forwarding_groups"] == wireSet([wireUUID(uuidA), wireUUID(uuidB)]))
+    }
+
+    @Test("A logical switch round trips with its copp and group columns")
+    func logicalSwitchRoundTripWithCoppAndGroupColumns() throws {
+        let logicalSwitch = OVNLogicalSwitch(
+            name: "ls-1",
+            other_config: ["subnet": "10.0.0.0/24"],
+            external_ids: ["owner": "test"],
+            loadBalancerGroup: [uuidB],
+            copp: uuidC,
+            forwardingGroups: [uuidA]
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: logicalSwitch, hints: .ovn)
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalSwitch.self, from: row)
+
+        #expect(decoded.loadBalancerGroup == logicalSwitch.loadBalancerGroup)
+        #expect(decoded.copp == logicalSwitch.copp)
+        #expect(decoded.forwardingGroups == logicalSwitch.forwardingGroups)
+        #expect(decoded.other_config == logicalSwitch.other_config)
+    }
+
+    @Test("A logical router round trips with its copp and load balancer group")
+    func logicalRouterRoundTripWithCoppAndLoadBalancerGroup() throws {
+        let router = OVNLogicalRouter(
+            name: "lr-1",
+            options: ["chassis": "hv1"],
+            external_ids: ["owner": "test"],
+            load_balancer_group: [uuidA, uuidB],
+            copp: uuidC
+        )
+
+        let row = try OVSDBRowEncoder.makeRow(from: router, hints: .ovn)
+        #expect(row["load_balancer_group"] == wireSet([wireUUID(uuidA), wireUUID(uuidB)]))
+        #expect(row["copp"] == wireUUID(uuidC))
+        let decoded = try OVSDBRowDecoder.decode(OVNLogicalRouter.self, from: row)
+
+        #expect(decoded.load_balancer_group == router.load_balancer_group)
+        #expect(decoded.copp == router.copp)
+        #expect(decoded.options == router.options)
     }
 
     @Test("An integer-keyed, UUID-valued map encodes")
