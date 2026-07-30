@@ -7,10 +7,23 @@ import NIO
 import Logging
 
 public actor OVSDBConnection {
+    /// What this connection knows about one of its monitors: the method it was
+    /// established with — which decides how its notifications are shaped and
+    /// whether its conditions can be changed — and how far its updates have been
+    /// followed.
+    private struct MonitorState {
+        var method: OVSDBMonitorMethod
+        var lastTransactionId: String?
+    }
+
     private let client: JSONRPCClient
     private let logger: Logger
-    private var activeMonitors: Set<String> = []
-    
+    private var monitors: [String: MonitorState] = [:]
+    /// The most capable monitor method this server has accepted, so later
+    /// monitors do not repeat the negotiation. Cleared on disconnect: a
+    /// reconnect may land on a different member of a clustered database.
+    private var negotiatedMethod: OVSDBMonitorMethod?
+
     public init(endpoint: OVSDBEndpoint, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.client = JSONRPCClient(
             endpoint: endpoint,
@@ -22,6 +35,13 @@ public actor OVSDBConnection {
 
     public init(socketPath: String, eventLoopGroup: EventLoopGroup? = nil, logger: Logger? = nil) {
         self.init(endpoint: .unix(path: socketPath), eventLoopGroup: eventLoopGroup, logger: logger)
+    }
+
+    /// Runs the connection over a caller-supplied transport (e.g. a mock in
+    /// tests), as `JSONRPCClient.init(transport:)` does.
+    public init(transport: any OVSDBTransport, logger: Logger? = nil) {
+        self.client = JSONRPCClient(transport: transport, logger: logger)
+        self.logger = logger ?? Logger(label: "ovn-manager.ovsdb-connection")
     }
     
     public func connect() async throws(OVNManagerError) {
@@ -39,11 +59,11 @@ public actor OVSDBConnection {
 
     public func disconnect() async throws(OVNManagerError) {
         // Cancel all active monitors
-        let monitors = activeMonitors
-        for monitorId in monitors {
+        for monitorId in monitors.keys {
             try? await client.cancelMonitor(monitorId: monitorId)
         }
-        activeMonitors.removeAll()
+        monitors.removeAll()
+        negotiatedMethod = nil
 
         try await client.disconnect()
         logger.info("Disconnected from OVSDB")
@@ -433,31 +453,256 @@ public actor OVSDBConnection {
     ) async throws(OVNManagerError) -> (monitorId: String, initialUpdates: [OVSDBUpdate]) {
         let id = monitorId ?? UUID().uuidString
 
-        let initialState = try await client.monitor(
+        let session = try await startMonitor(
+            .monitor,
             database: database,
             monitorId: id,
-            requests: tables
+            tables: tables,
+            since: nil
         )
 
-        activeMonitors.insert(id)
+        monitors[id] = MonitorState(method: .monitor, lastTransactionId: nil)
 
-        let initialUpdates = Self.parseTableUpdates(initialState)
+        logger.info("Started monitoring database \(database) with ID: \(id) (\(session.initialUpdates.count) initial rows)")
 
-        logger.info("Started monitoring database \(database) with ID: \(id) (\(initialUpdates.count) initial rows)")
-
-        return (monitorId: id, initialUpdates: initialUpdates)
+        return (monitorId: id, initialUpdates: session.initialUpdates)
     }
-    
+
+    /// Starts a monitor with the most capable method the server supports,
+    /// preferring `monitor_cond_since` — what every production OVN client uses —
+    /// then `monitor_cond`, then RFC 7047 `monitor`.
+    ///
+    /// `since` is a transaction id a previous session ended on (from an earlier
+    /// session's `lastTransactionId`, or from `lastTransactionId(forMonitor:)`).
+    /// When the server can resume from it the returned session's `resumed` is
+    /// true and `initialUpdates` holds only what changed since — the whole point
+    /// of the method, because the alternative on a large Southbound database is
+    /// re-downloading all of it. When `resumed` is false the updates are a
+    /// complete snapshot and any row state carried across the reconnect must be
+    /// discarded, not merged.
+    ///
+    /// The fallback is not silent about filtering: plain `monitor` cannot
+    /// evaluate a `where` condition, so if the server supports neither
+    /// conditional method while any request carries conditions, this throws
+    /// rather than start a monitor that would deliver every row as though it
+    /// matched. Requests without conditions fall back happily.
+    ///
+    /// Which method was used decides how the changes are shaped: `.monitor`
+    /// updates carry `old`/`new`, the conditional ones carry a `kind` and, for a
+    /// modify, a `diff` (see `OVSDBUpdate`). Feature detection happens once per
+    /// connection; later monitors reuse the method that worked.
+    ///
+    /// To observe subsequent changes without missing any, create the
+    /// `monitorTableUpdates()` stream *before* calling this method.
+    public func startConditionalMonitoring(
+        database: String,
+        tables: [String: OVSDBMonitorRequest],
+        monitorId: String? = nil,
+        since lastTransactionId: String? = nil
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession {
+        let id = monitorId ?? UUID().uuidString
+        let isFiltered = Self.carryConditions(tables)
+        var method = negotiatedMethod ?? .monitorCondSince
+
+        // A server already known to support neither conditional method: nothing
+        // to attempt, and nothing registered yet to unregister.
+        if isFiltered, method == .monitor {
+            throw Self.conditionsUnsupported(database: database)
+        }
+
+        while true {
+            // Registered *before* the request goes out. ovsdb-server can put the
+            // first `update3` on the wire immediately behind its reply, and the
+            // read loop hands that notification to the update stream while this
+            // method is still suspended — so a monitor registered afterwards
+            // would have that notification's transaction id recorded against a
+            // monitor that did not exist yet, and lose the newest resume point.
+            // A rejected attempt sends no notifications, so resetting the
+            // transaction id per attempt cannot discard one.
+            monitors[id] = MonitorState(method: method, lastTransactionId: nil)
+
+            do {
+                let session = try await startMonitor(
+                    method,
+                    database: database,
+                    monitorId: id,
+                    tables: tables,
+                    since: lastTransactionId
+                )
+
+                negotiatedMethod = method
+                // Only if no `update3` has already reported a newer one: the
+                // reply's id is the older of the two.
+                if monitors[id]?.lastTransactionId == nil {
+                    monitors[id]?.lastTransactionId = session.lastTransactionId
+                }
+
+                logger.info(
+                    """
+                    Started monitoring database \(database) with ID: \(id) via \(method) \
+                    (\(session.initialUpdates.count) rows, \
+                    \(session.resumed ? "resumed from \(lastTransactionId ?? "?")" : "full snapshot"))
+                    """
+                )
+                return session
+            } catch {
+                // The monitor never started, so it must not be left registered —
+                // `disconnect()` would try to cancel it.
+                guard error.indicatesUnknownMethod, let next = method.fallback else {
+                    monitors.removeValue(forKey: id)
+                    throw error
+                }
+                if isFiltered, next == .monitor {
+                    monitors.removeValue(forKey: id)
+                    throw Self.conditionsUnsupported(database: database)
+                }
+                logger.info("Server does not implement \(method); falling back to \(next)")
+                method = next
+            }
+        }
+    }
+
+    /// Issues one monitor request with the given method and parses its reply.
+    private func startMonitor(
+        _ method: OVSDBMonitorMethod,
+        database: String,
+        monitorId: String,
+        tables: [String: OVSDBMonitorRequest],
+        since lastTransactionId: String?
+    ) async throws(OVNManagerError) -> OVSDBMonitorSession {
+        switch method {
+        case .monitorCondSince:
+            let reply = try await client.monitorCondSince(
+                database: database,
+                monitorId: monitorId,
+                requests: tables,
+                since: lastTransactionId ?? OVSDBMonitorMethod.initialTransactionId
+            )
+            return OVSDBMonitorSession(
+                monitorId: monitorId,
+                method: method,
+                resumed: reply.found,
+                lastTransactionId: reply.lastTransactionId,
+                initialUpdates: Self.parseTableUpdates(reply.tableUpdates, method: method, isReply: true)
+            )
+        case .monitorCond:
+            let tableUpdates = try await client.monitorCond(
+                database: database,
+                monitorId: monitorId,
+                requests: tables
+            )
+            return OVSDBMonitorSession(
+                monitorId: monitorId,
+                method: method,
+                initialUpdates: Self.parseTableUpdates(tableUpdates, method: method, isReply: true)
+            )
+        case .monitor:
+            // `where` has to come off the requests, not just be ignored:
+            // ovsdb-server rejects the whole `monitor` request over an
+            // unexpected member, even an empty one.
+            let tableUpdates = try await client.monitor(
+                database: database,
+                monitorId: monitorId,
+                requests: tables.mapValues { $0.droppingConditions() }
+            )
+            return OVSDBMonitorSession(
+                monitorId: monitorId,
+                method: method,
+                initialUpdates: Self.parseTableUpdates(tableUpdates, method: method, isReply: true)
+            )
+        }
+    }
+
+    /// Replaces the `where` conditions of a running conditional monitor
+    /// (`monitor_cond_change`). Rows that newly match arrive as inserts and rows
+    /// that stopped matching as deletes, without the resynchronization that
+    /// cancelling the monitor and starting another would cost.
+    ///
+    /// A table left out of `conditions` keeps the conditions it has; passing an
+    /// empty list for a table makes it match every row again. Throws if the
+    /// monitor is unknown to this connection, or was established with plain
+    /// `monitor`, which has no conditions to change.
+    public func updateMonitorConditions(
+        monitorId: String,
+        conditions: [String: [OVSDBCondition]]
+    ) async throws(OVNManagerError) {
+        guard let state = monitors[monitorId] else {
+            throw OVNManagerError.operationFailed("No monitor with ID \(monitorId) on this connection")
+        }
+        guard state.method.usesRowUpdate2 else {
+            throw OVNManagerError.operationFailed(
+                """
+                Monitor \(monitorId) was established with plain 'monitor', which has no \
+                conditions to change; it has to be restarted with startConditionalMonitoring \
+                against a server that implements monitor_cond.
+                """
+            )
+        }
+
+        try await client.monitorCondChange(monitorId: monitorId, conditions: conditions)
+
+        logger.info("Changed conditions of monitor \(monitorId) on \(conditions.count) table(s)")
+    }
+
+    /// The method a monitor on this connection was established with, or nil if
+    /// this connection has no such monitor.
+    public func monitorMethod(forMonitor monitorId: String) -> OVSDBMonitorMethod? {
+        return monitors[monitorId]?.method
+    }
+
+    /// The transaction id to resume a `monitor_cond_since` monitor from, as of
+    /// the last batch this connection *delivered* to `monitorTableUpdates()`.
+    /// Nil for a monitor established with `monitor_cond` or `monitor`, neither of
+    /// which reports transaction ids.
+    ///
+    /// This tracks what was handed to the stream, not what a consumer finished
+    /// with, and with several concurrent streams it follows whichever is furthest
+    /// along. A consumer whose processing can fail — and which therefore must not
+    /// resume past a batch it did not finish — should keep the
+    /// `lastTransactionId` of the batch it last processed instead.
+    public func lastTransactionId(forMonitor monitorId: String) -> String? {
+        return monitors[monitorId]?.lastTransactionId
+    }
+
+    /// Records the transaction id an `update3` reported for a monitor. Called by
+    /// `monitorTableUpdates()` as it delivers each batch.
+    func record(transactionId: String, forMonitor monitorId: String) {
+        monitors[monitorId]?.lastTransactionId = transactionId
+    }
+
     public func stopMonitoring(monitorId: String) async throws(OVNManagerError) {
         try await client.cancelMonitor(monitorId: monitorId)
 
-        activeMonitors.remove(monitorId)
+        monitors.removeValue(forKey: monitorId)
 
         logger.info("Stopped monitoring with ID: \(monitorId)")
     }
-    
+
+    /// Whether any of these table requests asks the server to filter rows, and
+    /// so cannot be served by plain `monitor`.
+    private static func carryConditions(_ tables: [String: OVSDBMonitorRequest]) -> Bool {
+        return tables.values.contains { !($0.whereConditions?.isEmpty ?? true) }
+    }
+
+    private static func conditionsUnsupported(database: String) -> OVNManagerError {
+        return .operationFailed(
+            """
+            Cannot monitor \(database) conditionally: this server implements neither monitor_cond \
+            nor monitor_cond_since, so the requested 'where' conditions cannot be evaluated. \
+            Monitoring with plain 'monitor' instead would deliver every row of the requested \
+            tables as if it matched.
+            """
+        )
+    }
+
     /// Streams row changes from all monitors on this connection, optionally
     /// filtered to a single monitor ID.
+    ///
+    /// Changes from a conditional monitor are included, one row at a time like
+    /// the rest — but a `modify` from one reports its changed columns in `diff`
+    /// with `old` and `new` nil (see `OVSDBUpdate`), and the transaction id
+    /// needed to resume the monitor is not per-row and so is not here. Use
+    /// `monitorTableUpdates()` for either.
     ///
     /// Create the stream *before* calling `startMonitoring` so no update is
     /// missed; updates are buffered while the consumer is between iterations.
@@ -474,17 +719,14 @@ public actor OVSDBConnection {
     /// is constrained to `Failure == any Error`, so a typed-failure stream
     /// cannot be built. Match on `OVNManagerError` in the `catch`.
     nonisolated public func monitorUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBUpdate, Error> {
-        let clientStream = client.monitorUpdates()
+        let batches = monitorTableUpdates(monitorId: monitorId)
         return AsyncThrowingStream(
             bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
         ) { continuation in
             let task = Task {
                 do {
-                    for try await (id, tableUpdates) in clientStream {
-                        if let monitorId, monitorId != id {
-                            continue
-                        }
-                        for update in Self.parseTableUpdates(tableUpdates) {
+                    for try await batch in batches {
+                        for update in batch.updates {
                             if case .dropped = continuation.yield(update) {
                                 continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
                                 return
@@ -504,9 +746,97 @@ public actor OVSDBConnection {
         }
     }
 
-    /// Parses an RFC 7047 table-updates object
+    /// Streams row changes a notification at a time, keeping the rows of one
+    /// OVSDB transaction together and carrying the transaction id to resume a
+    /// `monitor_cond_since` monitor from.
+    ///
+    /// This is the stream to use with `startConditionalMonitoring`: `update3`'s
+    /// transaction id has nowhere to go in a per-row element, and it is only a
+    /// valid resume point once every update in the batch has been processed.
+    /// `monitorUpdates()` flattens these batches for callers that do not need
+    /// either.
+    ///
+    /// The rules are `monitorUpdates()`': create the stream *before* starting the
+    /// monitor so nothing is missed, filter to one monitor with `monitorId`, and
+    /// a consumer that falls further behind than
+    /// `OVSDBSocketConnection.notificationBufferSize` gets
+    /// `OVNManagerError.notificationsDropped` rather than driving the process out
+    /// of memory. On that error the monitor has to be restarted — though with
+    /// `monitor_cond_since` and the last transaction id this consumer processed,
+    /// restarting no longer means re-downloading the database.
+    ///
+    /// Everything this stream can fail with is an `OVNManagerError`, but the
+    /// failure type stays `any Error`: every `AsyncThrowingStream` initializer is
+    /// constrained to `Failure == any Error`, so a typed-failure stream cannot be
+    /// built. Match on `OVNManagerError` in the `catch`.
+    nonisolated public func monitorTableUpdates(monitorId: String? = nil) -> AsyncThrowingStream<OVSDBTableUpdates, Error> {
+        let notifications = client.monitorNotifications()
+        return AsyncThrowingStream(
+            bufferingPolicy: .bufferingOldest(OVSDBSocketConnection.notificationBufferSize)
+        ) { continuation in
+            let task = Task {
+                do {
+                    for try await notification in notifications {
+                        if let monitorId, monitorId != notification.monitorId {
+                            continue
+                        }
+
+                        let batch = OVSDBTableUpdates(
+                            monitorId: notification.monitorId,
+                            method: notification.method,
+                            lastTransactionId: notification.lastTransactionId,
+                            updates: Self.parseTableUpdates(
+                                notification.tableUpdates,
+                                method: notification.method
+                            )
+                        )
+
+                        // Recorded before the yield, so that the connection's
+                        // idea of where the monitor has got to never runs ahead
+                        // of what it handed out.
+                        if let transactionId = notification.lastTransactionId {
+                            await self.record(transactionId: transactionId, forMonitor: notification.monitorId)
+                        }
+
+                        if case .dropped = continuation.yield(batch) {
+                            continuation.finish(throwing: OVNManagerError.notificationsDropped(count: 1))
+                            return
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: OVNManagerError.wrapping(error) {
+                        .connectionFailed("Monitor stream failed: \($0)")
+                    })
+                }
+            }
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    /// Parses a monitor reply or notification's row payload, in whichever of the
+    /// two forms `method` uses.
+    ///
+    /// `isReply` marks the rows of a monitor's *reply* as `.initial`: they
+    /// describe rows that already existed rather than changes. `<table-updates2>`
+    /// says so itself, but RFC 7047's `<table-updates>` makes an initial row
+    /// look exactly like an insert, so the caller has to supply what the wire
+    /// does not carry.
+    static func parseTableUpdates(
+        _ value: JSONValue,
+        method: OVSDBMonitorMethod,
+        isReply: Bool = false
+    ) -> [OVSDBUpdate] {
+        return method.usesRowUpdate2
+            ? parseTableUpdates2(value)
+            : parseTableUpdates(value, areInitialRows: isReply)
+    }
+
+    /// Parses an RFC 7047 §4.1.6 table-updates object
     /// (`{table: {row-uuid: {"old": ..., "new": ...}}}`) into row updates.
-    static func parseTableUpdates(_ value: JSONValue) -> [OVSDBUpdate] {
+    static func parseTableUpdates(_ value: JSONValue, areInitialRows: Bool = false) -> [OVSDBUpdate] {
         guard case .object(let tables) = value else {
             return []
         }
@@ -516,17 +846,75 @@ public actor OVSDBConnection {
             guard case .object(let rows) = tableValue else { continue }
             for (rowUUID, rowValue) in rows {
                 guard case .object(let rowUpdate) = rowValue else { continue }
-                let old = rowUpdate["old"].flatMap { value -> OVSDBRow? in
-                    if case .object(let obj) = value { return obj }
-                    return nil
-                }
-                let new = rowUpdate["new"].flatMap { value -> OVSDBRow? in
-                    if case .object(let obj) = value { return obj }
-                    return nil
-                }
-                updates.append(OVSDBUpdate(table: tableName, uuid: rowUUID, old: old, new: new))
+                let old = row(rowUpdate["old"])
+                let new = row(rowUpdate["new"])
+                let kind = areInitialRows && old == nil && new != nil
+                    ? OVSDBUpdate.Kind.initial
+                    : OVSDBUpdate.kind(old: old, new: new)
+                updates.append(
+                    OVSDBUpdate(table: tableName, uuid: rowUUID, kind: kind, old: old, new: new)
+                )
             }
         }
         return updates
+    }
+
+    /// Parses an ovsdb-server(7) table-updates2 object
+    /// (`{table: {row-uuid: <row-update2>}}`), the form `monitor_cond` and
+    /// `monitor_cond_since` replies and their `update2`/`update3` notifications
+    /// take.
+    ///
+    /// Each row update names its change instead of pairing `old` with `new`, and
+    /// a `modify` carries only the changed columns — kept as `diff` rather than
+    /// turned into a row this layer cannot reconstruct (see `OVSDBUpdate`).
+    static func parseTableUpdates2(_ value: JSONValue) -> [OVSDBUpdate] {
+        guard case .object(let tables) = value else {
+            return []
+        }
+
+        var updates: [OVSDBUpdate] = []
+        for (tableName, tableValue) in tables {
+            guard case .object(let rows) = tableValue else { continue }
+            for (rowUUID, rowValue) in rows {
+                guard case .object(let rowUpdate) = rowValue,
+                      let update = parseRowUpdate2(rowUpdate, table: tableName, uuid: rowUUID) else {
+                    continue
+                }
+                updates.append(update)
+            }
+        }
+        return updates
+    }
+
+    /// Parses one `<row-update2>`, which holds exactly one of `initial`,
+    /// `insert`, `modify` and `delete`. Returns nil for an object holding none of
+    /// them, which is not a row update at all.
+    private static func parseRowUpdate2(
+        _ rowUpdate: [String: JSONValue],
+        table: String,
+        uuid: String
+    ) -> OVSDBUpdate? {
+        if let value = rowUpdate["initial"] {
+            return OVSDBUpdate(table: table, uuid: uuid, kind: .initial, new: row(value))
+        }
+        if let value = rowUpdate["insert"] {
+            return OVSDBUpdate(table: table, uuid: uuid, kind: .insert, new: row(value))
+        }
+        if let value = rowUpdate["modify"] {
+            return OVSDBUpdate(table: table, uuid: uuid, kind: .modify, diff: row(value))
+        }
+        if let value = rowUpdate["delete"] {
+            // ovsdb-server sends `"delete": null` — the client is assumed to have
+            // the row already — so `old` is usually nil here. A server that does
+            // send the row has it kept.
+            return OVSDBUpdate(table: table, uuid: uuid, kind: .delete, old: row(value))
+        }
+        return nil
+    }
+
+    /// The value as a row, or nil if it is not a JSON object (`null`, most often).
+    private static func row(_ value: JSONValue?) -> OVSDBRow? {
+        guard case .object(let row)? = value else { return nil }
+        return row
     }
 }

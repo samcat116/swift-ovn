@@ -138,6 +138,69 @@ growing the buffer until the process runs out of memory. Work that can lag
 behind the stream should hand updates to its own queue, and re-monitor when a
 drop is reported.
 
+### Conditional Monitoring and Resume
+
+`startMonitoring` uses RFC 7047 `monitor`, which sends every row of every
+monitored table and has no way to resume: a reconnect, or a dropped-notification
+recovery, means downloading the database again. `startConditionalMonitoring` uses
+what production OVN clients use instead — `monitor_cond_since`, falling back to
+`monitor_cond` and then `monitor` depending on the server's age — so the server
+filters rows before sending them, and a reconnect asks only for what changed:
+
+```swift
+// Only the flows of one datapath, and only their match and actions.
+let session = try await SwiftOVN.startConditionalMonitoring(
+    tables: [
+        "Logical_Flow": OVSDBMonitorRequest(
+            columns: ["match", "actions"],
+            whereConditions: [
+                OVSDBCondition(column: "logical_datapath", function: "==", value: .string(datapathUUID))
+            ]
+        ),
+    ],
+    monitorId: "flows",
+    since: resumePoint  // nil the first time
+)
+
+if !session.resumed {
+    // The server could not resume from `resumePoint`, so these updates are a
+    // complete snapshot: discard whatever state was carried across, don't merge.
+    cache.removeAll()
+}
+apply(session.initialUpdates)
+
+// Batched, because one notification is one OVSDB transaction — and its
+// transaction id is only a valid resume point once all of its rows are applied.
+for try await batch in SwiftOVN.monitorTableUpdates(monitorId: "flows") {
+    apply(batch.updates)
+    resumePoint = batch.lastTransactionId
+}
+
+// Narrow or widen the monitor without restarting it and resynchronizing:
+try await SwiftOVN.updateMonitorConditions(
+    monitorId: "flows",
+    conditions: ["Logical_Flow": [OVSDBCondition(column: "logical_datapath", function: "==", value: .string(otherDatapath))]]
+)
+```
+
+Two things to know about the updates these monitors deliver:
+
+- **A modify reports only what changed.** `update2`/`update3` describe a change
+  as one of `initial`, `insert`, `modify` or `delete` — read `update.kind` — and
+  a modify carries just the changed columns, in `update.diff`, with `old` and
+  `new` nil. That is deliberate: reconstructing the whole row would take a
+  client-side copy of every monitored row *and* the database schema, because a
+  modify expresses set- and map-valued columns as a difference against the old
+  value and a single-element set is indistinguishable from a scalar on the wire.
+  A consumer that needs whole rows keeps its own cache keyed by `update.uuid`,
+  seeded from `session.initialUpdates`, and applies `diff` with the column types
+  it knows.
+- **Falling back never quietly widens a filter.** Plain `monitor` cannot evaluate
+  a condition, so against a server that implements neither conditional method a
+  request carrying `whereConditions` fails rather than starting a monitor that
+  would deliver every row as though it matched. `session.method` says which method
+  was used, and `session.resumed` is false whenever the reply is a full snapshot.
+
 ### Waiting for a Write to Reach the Dataplane
 
 An OVSDB transaction returning success means the northbound database accepted
