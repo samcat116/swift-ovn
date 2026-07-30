@@ -1933,8 +1933,166 @@ public final class OVNManager: OVNManaging {
         logger.info("Deleted DHCP options: \(uuid)")
     }
     
+    // MARK: - Global Configuration and Sync Barrier
+
+    /// Reads the singleton `NB_Global` row, or nil if the database has none
+    /// (an empty database that ovn-northd has never connected to).
+    public func getNBGlobal() async throws(OVNManagerError) -> OVNNBGlobal? {
+        try requireNorthbound("NB_Global")
+
+        let rows = try await connection.selectAll(from: OVNTable.nbGlobal, in: database)
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNNBGlobal.self)
+    }
+
+    /// Sets the given `NB_Global.options` entries, leaving every other key
+    /// untouched (`ovn-nbctl set NB_Global . options:key=value`).
+    ///
+    /// The merge is not politeness: ovn-northd keeps generated state in this
+    /// map — `svc_monitor_mac`, `mac_prefix`, `e2e_base_mac` and friends are
+    /// written there on first run and never regenerated — so replacing the
+    /// column wholesale would silently reconfigure the deployment. Use
+    /// `removeNBGlobalOptions(_:)` to drop a key.
+    ///
+    /// An empty `options` is a no-op rather than an empty mutation.
+    public func updateNBGlobalOptions(_ options: [String: String]) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+        guard !options.isEmpty else { return }
+
+        let count = try await connection.mutate(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            mutations: OVSDBColumnTransactions.upsertMapEntries(options, column: "options")
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Updated NB_Global options: \(options.keys.sorted().joined(separator: ", "))")
+    }
+
+    /// Removes the given keys from `NB_Global.options`, whatever they map to.
+    /// Keys that are not set are ignored — a delete mutation reports the rows
+    /// it matched, not the entries it removed.
+    ///
+    /// An empty `keys` is a no-op rather than an empty mutation.
+    public func removeNBGlobalOptions(_ keys: [String]) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+        guard !keys.isEmpty else { return }
+
+        let count = try await connection.mutate(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            mutations: [OVSDBColumnTransactions.removeMapEntries(keys: keys, column: "options")]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Removed NB_Global options: \(keys.sorted().joined(separator: ", "))")
+    }
+
+    /// Turns IPsec encryption of chassis-to-chassis tunnel traffic on or off
+    /// (`NB_Global.ipsec`). ovn-northd copies the flag to `SB_Global.ipsec`,
+    /// where the per-chassis IPsec daemons pick it up.
+    public func setNBGlobalIPsec(_ enabled: Bool) async throws(OVNManagerError) {
+        try requireNorthbound("NB_Global")
+
+        let count = try await connection.update(
+            table: OVNTable.nbGlobal,
+            in: database,
+            where: [],
+            row: ["ipsec": .boolean(enabled)]
+        )
+
+        if count == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        logger.info("Set NB_Global ipsec: \(enabled)")
+    }
+
+    /// Increments `NB_Global.nb_cfg` and returns the value it reached.
+    ///
+    /// This is the barrier's starting point: every write this client committed
+    /// before the increment is ordered before it, so a later `sb_cfg`/`hv_cfg`
+    /// of at least the returned value means those writes have been processed.
+    /// `waitForNorthd(timeout:)` and `waitForHypervisors(timeout:)` do the
+    /// increment themselves; call this directly only to start a barrier you
+    /// intend to observe some other way.
+    @discardableResult
+    public func incrementNBCfg() async throws(OVNManagerError) -> Int {
+        try requireNorthbound("NB_Global")
+
+        let operations = OVSDBColumnTransactions.increment(column: "nb_cfg", in: OVNTable.nbGlobal)
+        let results = try await connection.transact(in: database, operations: operations)
+
+        guard results.count >= 2,
+              case .object(let mutateResult) = results[0],
+              case .number(let count)? = mutateResult["count"] else {
+            throw OVNManagerError.invalidResponse("Invalid mutate response format")
+        }
+        if Int(count) == 0 {
+            throw OVNManagerError.operationFailed("NB_Global row not found")
+        }
+
+        guard case .object(let selectResult) = results[1],
+              case .array(let rows)? = selectResult["rows"],
+              case .object(let row)? = rows.first,
+              case .number(let value)? = row["nb_cfg"] else {
+            throw OVNManagerError.invalidResponse("Invalid nb_cfg in increment response")
+        }
+
+        let target = Int(value)
+        logger.debug("Incremented NB_Global nb_cfg to \(target)")
+        return target
+    }
+
+    /// Increments `nb_cfg` and waits until ovn-northd reports having translated
+    /// that generation of the northbound database into southbound logical flows
+    /// (`sb_cfg >= nb_cfg`), returning the `sb_cfg` value observed. This is
+    /// `ovn-nbctl --wait=sb`.
+    ///
+    /// Northd having caught up does not mean any packet is forwarded
+    /// differently yet — the flows still have to reach the hypervisors, which
+    /// is what `waitForHypervisors(timeout:)` waits for. It does return much
+    /// sooner, and is the right barrier when what you need is that the
+    /// southbound database reflects your write.
+    ///
+    /// Throws `timeoutError` if the counter does not reach the target in time.
+    /// The wait is driven by a monitor on `NB_Global` for the duration of the
+    /// call, so the rows also appear on any `monitorUpdates()` stream open on
+    /// this manager.
+    @discardableResult
+    public func waitForNorthd(timeout: TimeAmount = .seconds(60)) async throws(OVNManagerError) -> Int {
+        let target = try await incrementNBCfg()
+        return try await waitForCfg(column: "sb_cfg", atLeast: target, timeout: timeout)
+    }
+
+    /// Increments `nb_cfg` and waits until every chassis has acknowledged that
+    /// generation (`hv_cfg >= nb_cfg`), returning the `hv_cfg` value observed.
+    /// This is `ovn-nbctl --wait=hv`, and the only barrier that means the
+    /// dataplane itself has caught up.
+    ///
+    /// `hv_cfg` is the minimum over all chassis, so a single hypervisor that is
+    /// down or partitioned holds it back indefinitely while the rest of the
+    /// deployment is fine — hence the timeout, and hence why a caller that only
+    /// needs the southbound database to be current should prefer
+    /// `waitForNorthd(timeout:)`.
+    ///
+    /// Throws `timeoutError` if the counter does not reach the target in time.
+    @discardableResult
+    public func waitForHypervisors(timeout: TimeAmount = .seconds(60)) async throws(OVNManagerError) -> Int {
+        let target = try await incrementNBCfg()
+        return try await waitForCfg(column: "hv_cfg", atLeast: target, timeout: timeout)
+    }
+
     // MARK: - Monitoring
-    
+
     public func startMonitoring(tables: [String]) async throws(OVNManagerError) -> String {
         var monitorRequests: [String: OVSDBMonitorRequest] = [:]
         
@@ -2057,11 +2215,146 @@ public final class OVNManager: OVNManaging {
         let rows = try await connection.selectAll(from: OVNTable.serviceMonitor, in: database)
         return try parseRows(rows, as: OVNServiceMonitor.self)
     }
+
+    /// Reads the singleton `SB_Global` row, or nil if the database has none.
+    ///
+    /// Its `nb_cfg` is the generation of northbound configuration ovn-northd
+    /// has published here — the value each chassis copies onwards once it has
+    /// installed the flows. `NB_Global.sb_cfg` is the same progress reported
+    /// back on the northbound side, which is what `waitForNorthd(timeout:)`
+    /// waits on, so this is a read for inspecting the southbound side rather
+    /// than a second way to run the barrier.
+    public func getSBGlobal() async throws(OVNManagerError) -> OVNSBGlobal? {
+        guard database == OVNDatabase.southbound else {
+            throw OVNManagerError.operationFailed("SB_Global operations require southbound database")
+        }
+
+        let rows = try await connection.selectAll(from: OVNTable.sbGlobal, in: database)
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNSBGlobal.self)
+    }
 }
 
 // MARK: - Helper Methods
 
 private extension OVNManager {
+    /// Rejects a northbound-only operation issued against another database.
+    /// `NB_Global` exists only in `OVN_Northbound` (the southbound row is
+    /// `SB_Global`), so without this the call would come back as an ovsdb
+    /// "unknown table" rejection naming neither database.
+    func requireNorthbound(_ description: String) throws(OVNManagerError) {
+        guard database == OVNDatabase.northbound else {
+            throw OVNManagerError.operationFailed("\(description) operations require northbound database")
+        }
+    }
+
+    /// Waits for one of `NB_Global`'s sequence-number columns to reach `target`,
+    /// returning the value observed.
+    ///
+    /// Driven by a monitor rather than by polling or an OVSDB `wait` op: a
+    /// `wait` can only test `==`/`!=` against literal column values, and these
+    /// counters are compared with `>=`. Equality would be wrong as well as
+    /// inexpressible — `sb_cfg` follows whatever `nb_cfg` currently is, so
+    /// another client's increment can carry it straight past `target`.
+    ///
+    /// The monitor is started *after* the increment that set `target`, so its
+    /// initial update already answers the case where northd (or the last
+    /// hypervisor) got there first and no further update is coming.
+    func waitForCfg(column: String, atLeast target: Int, timeout: TimeAmount) async throws(OVNManagerError) -> Int {
+        let monitorId = UUID().uuidString
+        // Create the stream before starting the monitor, or an update that
+        // lands in between is lost (see `OVSDBConnection.monitorUpdates`).
+        let updates = connection.monitorUpdates(monitorId: monitorId)
+
+        let (_, initialUpdates) = try await connection.startMonitoring(
+            database: database,
+            tables: [OVNTable.nbGlobal: OVSDBMonitorRequest(columns: [column])],
+            monitorId: monitorId
+        )
+
+        let outcome: Result<Int, OVNManagerError>
+        if let initial = Self.cfgValue(of: column, in: initialUpdates), initial >= target {
+            outcome = .success(initial)
+        } else {
+            do {
+                let reached = try await Self.firstCfgValue(of: column, atLeast: target, in: updates, timeout: timeout)
+                outcome = .success(reached)
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+
+        // Best effort: the wait is over either way, and a monitor that could
+        // not be cancelled (a closed connection, most likely) must not mask
+        // what the wait actually produced.
+        try? await connection.stopMonitoring(monitorId: monitorId)
+        return try outcome.get()
+    }
+
+    /// The column's value in the first `NB_Global` update that carries it. A
+    /// monitor's modify update only carries the columns that changed, so an
+    /// update without this one says nothing about it.
+    static func cfgValue(of column: String, in update: OVSDBUpdate) -> Int? {
+        guard update.table == OVNTable.nbGlobal,
+              case .number(let value)? = update.new?[column] else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    static func cfgValue(of column: String, in updates: [OVSDBUpdate]) -> Int? {
+        for update in updates {
+            if let value = cfgValue(of: column, in: update) { return value }
+        }
+        return nil
+    }
+
+    /// The first value of `column` on the stream that is at least `target`,
+    /// or `timeoutError` if none arrives in time.
+    ///
+    /// The timeout is a sibling task rather than a deadline checked between
+    /// updates, because the interesting failure is exactly the one where *no*
+    /// update arrives: a chassis that is down never advances `hv_cfg`, so the
+    /// loop would otherwise wait forever inside `next()`.
+    static func firstCfgValue(
+        of column: String,
+        atLeast target: Int,
+        in updates: AsyncThrowingStream<OVSDBUpdate, Error>,
+        timeout: TimeAmount
+    ) async throws(OVNManagerError) -> Int {
+        let reached: Int?
+        do {
+            reached = try await withThrowingTaskGroup(of: Int?.self) { group in
+                group.addTask {
+                    for try await update in updates {
+                        guard let value = cfgValue(of: column, in: update), value >= target else { continue }
+                        return value
+                    }
+                    // The stream finished without the counter getting there:
+                    // the connection closed under us. Reported as a timeout
+                    // rather than invented as a success.
+                    return nil
+                }
+                group.addTask {
+                    try await Task.sleep(for: .nanoseconds(max(0, timeout.nanoseconds)))
+                    return nil
+                }
+
+                // Whichever finishes first decides; the loser is cancelled,
+                // which unsubscribes the stream consumer.
+                defer { group.cancelAll() }
+                return try await group.next() ?? nil
+            }
+        } catch {
+            throw OVNManagerError.wrapping(error) {
+                .connectionFailed("Monitor stream failed while waiting for \(column): \($0)")
+            }
+        }
+
+        guard let reached else { throw OVNManagerError.timeoutError }
+        return reached
+    }
+
     /// Looks up a row's _uuid via a narrow select so existence checks don't
     /// fetch and decode entire rows. Returns nil when no row matches.
     func rowUUID(in table: String, where condition: OVSDBCondition) async throws(OVNManagerError) -> String? {

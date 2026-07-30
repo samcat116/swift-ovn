@@ -709,6 +709,91 @@ struct JSONRPCClientMockTests {
         #expect(deleteCondition[2] as? [String] == ["uuid", uuid])
     }
 
+    /// The sync barrier's first half: bumping nb_cfg is useless unless the
+    /// caller learns the value it reached, and only a select in the *same*
+    /// transaction can tell them — another client's increment could land
+    /// between two transactions.
+    @Test("increment mutates by one and selects the column back")
+    func incrementTransactionWireFormat() throws {
+        let operations = OVSDBColumnTransactions.increment(column: "nb_cfg", in: "NB_Global")
+
+        let json = try encodeOperations(operations)
+        #expect(json.count == 2)
+
+        // Op 0: the increment. An empty where matches the one row of a
+        // maxRows: 1 table.
+        #expect(json[0]["op"] as? String == "mutate")
+        #expect(json[0]["table"] as? String == "NB_Global")
+        #expect((json[0]["where"] as? [Any])?.count == 0)
+        let mutation = try #require(
+            (json[0]["mutations"] as? [[Any]])?.first,
+            "Expected one [column, mutator, value] mutation"
+        )
+        #expect(mutation.count == 3)
+        #expect(mutation[0] as? String == "nb_cfg")
+        #expect(mutation[1] as? String == "+=")
+        #expect(mutation[2] as? Int == 1)
+
+        // Op 1: the read-back, narrowed to the counter.
+        #expect(json[1]["op"] as? String == "select")
+        #expect(json[1]["table"] as? String == "NB_Global")
+        #expect(json[1]["columns"] as? [String] == ["nb_cfg"])
+        #expect((json[1]["where"] as? [Any])?.count == 0)
+    }
+
+    /// An `insert` into a map column ignores keys that already exist, so an
+    /// upsert has to delete the keys first — and both mutations have to belong
+    /// to the same mutate op, or a reader sees the column without them.
+    @Test("upsertMapEntries deletes the keys before inserting the pairs")
+    func upsertMapEntriesWireFormat() throws {
+        let mutations = OVSDBColumnTransactions.upsertMapEntries(
+            ["mac_prefix": "0a:5c:1f", "northd_probe_interval": "5000"],
+            column: "options"
+        )
+
+        let data = try JSONEncoder().encode(mutations)
+        let json = try #require(
+            JSONSerialization.jsonObject(with: data) as? [[Any]],
+            "Mutations did not encode as an array of arrays"
+        )
+        #expect(json.count == 2)
+
+        // Mutation 0: delete by key set — a set, not a map, so an entry is
+        // removed whatever it maps to.
+        #expect(json[0][0] as? String == "options")
+        #expect(json[0][1] as? String == "delete")
+        let deleted = try #require(json[0][2] as? [Any], "Expected a tagged set of keys")
+        #expect(deleted[0] as? String == "set")
+        // Dictionary iteration order is not stable across processes.
+        #expect((deleted[1] as? [String])?.sorted() == ["mac_prefix", "northd_probe_interval"])
+
+        // Mutation 1: insert the pairs, which now land because the keys are gone.
+        #expect(json[1][0] as? String == "options")
+        #expect(json[1][1] as? String == "insert")
+        let inserted = try #require(json[1][2] as? [Any], "Expected a tagged map of pairs")
+        #expect(inserted[0] as? String == "map")
+        let pairs = try #require(inserted[1] as? [[String]], "Expected [[key, value], ...]")
+        #expect(pairs.sorted { $0[0] < $1[0] } == [["mac_prefix", "0a:5c:1f"], ["northd_probe_interval", "5000"]])
+    }
+
+    /// A single key still gets the tagged `["set", [...]]` spelling: the bare
+    /// atom RFC 7047 also allows for a one-element set would read as a
+    /// string-valued delete.
+    @Test("removeMapEntries deletes a single key as a tagged set")
+    func removeMapEntriesWireFormat() throws {
+        let mutation = OVSDBColumnTransactions.removeMapEntries(keys: ["mac_prefix"], column: "options")
+
+        let data = try JSONEncoder().encode(mutation)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [Any], "Expected a 3-element array")
+
+        #expect(json.count == 3)
+        #expect(json[0] as? String == "options")
+        #expect(json[1] as? String == "delete")
+        let keys = try #require(json[2] as? [Any], "Expected a tagged set of keys")
+        #expect(keys[0] as? String == "set")
+        #expect(keys[1] as? [String] == ["mac_prefix"])
+    }
+
     @Test("An insert's UUID is extracted from the right result, and only from there")
     func insertResultUUIDExtraction() throws {
         let results: [JSONValue] = [
