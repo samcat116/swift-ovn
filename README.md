@@ -166,6 +166,8 @@ The package includes comprehensive Swift models for:
 - `OVNQoS` - Logical switch rate limiting and DSCP marking
 - `OVNMeter` / `OVNMeterBand` - Named rate limiters, e.g. for ACL log rate limiting (`OVNACL.meter`)
 - `OVNDHCPOptions` - DHCP configuration
+- `OVNDNS` - DNS records served to a logical switch's ports
+- `OVNBFD` - BFD sessions monitoring a static route's or policy's next hop
 
 #### OVS Models
 - `OVSBridge` - Open vSwitch bridges

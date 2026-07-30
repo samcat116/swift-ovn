@@ -156,6 +156,20 @@ public protocol OVNManaging: Sendable {
     func updateQoSRule(uuid: String, _ qos: OVNQoS) async throws(OVNManagerError)
     func deleteQoSRule(uuid: String) async throws(OVNManagerError)
 
+    // BFD Operations
+    func getBFDSessions() async throws(OVNManagerError) -> [OVNBFD]
+    func createBFDSession(_ bfd: OVNBFD) async throws(OVNManagerError) -> String
+    func updateBFDSession(uuid: String, _ bfd: OVNBFD) async throws(OVNManagerError)
+    func deleteBFDSession(uuid: String) async throws(OVNManagerError)
+
+    // DNS Operations
+    func getDNS() async throws(OVNManagerError) -> [OVNDNS]
+    func createDNS(_ dns: OVNDNS) async throws(OVNManagerError) -> String
+    func updateDNS(uuid: String, _ dns: OVNDNS) async throws(OVNManagerError)
+    func deleteDNS(uuid: String) async throws(OVNManagerError)
+    func attachDNS(uuid: String, toSwitch switchName: String) async throws(OVNManagerError)
+    func detachDNS(uuid: String, fromSwitch switchName: String) async throws(OVNManagerError)
+
     // Meter Operations
     func getMeters() async throws(OVNManagerError) -> [OVNMeter]
     func getMeter(named name: String) async throws(OVNManagerError) -> OVNMeter?
@@ -224,9 +238,11 @@ public enum OVNTable {
     /// The Northbound `QoS` table (`OVNQoS`), not the identically named
     /// Open_vSwitch one (`OVSQoS`).
     public static let qos = "QoS"
+    public static let bfd = "BFD"
+    public static let dns = "DNS"
     public static let meter = "Meter"
     public static let meterBand = "Meter_Band"
-    
+
     // Southbound tables
     public static let chassis = "Chassis"
     public static let chassisPrivate = "Chassis_Private"
