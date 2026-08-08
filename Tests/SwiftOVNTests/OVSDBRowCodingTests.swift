@@ -2615,6 +2615,25 @@ struct OVSDBRowEncoderTests {
         #expect(decoded.external_ids == dns.external_ids)
     }
 
+    /// Record keys reach the server byte for byte, uppercase included.
+    ///
+    /// This pins a deliberate non-behaviour. An uppercase key is a silent
+    /// misconfiguration — `ovn-northd` lowercases each record *value* on the
+    /// way to the Southbound copy but passes the *key* through, while
+    /// `ovn-controller` lowercases the query name before looking it up, so a
+    /// key with any uppercase character can never match — but normalizing here
+    /// would rewrite a caller's data behind their back, and a row whose keys
+    /// silently differ from what was passed in is worse than one that is
+    /// documented to need lowercasing. See `OVNDNS.records`.
+    @Test("A DNS record set's keys are sent verbatim, not lowercased")
+    func dnsRecordKeysAreNotNormalized() throws {
+        let dns = OVNDNS(records: ["VM1.OVN.ORG": "10.0.0.11"])
+
+        let row = try OVSDBRowEncoder.makeRow(from: dns, hints: .ovn)
+
+        #expect(row["records"] == wireStringMap(["VM1.OVN.ORG": "10.0.0.11"]))
+    }
+
     /// `Logical_Switch.dns_records` is a reference set, so a switch written
     /// with DNS rows attached must send UUID atoms — the same treatment
     /// `load_balancer` and `acls` get.

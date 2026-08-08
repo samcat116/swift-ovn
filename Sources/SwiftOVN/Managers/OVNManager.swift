@@ -1806,6 +1806,17 @@ public final class OVNManager: OVNManaging {
         return try parseRows(rows, as: OVNDNS.self)
     }
 
+    /// One row of the Northbound `DNS` table, or nil if no row has that UUID.
+    /// `DNS` has no name column and no index, so the UUID handed back by
+    /// `createDNS` is the only way to name a particular row.
+    public func getDNS(uuid: String) async throws(OVNManagerError) -> OVNDNS? {
+        let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
+        let rows = try await connection.select(from: OVNTable.dns, in: database, where: [condition])
+
+        guard let firstRow = rows.first else { return nil }
+        return try parseRow(firstRow, as: OVNDNS.self)
+    }
+
     /// Creates a DNS record set. `DNS` is a root table, so the row survives
     /// unattached — `attachDNS(uuid:toSwitch:)` is what puts it in front of a
     /// switch's queries.
@@ -1825,6 +1836,46 @@ public final class OVNManager: OVNManaging {
         return uuidValue
     }
 
+    /// Creates a DNS record set and attaches it to the named logical switch in
+    /// a single OVSDB transaction.
+    ///
+    /// Unlike the non-root children this package creates attached
+    /// (`Logical_Router_Port`, `Meter_Band`, …), the atomicity here is not
+    /// about garbage collection: `DNS` is a root table, so a row created on
+    /// its own is kept rather than collected, and create-then-attach is a
+    /// legitimate two-step. What one transaction buys is that the two steps
+    /// cannot come apart — a switch that was deleted between them leaves no
+    /// orphan row behind for a later `getDNS()` to trip over, and the records
+    /// become visible to the switch at the instant they exist.
+    ///
+    /// The pre-check is only there for a better error message.
+    /// `Logical_Switch.name` has no index, so a switch deleted after it still
+    /// races; the `wait` op `insertAttached` emits closes that window by
+    /// aborting the transaction.
+    public func createDNS(_ dns: OVNDNS, attachedToSwitch switchName: String) async throws(OVNManagerError) -> String {
+        let switchCondition = OVSDBCondition(column: "name", function: "==", value: .string(switchName))
+
+        guard try await rowUUID(in: OVNTable.logicalSwitch, where: switchCondition) != nil else {
+            throw OVNManagerError.operationFailed("Logical switch not found: \(switchName)")
+        }
+
+        let uuidValue = try await connection.insertAttached(
+            into: OVNTable.dns,
+            in: database,
+            row: try createRow(from: dns),
+            uuidName: "new_dns",
+            parentTable: OVNTable.logicalSwitch,
+            parentColumn: "dns_records",
+            parentCondition: switchCondition
+        )
+
+        logger.info("Created DNS record set with \(dns.records.count) record(s) on switch: \(switchName)")
+        return uuidValue
+    }
+
+    /// Replaces the row's columns. A nil property is left untouched, but
+    /// `records` is not optional — an update always rewrites the whole map, so
+    /// changing one name means passing the others back with it.
     public func updateDNS(uuid: String, _ dns: OVNDNS) async throws(OVNManagerError) {
         let condition = OVSDBCondition(column: "_uuid", function: "==", value: .array([.string("uuid"), .string(uuid)]))
         let row = try createRow(from: dns)

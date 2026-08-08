@@ -192,7 +192,9 @@ public protocol OVNManaging: Sendable {
 
     // DNS Operations
     func getDNS() async throws(OVNManagerError) -> [OVNDNS]
+    func getDNS(uuid: String) async throws(OVNManagerError) -> OVNDNS?
     func createDNS(_ dns: OVNDNS) async throws(OVNManagerError) -> String
+    func createDNS(_ dns: OVNDNS, attachedToSwitch switchName: String) async throws(OVNManagerError) -> String
     func updateDNS(uuid: String, _ dns: OVNDNS) async throws(OVNManagerError)
     func deleteDNS(uuid: String) async throws(OVNManagerError)
     func attachDNS(uuid: String, toSwitch switchName: String) async throws(OVNManagerError)
